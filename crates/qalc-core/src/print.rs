@@ -187,7 +187,18 @@ fn print_sub(m: &MathStructure, po: &PrintOptions, depth: usize) -> String {
         MathStructure::Comparison { left, op, right } => {
             let l = print_operand(left, po, depth, m);
             let r = print_operand(right, po, depth, m);
-            format!("{l} {} {r}", comparison_sign(*op, po))
+            let sign = if *op == ComparisonType::Equals
+                && po.use_unicode_signs
+                && is_approximate(right, 0)
+            {
+                // MathStructure-print.cc:4666 — an equality whose value is
+                // approximate prints `≈` (`SIGN_ALMOST_EQUAL`), which is how
+                // the numeric solutions of `x^(5x) = 5` are shown.
+                "≈"
+            } else {
+                comparison_sign(*op, po)
+            };
+            format!("{l} {sign} {r}")
         }
         MathStructure::BitwiseAnd(v) => print_infix(v, " & ", po, depth, m),
         MathStructure::BitwiseOr(v) => print_infix(v, " | ", po, depth, m),
@@ -534,7 +545,11 @@ fn print_multiplication(factors: &[MathStructure], po: &PrintOptions, depth: usi
     } else {
         d_str
     };
-    let n_str = if numer.len() > 1 && numer.iter().any(is_additive) {
+    // A numerator that itself needed a multiplication sign is parenthesized
+    // (reference: `(pi * n) / 2`).
+    let n_str = if numer.len() > 1
+        && (numer.iter().any(is_additive) || needs_denominator_parens(&n_str))
+    {
         format!("({n_str})")
     } else {
         n_str
@@ -690,6 +705,7 @@ fn is_displayed_fraction(m: &MathStructure, po: &PrintOptions) -> bool {
 
 fn join_factors(factors: &[MathStructure], po: &PrintOptions, depth: usize) -> String {
     let mut out = String::new();
+    let mut prev_par = false;
     for (i, f) in factors.iter().enumerate() {
         let par = needs_parenthesis(f, &MathStructure::Multiplication(Vec::new()))
             || (factors.len() > 1 && is_displayed_fraction(f, po));
@@ -702,7 +718,7 @@ fn join_factors(factors: &[MathStructure], po: &PrintOptions, depth: usize) -> S
             }
         };
         if i > 0 {
-            match multiplication_sign(&factors[i - 1], f, par, po) {
+            match multiplication_sign(&factors[i - 1], f, par, prev_par, po) {
                 MulSign::None => {}
                 MulSign::Space => out.push(' '),
                 MulSign::Operator => {
@@ -715,6 +731,7 @@ fn join_factors(factors: &[MathStructure], po: &PrintOptions, depth: usize) -> S
             }
         }
         out.push_str(&text);
+        prev_par = par;
     }
     out
 }
@@ -736,6 +753,7 @@ fn multiplication_sign(
     prev: &MathStructure,
     this: &MathStructure,
     this_par: bool,
+    prev_par: bool,
     po: &PrintOptions,
 ) -> MulSign {
     if !po.short_multiplication {
@@ -759,6 +777,18 @@ fn multiplication_sign(
     if renders_as_call(this) {
         return MulSign::Operator;
     }
+    // `(a)*b`: after a parenthesized factor only an *unknown* juxtaposes
+    // (`(3/2)x`); a known constant keeps the operator (`(2/3) * pi`).
+    if prev_par {
+        if is_constant_symbol(this) {
+            return MulSign::Operator;
+        }
+        return match name_len(this) {
+            Some(l) if l > 1 => MulSign::Space,
+            Some(_) => MulSign::None,
+            None => MulSign::Operator,
+        };
+    }
     match prev {
         // `a^b*c` needs the operator when the power prints flat.
         MathStructure::Power { .. } => MulSign::Operator,
@@ -778,7 +808,39 @@ fn multiplication_sign(
         // explicit operator for both a bare number and a power over a
         // numeric base.
         MathStructure::Number(_) if starts_with_digit(this) => MulSign::Operator,
-        _ => MulSign::None,
+        // `neededMultiplicationSign`, the `STRUCT_SYMBOLIC`/`STRUCT_VARIABLE`
+        // branch (MathStructure-print.cc:3516): a name longer than one
+        // character keeps a separator — `2 pi`, `pi * n`, `pi * x^2` — while
+        // single-letter names still juxtapose (`2x`, `xy`, `ex`).
+        MathStructure::Number(_) => match name_len(this) {
+            Some(l) if l > 1 => MulSign::Space,
+            _ => MulSign::None,
+        },
+        _ => match (name_len(prev), name_len(this)) {
+            (Some(p), Some(t)) => {
+                if p > 1 || t > 1 || prev.equals(this) {
+                    MulSign::Operator
+                } else {
+                    MulSign::None
+                }
+            }
+            _ => MulSign::None,
+        },
+    }
+}
+
+/// `pi` and `e` are `STRUCT_VARIABLE` in the C++, not unknowns.
+fn is_constant_symbol(m: &MathStructure) -> bool {
+    matches!(m, MathStructure::Symbolic(s) if s == "pi" || s == "e")
+}
+
+/// `namelen` for the node types that carry a name: a bare symbol, or a power
+/// of one (`MathStructure-print.cc:3488` delegates a power to its base).
+fn name_len(m: &MathStructure) -> Option<usize> {
+    match m {
+        MathStructure::Symbolic(s) => Some(s.chars().count()),
+        MathStructure::Power { base, .. } => name_len(base),
+        _ => None,
     }
 }
 
@@ -914,6 +976,19 @@ fn needs_denominator_parens(s: &str) -> bool {
     false
 }
 
+/// `MathStructure::isApproximate()` — true when any number below `m` carries
+/// the approximate flag. The depth cap mirrors the printer's own recursion
+/// limit and keeps a cyclic structure from looping.
+fn is_approximate(m: &MathStructure, depth: usize) -> bool {
+    if depth > 32 {
+        return false;
+    }
+    if let MathStructure::Number(n) = m {
+        return n.is_approximate();
+    }
+    (0..m.size()).any(|i| m.get(i).is_some_and(|c| is_approximate(c, depth + 1)))
+}
+
 fn comparison_sign(op: ComparisonType, po: &PrintOptions) -> &'static str {
     match op {
         ComparisonType::Equals => "=",
@@ -1006,6 +1081,7 @@ fn function_name(id: crate::ids::FunctionId) -> &'static str {
             .or_else(|| crate::differentiate::function_name(other))
             .or_else(|| crate::limit::function_name(other))
             .or_else(|| crate::solve::function_name(other))
+            .or_else(|| crate::explog::function_name(other))
             .or_else(|| crate::matrix::function_name(other))
             .or_else(|| crate::geometry::function_name(other))
             .or_else(|| crate::strings::function_name(other))

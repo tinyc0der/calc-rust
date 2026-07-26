@@ -40,9 +40,17 @@ fn multiplication_rank(m: &MathStructure) -> u8 {
     }
     match m {
         MathStructure::Number(_) => 0,
+        // `pi` and `e` are `STRUCT_VARIABLE` in the C++, not unknowns, and
+        // sort ahead of functions and of powers of unknowns (reference:
+        // `pi * zeta(x)`, `pi * x^2`, `pi * ln(3)`, `pi * n`) — but after a
+        // numeric radical (`sqrt(2) * pi`).
+        MathStructure::Symbolic(s) if s == "pi" || s == "e" => 2,
         // Bare symbols are "unknowns" and go last (before units).
-        MathStructure::Symbolic(_) => 3,
-        _ => 1,
+        MathStructure::Symbolic(_) => 4,
+        // A power of a number is a plain value (`sqrt(2)`); a power of an
+        // unknown is not.
+        MathStructure::Power { base, .. } if base.is_number() => 1,
+        _ => 3,
     }
 }
 

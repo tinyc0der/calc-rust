@@ -11,10 +11,48 @@ pub const DEFAULT_PRECISION: i32 = 10;
 /// log2(10) constant used by libqalculate's `BIT_PRECISION` macro.
 pub const LOG2_10: f64 = 3.3219281;
 
+/// `IntervalCalculation` (`includes.h`) — how uncertainties propagate.
+///
+/// `/set ic <n>` in the CLI. The default is the variance formula, which
+/// carries an uncertainty alongside the value and pushes it through each
+/// operation by that operation's derivative; interval arithmetic instead
+/// widens the value itself into an interval and lets ordinary interval
+/// propagation do the work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntervalCalculation {
+    None,
+    VarianceFormula,
+    IntervalArithmetic,
+    SimpleIntervalArithmetic,
+}
+
+impl IntervalCalculation {
+    pub fn from_i32(v: i32) -> Option<IntervalCalculation> {
+        Some(match v {
+            0 => IntervalCalculation::None,
+            1 => IntervalCalculation::VarianceFormula,
+            2 => IntervalCalculation::IntervalArithmetic,
+            3 => IntervalCalculation::SimpleIntervalArithmetic,
+            _ => return None,
+        })
+    }
+}
+
 thread_local! {
     static PRECISION: Cell<i32> = const { Cell::new(DEFAULT_PRECISION) };
     static INTERVAL_ARITHMETIC: Cell<bool> = const { Cell::new(true) };
+    static INTERVAL_CALCULATION: Cell<IntervalCalculation> =
+        const { Cell::new(IntervalCalculation::VarianceFormula) };
     static CONSTS: RefCell<Option<Consts>> = const { RefCell::new(None) };
+}
+
+/// `EvaluationOptions::interval_calculation`.
+pub fn interval_calculation() -> IntervalCalculation {
+    INTERVAL_CALCULATION.with(|i| i.get())
+}
+
+pub fn set_interval_calculation(v: IntervalCalculation) {
+    INTERVAL_CALCULATION.with(|i| i.set(v));
 }
 
 /// Current global decimal precision (`PRECISION` macro).

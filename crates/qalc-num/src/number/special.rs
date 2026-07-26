@@ -193,7 +193,7 @@ fn stirling_ln_gamma(z: &BigFloat, wp: usize, cc: &mut Consts) -> BigFloat {
         let coef = bigfloat_from_ratio(b.numer(), &den, wp, RM);
         let term = coef.mul(&zpow, wp, RM);
         let at = term.abs();
-        if at.cmp(&prev) == Some(1) {
+        if matches!(at.cmp(&prev), Some(c) if c > 0) {
             // Past the smallest term.  `z` is chosen so the minimum term is
             // far below 2^−wp, so this counts as converged.
             converged = true;
@@ -222,7 +222,7 @@ fn ln_gamma_pos(x: &BigFloat, wp: usize, cc: &mut Consts) -> BigFloat {
     let mut z = x.clone();
     let mut prod = one.clone();
     let mut steps = 0i64;
-    while z.cmp(&tf) == Some(-1) {
+    while matches!(z.cmp(&tf), Some(c) if c < 0) {
         prod = prod.mul(&z, wp, RM);
         z = z.add(&one, wp, RM);
         steps += 1;
@@ -290,7 +290,7 @@ fn digamma_pos(x: &BigFloat, wp: usize, cc: &mut Consts) -> BigFloat {
     let mut z = x.clone();
     let mut shift = f_i(0, wp);
     let mut steps = 0i64;
-    while z.cmp(&tf) == Some(-1) {
+    while matches!(z.cmp(&tf), Some(c) if c < 0) {
         shift = shift.add(&one.div(&z, wp, RM), wp, RM);
         z = z.add(&one, wp, RM);
         steps += 1;
@@ -314,7 +314,7 @@ fn digamma_pos(x: &BigFloat, wp: usize, cc: &mut Consts) -> BigFloat {
         let coef = bigfloat_from_ratio(b.numer(), &den, wp, RM);
         let term = coef.mul(&zpow, wp, RM);
         let at = term.abs();
-        if at.cmp(&prev) == Some(1) {
+        if matches!(at.cmp(&prev), Some(c) if c > 0) {
             converged = true;
             break;
         }
@@ -385,7 +385,7 @@ fn erf_series(x: &BigFloat, wp: usize, cc: &mut Consts) -> BigFloat {
         sum = sum.add(&term, wp, RM);
         let at = term.abs();
         // Require geometric decay ≤ ½ so the discarded tail is ≤ 2·term.
-        if at.mul(&f_i(2, wp), wp, RM).cmp(&prev) != Some(1) && negligible(&at, &sum, wp) {
+        if !matches!(at.mul(&f_i(2, wp), wp, RM).cmp(&prev), Some(c) if c > 0) && negligible(&at, &sum, wp) {
             break;
         }
         prev = at;
@@ -417,7 +417,7 @@ fn erfc_asymptotic(x: &BigFloat, wp: usize, cc: &mut Consts) -> BigFloat {
             .div(&two_x2, wp, RM)
             .neg();
         let at = term.abs();
-        if at.cmp(&prev) == Some(1) {
+        if matches!(at.cmp(&prev), Some(c) if c > 0) {
             break; // past the smallest term
         }
         sum = sum.add(&term, wp, RM);
@@ -476,7 +476,7 @@ fn erfi_float(x: &BigFloat, wp: usize, cc: &mut Consts) -> BigFloat {
         let t = term.div(&f_i((2 * k + 1) as i64, wp), wp, RM);
         sum = sum.add(&t, wp, RM);
         let at = t.abs();
-        if at.mul(&f_i(2, wp), wp, RM).cmp(&prev) != Some(1) && negligible(&at, &sum, wp) {
+        if !matches!(at.mul(&f_i(2, wp), wp, RM).cmp(&prev), Some(c) if c > 0) && negligible(&at, &sum, wp) {
             break;
         }
         prev = at;
@@ -543,7 +543,7 @@ fn zeta_float(s: &BigFloat, wp: usize, cc: &mut Consts) -> BigFloat {
     };
     let wp = wp + extra;
     let half = BigFloat::from_f64(0.5, wp);
-    if s.cmp(&half) != Some(-1) {
+    if !matches!(s.cmp(&half), Some(c) if c < 0) {
         return zeta_borwein(s, wp, cc);
     }
     // Functional equation: ζ(s) = 2^s π^{s−1} sin(πs/2) Γ(1−s) ζ(1−s).
@@ -582,10 +582,10 @@ fn ei_float(x: &BigFloat, wp: usize, cc: &mut Consts) -> BigFloat {
         let t = tk.div(&f_i(k as i64, wp), wp, RM);
         sum = sum.add(&t, wp, RM);
         let at = t.abs();
-        if at.cmp(&maxterm) == Some(1) {
+        if matches!(at.cmp(&maxterm), Some(c) if c > 0) {
             maxterm = at.clone();
         }
-        if at.mul(&f_i(2, wp), wp, RM).cmp(&prev) != Some(1) && negligible(&at, &maxterm, wp) {
+        if !matches!(at.mul(&f_i(2, wp), wp, RM).cmp(&prev), Some(c) if c > 0) && negligible(&at, &maxterm, wp) {
             break;
         }
         prev = at;
@@ -614,10 +614,10 @@ fn si_float(x: &BigFloat, wp: usize, _cc: &mut Consts) -> BigFloat {
         term = term.mul(&mx2, wp, RM).mul(&num, wp, RM).div(&den, wp, RM);
         sum = sum.add(&term, wp, RM);
         let at = term.abs();
-        if at.cmp(&maxterm) == Some(1) {
+        if matches!(at.cmp(&maxterm), Some(c) if c > 0) {
             maxterm = at.clone();
         }
-        if at.mul(&f_i(2, wp), wp, RM).cmp(&prev) != Some(1) && negligible(&at, &maxterm, wp) {
+        if !matches!(at.mul(&f_i(2, wp), wp, RM).cmp(&prev), Some(c) if c > 0) && negligible(&at, &maxterm, wp) {
             break;
         }
         prev = at;
@@ -644,10 +644,10 @@ fn ci_float(x: &BigFloat, wp: usize, cc: &mut Consts) -> BigFloat {
         term = term.mul(&mx2, wp, RM).mul(&num, wp, RM).div(&den, wp, RM);
         sum = sum.add(&term, wp, RM);
         let at = term.abs();
-        if at.cmp(&maxterm) == Some(1) {
+        if matches!(at.cmp(&maxterm), Some(c) if c > 0) {
             maxterm = at.clone();
         }
-        if at.mul(&f_i(2, wp), wp, RM).cmp(&prev) != Some(1) && negligible(&at, &maxterm, wp) {
+        if !matches!(at.mul(&f_i(2, wp), wp, RM).cmp(&prev), Some(c) if c > 0) && negligible(&at, &maxterm, wp) {
             break;
         }
         prev = at;
@@ -686,7 +686,7 @@ impl Number {
         if lo.is_nan() || hi.is_nan() {
             return false;
         }
-        if lo.cmp(&hi) == Some(1) {
+        if matches!(lo.cmp(&hi), Some(c) if c > 0) {
             std::mem::swap(&mut lo, &mut hi);
         }
         let (lower, upper) = if context::create_interval() {
@@ -986,6 +986,20 @@ impl Number {
 
     /// `expint()` — the exponential integral `Ei(x)` (MPFR's `mpfr_eint`).
     pub fn expint(&mut self) -> bool {
+        // d(Ei x)/dx = e^x / x.
+        if self.unc.is_some() {
+            return self.uncertain_unary(
+                |x| {
+                    let mut d = x.clone();
+                    (d.exp() && d.divide(x)).then_some(d)
+                },
+                Number::expint_impl,
+            );
+        }
+        self.expint_impl()
+    }
+
+    fn expint_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             return false; // TODO(port): complex Ei
         }

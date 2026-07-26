@@ -117,6 +117,11 @@ pub fn calculate_function_exact(m: &mut MathStructure, exact: bool) -> bool {
     if crate::solve::calculate_function(m) {
         return true;
     }
+    // `lambertw`/`powertower`/`allroots` have their own id block; `allroots`
+    // returns a vector, so it must run before `handle_vector`.
+    if crate::explog::calculate_function(m, exact) {
+        return true;
+    }
     // Geometry is numeric-only but has its own id block and formulas.
     if crate::geometry::calculate_function(m) {
         return true;
@@ -545,6 +550,7 @@ pub fn function_id_for_name(name: &str) -> Option<FunctionId> {
                 .or_else(|| crate::limit::function_id_for_name(name))
                 .or_else(|| crate::polynomial::function_id_for_name(name))
                 .or_else(|| crate::solve::function_id_for_name(name))
+                .or_else(|| crate::explog::function_id_for_name(name))
                 .or_else(|| crate::geometry::function_id_for_name(name))
                 .or_else(|| crate::strings::function_id_for_name(name))
                 .or_else(|| crate::stats::function_id_for_name(name))

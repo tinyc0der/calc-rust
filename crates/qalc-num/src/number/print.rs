@@ -238,6 +238,14 @@ impl Number {
 
     /// `Number::print(po)`.
     pub fn print(&self, po: &PrintOptions) -> String {
+        // A variance-formula uncertainty is only a display concern once the
+        // calculation is over: fold it into the value as a symmetric interval
+        // and print that, so every interval display mode sees it.
+        if self.unc.is_some() {
+            let mut n = self.clone();
+            n.resolve_variance_uncertainty();
+            return n.print(po);
+        }
         // Complex numbers: join real and imaginary parts.
         if self.has_imaginary_part() {
             return self.print_complex(po);
@@ -273,7 +281,29 @@ impl Number {
         let im = self.imaginary_part();
         let has_re = !re.is_zero();
         let mut str = String::new();
-        let im_neg = im.real_part_is_negative();
+        let mut im_neg = im.real_part_is_negative();
+        let mut im_abs = im.clone();
+        if im_neg {
+            im_abs.negate();
+        }
+        let mut im_str = if im_abs.is_one() {
+            String::new()
+        } else {
+            im_abs.print(po)
+        };
+        // An interval that straddles zero is neither positive nor negative,
+        // but the value it *displays* still has a sign — `86±87 - 0.29±0.30i`
+        // in the reference. Take the sign from the rendering.
+        if !im_neg && (im_str.starts_with('-') || im_str.starts_with('\u{2212}')) {
+            im_neg = true;
+            im_abs = im;
+            im_abs.negate();
+            im_str = if im_abs.is_one() {
+                String::new()
+            } else {
+                im_abs.print(po)
+            };
+        }
         if has_re {
             str.push_str(&re.print(po));
             if im_neg {
@@ -284,16 +314,8 @@ impl Number {
         } else if im_neg {
             str.push('-');
         }
-        let mut im_abs = im;
-        if im_neg {
-            im_abs.negate();
-        }
-        if im_abs.is_one() {
-            str.push('i');
-        } else {
-            str.push_str(&im_abs.print(po));
-            str.push('i');
-        }
+        str.push_str(&im_str);
+        str.push('i');
         str
     }
 
@@ -314,25 +336,10 @@ impl Number {
         let hi = BigRational::new(un, ud);
         let two = BigRational::from_integer(BigInt::from(2));
         let mid = (&lo + &hi) / &two;
-        let half = (&hi - &lo) / &two;
-        if half.is_zero() {
+        if lo == hi {
             return None;
         }
-        // Two significant digits of the uncertainty fixes the decimal count
-        // for both parts.
-        let decimals = significant_decimals(&half, 2);
-        let mut po2 = po.clone();
-        po2.interval_display = IntervalDisplay::Midpoint;
-        po2.use_max_decimals = true;
-        po2.max_decimals = decimals;
-        po2.use_min_decimals = true;
-        po2.min_decimals = decimals;
-        po2.show_ending_zeroes = true;
-        po2.min_exp = crate::options::exp_mode::NONE;
-        let mid_s = Number::from_rational(mid).print(&po2);
-        let unc_s = Number::from_rational(half).print(&po2);
-        let sign = if po.use_unicode_signs { "±" } else { "±" };
-        Some(format!("{mid_s}{sign}{unc_s}"))
+        plus_minus_string(&lo, &hi, &mid, po)
     }
 
     fn print_float(&self, po: &PrintOptions) -> String {
@@ -399,6 +406,23 @@ impl Number {
                 Some(p.max(2))
             };
             (mid, prec)
+        };
+        // The C++ reaches the `FRACTION_FRACTIONAL`/`FRACTION_COMBINED`
+        // branches of `Number::print` only for `isRational()` values, so a
+        // float is never spelled as a fraction: under `/set fr 2` the
+        // reference prints `sqrt(2)` as `1.414213562`, not as the binary
+        // fraction its float happens to equal. The midpoint is handed to the
+        // rational printer here, so the fractional formats are dropped.
+        let po = &match po.number_fraction_format {
+            NumberFractionFormat::Fractional
+            | NumberFractionFormat::Combined
+            | NumberFractionFormat::FractionalFixedDenominator
+            | NumberFractionFormat::CombinedFixedDenominator => {
+                let mut po2 = po.clone();
+                po2.number_fraction_format = NumberFractionFormat::Decimal;
+                po2
+            }
+            _ => po.clone(),
         };
         let mut n = Number::from_rational(mid);
         n.approx = true;
@@ -1036,24 +1060,163 @@ impl Number {
 ///
 /// `0.000043` with two significant digits needs six decimals; `2.0` needs
 /// one.
-fn significant_decimals(v: &BigRational, sig: i32) -> i32 {
-    if v.is_zero() {
-        return sig - 1;
-    }
-    let mut x = v.abs();
+/// `floor(log10(x))` for `x > 0` (`integer_log`, Number.cc).
+fn ilog10_rat(x: &BigRational) -> i64 {
     let ten = BigRational::from_integer(BigInt::from(10));
     let one = BigRational::one();
-    // exponent of the leading digit
-    let mut e = 0i32;
-    while x >= ten {
-        x /= &ten;
+    let mut v = x.abs();
+    let mut e = 0i64;
+    // Bounded: a value outside 10^±20000 cannot come out of the printer.
+    let mut guard = 0;
+    while v >= ten && guard < 40_000 {
+        v /= &ten;
         e += 1;
+        guard += 1;
     }
-    while x < one {
-        x *= &ten;
+    while v < one && guard < 40_000 {
+        v *= &ten;
         e -= 1;
+        guard += 1;
     }
-    (sig - 1 - e).max(0)
+    e
+}
+
+/// Round a rational to the nearest integer (ties away from zero), the effect
+/// of `MPFR_RNDN` followed by `MPFR_ROUND_PO` for the default rounding mode.
+fn round_rat(x: &BigRational) -> BigInt {
+    let neg = x.is_negative();
+    let a = x.abs();
+    let half = BigRational::new(BigInt::from(1), BigInt::from(2));
+    let r = (a + half).floor().to_integer();
+    if neg {
+        -r
+    } else {
+        r
+    }
+}
+
+/// Insert the decimal point into a digit string that represents
+/// `digits · 10^(-decimals)`, padding with zeroes on either side.
+fn place_decimal_point(digits: &str, decimals: i64, po: &PrintOptions) -> String {
+    if decimals <= 0 {
+        let mut s = digits.to_string();
+        for _ in 0..(-decimals) {
+            s.push('0');
+        }
+        return s;
+    }
+    let mut s = digits.to_string();
+    let int_len = s.len() as i64 - decimals;
+    if int_len < 1 {
+        let pad = (1 - int_len) as usize;
+        s.insert_str(0, &"0".repeat(pad));
+    }
+    let at = s.len() - decimals as usize;
+    s.insert_str(at, &po.decimalpoint);
+    s
+}
+
+/// `value ± uncertainty` rendering — the `INTERVAL_DISPLAY_PLUSMINUS` branch
+/// of `Number::print` (Number.cc:12470).
+///
+/// The value is printed to `precision` significant digits and the
+/// uncertainty gets the *same* decimal count, measured as the larger
+/// distance from the rounded value to either interval end. `precision` is
+/// then re-derived from what those two strings turned out to be, which is
+/// why the C++ runs the body at most twice ("float_rerun").
+fn plus_minus_string(
+    lo: &BigRational,
+    hi: &BigRational,
+    mid: &BigRational,
+    po: &PrintOptions,
+) -> Option<String> {
+    let ten = BigRational::from_integer(BigInt::from(10));
+    let neg = mid.is_negative();
+    let (lo, hi, mid) = if neg {
+        (-hi.clone(), -lo.clone(), mid.abs())
+    } else {
+        (lo.clone(), hi.clone(), mid.clone())
+    };
+    let mut precision = crate::context::precision() as i64;
+    if precision < 2 {
+        precision = 2;
+    }
+    let mut rerun = false;
+    loop {
+        let i_log = if mid.is_zero() {
+            ilog10_rat(&(&hi - &lo))
+        } else {
+            ilog10_rat(&mid)
+        };
+        let decimals = precision - 1 - i_log;
+        // scale = 10^decimals
+        let scale = if decimals >= 0 {
+            ten.pow(decimals.min(10_000) as i32)
+        } else {
+            BigRational::one() / ten.pow((-decimals).min(10_000) as i32)
+        };
+        let v = round_rat(&(&mid * &scale));
+        let vstr = v.magnitude().to_str_radix(10);
+        // Distance from the *rounded* value to each end, larger one wins.
+        let vr = BigRational::from_integer(v.clone());
+        let d_lo = &vr - &lo * &scale;
+        let d_hi = &hi * &scale - &vr;
+        let d = if d_lo > d_hi { d_lo } else { d_hi };
+        let u = round_rat(&d);
+        let ustr = if u.is_zero() {
+            String::new()
+        } else {
+            u.magnitude().to_str_radix(10)
+        };
+        if !rerun {
+            if ustr.len() > vstr.len() {
+                let drop = (ustr.len() - vstr.len()) as i64;
+                precision -= drop;
+                if precision <= 0 {
+                    return None;
+                }
+                rerun = true;
+                continue;
+            } else if decimals > 0 && ustr.len() > 2 {
+                precision = vstr.len() as i64 - decimals;
+                let floor = vstr.len() as i64 - ustr.len() as i64 + 2;
+                if precision < floor {
+                    precision = floor;
+                }
+                if precision <= 0 {
+                    return None;
+                }
+                rerun = true;
+                continue;
+            }
+        }
+        if ustr.is_empty() {
+            return None;
+        }
+        let show_ending_zeroes = vstr.len() > ustr.len() || precision == 2;
+        let mut mid_s = place_decimal_point(&vstr, decimals, po);
+        let mut unc_s = place_decimal_point(&ustr, decimals, po);
+        if !show_ending_zeroes {
+            trim_trailing_zeroes(&mut mid_s, &po.decimalpoint);
+            trim_trailing_zeroes(&mut unc_s, &po.decimalpoint);
+        }
+        if neg {
+            mid_s.insert_str(0, if po.use_unicode_signs { "\u{2212}" } else { "-" });
+        }
+        return Some(format!("{mid_s}\u{00B1}{unc_s}"));
+    }
+}
+
+fn trim_trailing_zeroes(s: &mut String, point: &str) {
+    if !s.contains(point) {
+        return;
+    }
+    while s.ends_with('0') {
+        s.pop();
+    }
+    if s.ends_with(point) {
+        s.truncate(s.len() - point.len());
+    }
 }
 
 /// Round an integer quotient per PrintOptions rounding (used by the integer
@@ -1325,5 +1488,64 @@ mod plusminus_tests {
         // No interval, so no ± regardless of the display mode.
         let n = Number::from_i64(5);
         assert_eq!(n.print(&pm_options()), "5");
+    }
+
+    #[test]
+    fn uncertainty_decimals_follow_the_reference() {
+        // Oracle (`qalc -t`): each of these round-trips through `a+/-b`.
+        for (v, u, want) in [
+            ("2", "3", "2.0±3.0"),
+            ("1", "0.5", "1.00±0.50"),
+            ("123.456", "0.0007", "123.45600±0.00070"),
+            ("9.933832571", "2.008553836", "9.9±2.0"),
+        ] {
+            assert_eq!(uncertain(v, u).print(&pm_options()), want, "{v}+/-{u}");
+        }
+    }
+
+    #[test]
+    fn a_large_uncertainty_keeps_the_value_digits() {
+        // Oracle: `9.18958684+/-44.11001683` prints back unchanged — the
+        // uncertainty being wider than the value drops the value's precision
+        // by one digit rather than collapsing it to two significant digits.
+        assert_eq!(
+            uncertain("9.18958684", "44.11001683").print(&pm_options()),
+            "9.18958684±44.11001683"
+        );
+    }
+
+    #[test]
+    fn uncertainty_is_measured_from_the_rounded_value() {
+        // Oracle: `Ei(3+/-0.3)` under `/set ic 2` is `10.1±2.1`, not
+        // `10.1±2.0`: the reference measures the uncertainty as the larger
+        // distance from the *displayed* value to either interval end.
+        let po = ParseOptions::default();
+        let mut n = Number::new();
+        assert!(n.set_interval(
+            &Number::parse("8.110347415", &po),
+            &Number::parse("12.16104137", &po),
+            false
+        ));
+        assert_eq!(n.print(&pm_options()), "10.1±2.1");
+    }
+
+    #[test]
+    fn a_straddling_imaginary_part_still_shows_its_sign() {
+        // Oracle: `(2+/-3)^3.2` under `/set ic 2` is
+        // `86±87 - 0.29±0.30i`; the imaginary interval [-0.59, 0.01] is
+        // neither positive nor negative but displays as negative.
+        let po = ParseOptions::default();
+        let mut re = Number::new();
+        assert!(re.set_interval(&Number::from_i64(-1), &Number::parse("173", &po), false));
+        let mut im = Number::new();
+        assert!(im.set_interval(
+            &Number::parse("-0.59", &po),
+            &Number::parse("0.01", &po),
+            false
+        ));
+        re.set_imaginary_part(&im);
+        let mut po2 = pm_options();
+        po2.spacious = true;
+        assert!(re.print(&po2).contains(" - "), "got {}", re.print(&po2));
     }
 }

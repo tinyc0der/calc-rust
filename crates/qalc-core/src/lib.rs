@@ -10,6 +10,7 @@ pub mod datetime;
 pub mod defs;
 pub mod differentiate;
 pub mod eval;
+pub mod explog;
 pub mod geometry;
 pub mod ids;
 pub mod lexer;

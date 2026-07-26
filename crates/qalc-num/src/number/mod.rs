@@ -18,6 +18,7 @@ mod print;
 mod transcendental;
 pub mod ieee;
 mod integer;
+mod lambertw;
 mod special;
 
 use crate::context;
@@ -57,6 +58,22 @@ pub struct Number {
     pub(crate) is_imag_part: bool,
     /// `i_precision`: significant decimal digits, -1 = exact/unset.
     pub(crate) precision: i32,
+    /// Variance-formula uncertainty (`INTERVAL_CALCULATION_VARIANCE_FORMULA`,
+    /// the default `/set ic 1`).
+    ///
+    /// The C++ implements the variance formula at the `MathStructure` level:
+    /// uncertain values are replaced by variables, the expression is
+    /// differentiated symbolically, and the result's uncertainty is
+    /// `sqrt(Σ (∂f/∂xᵢ · uᵢ)²)` (`MathStructure-eval.cc:2732`). This port
+    /// carries the same quantity forward through each `Number` operation
+    /// instead — the chain rule makes the two agree — which is why the
+    /// uncertainty is a field rather than a widened interval. `None` means
+    /// "no uncertainty"; the value inside never has one of its own.
+    ///
+    /// A complex uncertainty means the real and imaginary parts have
+    /// independent uncertainties, exactly as the C++ treats them (they come
+    /// from separate replacement variables).
+    pub(crate) unc: Option<Box<Number>>,
 }
 
 impl Default for Number {
@@ -78,6 +95,7 @@ impl Number {
             approx: false,
             is_imag_part: false,
             precision: -1,
+            unc: None,
         }
     }
 
@@ -167,6 +185,7 @@ impl Number {
     /// `set(const Number &o, merge_precision, keep_imag)`
     pub fn set(&mut self, o: &Number, merge_precision: bool, keep_imag: bool) {
         self.value = o.value.clone();
+        self.unc = o.unc.clone();
         if !keep_imag {
             self.imag = o.imag.clone();
         }
@@ -204,6 +223,7 @@ impl Number {
     pub fn clear(&mut self, keep_precision: bool) {
         self.value = RealValue::Rational(BigRational::zero());
         self.imag = None;
+        self.unc = None;
         if !keep_precision {
             self.approx = false;
             self.precision = -1;
@@ -238,6 +258,54 @@ impl Number {
     /// `markAsImaginaryPart()`
     pub fn mark_as_imaginary_part(&mut self, is_imag: bool) {
         self.is_imag_part = is_imag;
+    }
+
+    // ------------------------------------------------------------------
+    // Variance-formula uncertainty (see the `unc` field)
+    // ------------------------------------------------------------------
+
+    /// The carried uncertainty, if any.
+    pub fn variance_uncertainty(&self) -> Option<&Number> {
+        self.unc.as_deref()
+    }
+
+    /// Attach `u` as the carried uncertainty, combining it in quadrature with
+    /// any uncertainty already present (independent contributions add as
+    /// `sqrt(u₁² + u₂²)`, per-component for a complex uncertainty).
+    pub fn add_variance_uncertainty(&mut self, u: &Number) {
+        if u.is_zero() && !u.has_imaginary_part() {
+            return;
+        }
+        let mut u = u.clone();
+        u.unc = None;
+        u.imag = u.imag.take().map(|mut im| {
+            im.unc = None;
+            im
+        });
+        let combined = match self.unc.take() {
+            None => u,
+            Some(prev) => match quadrature(&prev, &u) {
+                Some(c) => c,
+                None => *prev,
+            },
+        };
+        if combined.is_zero() && !combined.has_imaginary_part() {
+            return;
+        }
+        self.approx = true;
+        self.unc = Some(Box::new(combined));
+    }
+
+    /// Drop the carried uncertainty and return it.
+    pub(crate) fn take_variance_uncertainty(&mut self) -> Option<Number> {
+        self.unc.take().map(|b| *b)
+    }
+
+    /// Fold the carried uncertainty into the value as a symmetric interval,
+    /// which is what the printer and any interval-mode consumer expects.
+    pub fn resolve_variance_uncertainty(&mut self) {
+        let Some(u) = self.unc.take() else { return };
+        self.set_uncertainty(&u);
     }
 
     // ------------------------------------------------------------------
@@ -605,6 +673,11 @@ impl Number {
         let mut n = self.clone();
         n.imag = None;
         n.is_imag_part = false;
+        // A complex uncertainty holds one component per part.
+        n.unc = self.unc.as_ref().and_then(|u| {
+            let r = u.real_part();
+            (!r.is_zero()).then(|| Box::new(r))
+        });
         n
     }
 
@@ -613,6 +686,10 @@ impl Number {
             Some(im) => {
                 let mut n = (**im).clone();
                 n.is_imag_part = false;
+                n.unc = self.unc.as_ref().and_then(|u| {
+                    let i = u.imaginary_part();
+                    (!i.is_zero()).then(|| Box::new(i))
+                });
                 n
             }
             None => Number::new(),
@@ -725,6 +802,138 @@ impl Number {
         self.imag = None;
         self.approx = true;
         self.precision = -1;
+    }
+}
+
+/// Componentwise `sqrt(a² + b²)` of two uncertainties.
+///
+/// The real and imaginary components stand for independent variables, so
+/// they combine separately — the same thing the C++ variance formula does
+/// when it sums the squared partial derivatives.
+pub(crate) fn quadrature(a: &Number, b: &Number) -> Option<Number> {
+    fn one(x: Number, y: Number) -> Option<Number> {
+        if x.is_zero() {
+            return Some(y);
+        }
+        if y.is_zero() {
+            return Some(x);
+        }
+        let mut s = x;
+        let mut t = y;
+        if !s.square() || !t.square() || !s.add(&t) || !s.sqrt() {
+            return None;
+        }
+        Some(s)
+    }
+    let re = one(a.real_part(), b.real_part())?;
+    let im = one(a.imaginary_part(), b.imaginary_part())?;
+    let mut r = re;
+    if !im.is_zero() {
+        r.set_imaginary_part(&im);
+    }
+    Some(r)
+}
+
+impl Number {
+    /// Propagate an argument's uncertainty through a function whose complex
+    /// derivative at that argument is `d`, and attach the result to `self`.
+    ///
+    /// With `d = p + qi` and an argument uncertainty of `uₓ` on the real
+    /// component and `u_y` on the imaginary one,
+    /// `δf = (p + qi)(δx + i·δy)`, so the result's components carry
+    /// `sqrt((p·uₓ)² + (q·u_y)²)` and `sqrt((q·uₓ)² + (p·u_y)²)`.
+    pub(crate) fn propagate_uncertainty(&mut self, d: &Number, u: &Number) -> bool {
+        let (mut p, mut q) = (d.real_part(), d.imaginary_part());
+        p.unc = None;
+        q.unc = None;
+        let (ux, uy) = (u.real_part(), u.imaginary_part());
+        let term = |a: &Number, b: &Number| -> Option<Number> {
+            let mut t = a.clone();
+            if !t.multiply(b) || !t.abs() {
+                return None;
+            }
+            Some(t)
+        };
+        let (Some(pux), Some(quy), Some(qux), Some(puy)) = (
+            term(&p, &ux),
+            term(&q, &uy),
+            term(&q, &ux),
+            term(&p, &uy),
+        ) else {
+            return false;
+        };
+        let (Some(re), Some(im)) = (quadrature(&pux, &quy), quadrature(&qux, &puy)) else {
+            return false;
+        };
+        let mut total = re;
+        if !im.is_zero() {
+            total.set_imaginary_part(&im);
+        }
+        self.add_variance_uncertainty(&total);
+        true
+    }
+
+    /// Apply the unary operation `op`, carrying any uncertainty forward by
+    /// the operation's derivative `deriv` evaluated at the original value.
+    ///
+    /// The uncertainty is detached before `op` runs, so nested `Number`
+    /// operations inside the implementation (and inside `deriv`) never see
+    /// it and cannot double-count.
+    pub(crate) fn uncertain_unary(
+        &mut self,
+        deriv: impl FnOnce(&Number) -> Option<Number>,
+        op: impl FnOnce(&mut Number) -> bool,
+    ) -> bool {
+        let Some(u) = self.take_variance_uncertainty() else {
+            return op(self);
+        };
+        let x = self.clone();
+        if !op(self) {
+            self.unc = Some(Box::new(u));
+            return false;
+        }
+        self.unc = None;
+        if let Some(d) = deriv(&x) {
+            self.propagate_uncertainty(&d, &u);
+        }
+        true
+    }
+
+    /// Two-operand form of [`Number::uncertain_unary`]; each operand's
+    /// uncertainty is pushed through its own partial derivative and the two
+    /// contributions combine in quadrature.
+    pub(crate) fn uncertain_binary(
+        &mut self,
+        o: &Number,
+        dfdx: impl FnOnce(&Number, &Number) -> Option<Number>,
+        dfdy: impl FnOnce(&Number, &Number) -> Option<Number>,
+        op: impl FnOnce(&mut Number, &Number) -> bool,
+    ) -> bool {
+        let ux = self.take_variance_uncertainty();
+        let mut y = o.clone();
+        let uy = y.take_variance_uncertainty();
+        let x = self.clone();
+        if !op(self, &y) {
+            self.unc = ux.map(Box::new);
+            return false;
+        }
+        self.unc = None;
+        if let Some(u) = &ux {
+            if let Some(d) = dfdx(&x, &y) {
+                self.propagate_uncertainty(&d, u);
+            }
+        }
+        if let Some(u) = &uy {
+            if let Some(d) = dfdy(&x, &y) {
+                self.propagate_uncertainty(&d, u);
+            }
+        }
+        true
+    }
+
+    /// True when either operand carries a variance-formula uncertainty.
+    pub(crate) fn either_uncertain(&self, o: &Number) -> bool {
+        self.unc.is_some() || o.unc.is_some()
     }
 }
 

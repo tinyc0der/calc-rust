@@ -12,6 +12,28 @@ use num_traits::{One, Signed, ToPrimitive, Zero};
 impl Number {
     /// `raise(o, try_exact)`: self = self^o.
     pub fn raise(&mut self, o: &Number, try_exact: bool) -> bool {
+        // d(x^y)/dx = y·x^(y−1), d(x^y)/dy = x^y·ln x.
+        if self.either_uncertain(o) {
+            return self.uncertain_binary(
+                o,
+                |x, y| {
+                    let mut d = x.clone();
+                    let mut e = y.clone();
+                    (e.add(&Number::from_i64(-1)) && d.raise(&e, true) && d.multiply(y))
+                        .then_some(d)
+                },
+                |x, y| {
+                    let mut d = x.clone();
+                    let mut l = x.clone();
+                    (d.raise(y, true) && l.ln() && d.multiply(&l)).then_some(d)
+                },
+                |s, o| s.raise_impl(o, try_exact),
+            );
+        }
+        self.raise_impl(o, try_exact)
+    }
+
+    fn raise_impl(&mut self, o: &Number, try_exact: bool) -> bool {
         // Handle x^0 and x^1 quickly.
         if o.is_zero() {
             if self.is_zero() {
@@ -53,8 +75,14 @@ impl Number {
         // `(-8)^(1/3)` = 1 + 1.732…i — whereas `cbrt(-8)` and `root(-8, 3)`
         // give the real root -2. Taking the exact real root here would
         // silently answer the wrong question.
+        //
+        // The exact root is taken even when `try_exact` is false: it only
+        // applies to a rational base with a fractional exponent (root finding
+        // works on floats, so it never pays for the test), and it is the only
+        // way to avoid the float `pow` below, whose Ziv refinement never
+        // terminates when the result is exactly representable (`4^(1/2)`).
         if let (RealValue::Rational(base_r), RealValue::Rational(oe)) = (&self.value, &o.value) {
-            if try_exact && !oe.denom().is_one() && !base_r.is_negative() {
+            if !oe.denom().is_one() && !base_r.is_negative() {
                 if let Some(den) = oe.denom().to_u32() {
                     let mut base = self.clone();
                     if base.exact_root(den) {
@@ -117,6 +145,35 @@ impl Number {
                 return true;
             }
         }
+        // `a^(n/2^k)` goes through repeated `sqrt`, never through `pow`.
+        //
+        // astro-float's `pow` refines until it can decide the rounding, and
+        // an exactly representable result never settles that decision — the
+        // refinement then runs forever. Only a *binary* exponent can produce
+        // one (`4^(1/2)`, `16^(1/4)`, `4.0^(3/2)`), and those are exactly the
+        // exponents this branch takes over.
+        if !self.real_part_is_negative() {
+            let mut e = o.clone();
+            let mut base = self.clone();
+            let mut steps = 0;
+            while steps < 20 && !e.is_integer() && e.denominator_is_even() {
+                if !base.sqrt() || !e.multiply(&Number::from_i64(2)) {
+                    break;
+                }
+                steps += 1;
+            }
+            if steps > 0 && e.is_integer() {
+                if let Some(n) = e.to_i64() {
+                    if n.unsigned_abs() <= 1_000_000
+                        && base.raise(&Number::from_i64(n), true)
+                    {
+                        *self = base;
+                        self.set_precision_and_approximate_from(o);
+                        return true;
+                    }
+                }
+            }
+        }
         // Float fallback: a^b = exp(b·ln(a)) computed by astro-float pow with
         // directed rounding on interval corners.
         let p = context::bit_precision();
@@ -125,6 +182,13 @@ impl Number {
         if matches!(al.sign(), Some(astro_float::Sign::Neg)) && !al.is_zero() {
             // Negative base with (effectively) integer float exponent only.
             if !o.is_integer() {
+                // An interval base that straddles zero cannot go through
+                // `exp(b·ln a)` — `ln` has no value on it. The C++ splits it
+                // instead (`try_complex`, Number.cc:4374): raise each end
+                // point, hull each with zero, and hull the two results.
+                if !matches!(au.sign(), Some(astro_float::Sign::Neg)) {
+                    return self.raise_straddling_zero(o);
+                }
                 return self.raise_complex(o);
             }
         }
@@ -139,19 +203,24 @@ impl Number {
             let d4 = context::with_consts(|cc| au.pow(&bu, p, RoundingMode::Up, cc));
             let mut lo = c1.clone();
             for c in [&c2, &c3, &c4] {
-                if c.cmp(&lo) == Some(-1) || lo.is_nan() {
+                if matches!(c.cmp(&lo), Some(c) if c < 0) || lo.is_nan() {
                     lo = (*c).clone();
                 }
             }
             let mut hi = d1.clone();
             for c in [&d2, &d3, &d4] {
-                if c.cmp(&hi) == Some(1) || hi.is_nan() {
+                if matches!(c.cmp(&hi), Some(c) if c > 0) || hi.is_nan() {
                     hi = (*c).clone();
                 }
             }
             (lo, hi)
         } else {
-            let f = context::with_consts(|cc| al.pow(&bl, p, RoundingMode::ToEven, cc));
+            // Directed rounding, not `ToEven`: astro-float's `pow` refines
+            // until it can decide the rounding, and an exactly representable
+            // result (`4^(1/2)`, `16^(1/4)`, `4^(3/2)`) never settles the
+            // to-even tie, so the loop never ends. The interval branch above
+            // already only uses Down/Up for the same reason.
+            let f = context::with_consts(|cc| al.pow(&bl, p, RoundingMode::Down, cc));
             (f.clone(), f)
         };
         if lower.is_nan() || upper.is_nan() {
@@ -161,6 +230,35 @@ impl Number {
         self.approx = true;
         self.set_precision_and_approximate_from(o);
         self.test_float_result(true)
+    }
+
+    /// `x^o` for a real interval `x` that contains zero and a non-integer
+    /// exponent — the `try_complex` interval branch of `Number::raise`
+    /// (Number.cc:4376).
+    ///
+    /// `x^o` sweeps a curve from the negative end (complex) through zero to
+    /// the positive end (real), so the enclosure is the hull of the two end
+    /// results *and* zero, taken componentwise.
+    fn raise_straddling_zero(&mut self, o: &Number) -> bool {
+        let mut neg_end = self.lower_end_point();
+        let mut pos_end = self.upper_end_point();
+        if !neg_end.raise(o, false) || !pos_end.raise(o, false) {
+            return false;
+        }
+        let zero = Number::new();
+        let Some(re) = hull_of(&[zero.clone(), neg_end.real_part(), pos_end.real_part()]) else {
+            return false;
+        };
+        let Some(im) = hull_of(&[zero, neg_end.imaginary_part(), pos_end.imaginary_part()]) else {
+            return false;
+        };
+        *self = re;
+        if !im.is_zero() {
+            self.set_imaginary_part(&im);
+        }
+        self.approx = true;
+        self.set_precision_and_approximate_from(o);
+        true
     }
 
     fn raise_infinite(&mut self, o: &Number) -> bool {
@@ -463,8 +561,8 @@ impl Number {
             let lo2 = context::with_consts(|cc| al.pow(&inv_hi, p, RoundingMode::Down, cc));
             let hi = context::with_consts(|cc| au.pow(&inv_lo, p, RoundingMode::Up, cc));
             let hi2 = context::with_consts(|cc| au.pow(&inv_hi, p, RoundingMode::Up, cc));
-            let lo = if lo2.cmp(&lo) == Some(-1) { lo2 } else { lo };
-            let hi = if hi2.cmp(&hi) == Some(1) { hi2 } else { hi };
+            let lo = if matches!(lo2.cmp(&lo), Some(c) if c < 0) { lo2 } else { lo };
+            let hi = if matches!(hi2.cmp(&hi), Some(c) if c > 0) { hi2 } else { hi };
             (lo, hi)
         } else {
             let f = context::with_consts(|cc| al.pow(&inv_n, p, RoundingMode::ToEven, cc));
@@ -486,8 +584,85 @@ impl Number {
     }
 }
 
+/// The interval hull of a set of real numbers/intervals:
+/// `[min lower bound, max upper bound]`.
+fn hull_of(parts: &[Number]) -> Option<Number> {
+    let mut lo = parts.first()?.lower_end_point();
+    let mut hi = parts.first()?.upper_end_point();
+    for p in &parts[1..] {
+        let l = p.lower_end_point();
+        let u = p.upper_end_point();
+        if l.is_less_than(&lo) {
+            lo = l;
+        }
+        if u.is_greater_than(&hi) {
+            hi = u;
+        }
+    }
+    if lo.equals(&hi, false, false) {
+        return Some(lo);
+    }
+    let mut n = Number::new();
+    n.set_interval(&lo, &hi, false).then_some(n)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// astro-float's `pow` cannot decide the rounding of an exactly
+    /// representable result, so a binary exponent must not reach it.
+    /// Every value here is the reference binary's.
+    fn raised(base: &str, exp: (i64, i64)) -> String {
+        let po = crate::options::PrintOptions::default();
+        let mut n = Number::parse(base, &crate::options::ParseOptions::default());
+        assert!(n.raise(&Number::from_ints(exp.0, exp.1, 0), false));
+        n.print(&po)
+    }
+
+    #[test]
+    fn binary_exponents_with_exact_results_terminate() {
+        assert_eq!(raised("4", (1, 2)), "2");
+        assert_eq!(raised("4", (3, 2)), "8");
+        assert_eq!(raised("16", (1, 4)), "2");
+        assert_eq!(raised("0.25", (1, 2)), "0.5");
+    }
+
+    #[test]
+    fn binary_exponents_without_exact_results_are_unchanged() {
+        assert_eq!(raised("2", (1, 2)), "1.414213562");
+        assert_eq!(raised("2", (3, 2)), "2.828427125");
+        assert_eq!(raised("5", (1, 2)), "2.236067977");
+    }
+
+
+    #[test]
+    fn interval_base_straddling_zero_goes_complex() {
+        // Oracle: `(2+/-3)^3.2` under `/set ic 2` is `86±87 - 0.29±0.30i`.
+        // The base interval [-1, 5] contains zero, so `exp(b·ln a)` has no
+        // value on it and the end points have to be hulled with zero.
+        let po = crate::options::ParseOptions::default();
+        let mut n = Number::new();
+        assert!(n.set_interval(&Number::from_i64(-1), &Number::from_i64(5), false));
+        assert!(n.raise(&Number::parse("3.2", &po), true));
+        let mut pm = crate::options::PrintOptions::default();
+        pm.interval_display = crate::options::IntervalDisplay::PlusMinus;
+        pm.spacious = true;
+        assert_eq!(n.print(&pm), "86±87 - 0.29±0.30i");
+    }
+
+    #[test]
+    fn variance_uncertainty_scales_by_the_derivative() {
+        // Oracle: `(2+/-3)^3.2` = `9.18958684±44.11001683`; the uncertainty is
+        // |f'(2)|·3 = 3.2·2^2.2·3, not the original 3.
+        let po = crate::options::ParseOptions::default();
+        let mut n = Number::from_i64(2);
+        n.add_variance_uncertainty(&Number::from_i64(3));
+        assert!(n.raise(&Number::parse("3.2", &po), true));
+        let mut pm = crate::options::PrintOptions::default();
+        pm.interval_display = crate::options::IntervalDisplay::PlusMinus;
+        assert_eq!(n.print(&pm), "9.18958684±44.11001683");
+    }
     use super::*;
 
     #[test]

@@ -28,6 +28,22 @@ impl Number {
 
     /// `add(o)`: self += o. Returns false when undefined (∞ + −∞).
     pub fn add(&mut self, o: &Number) -> bool {
+        // Both partial derivatives of a sum are 1, so the operands'
+        // uncertainties simply combine in quadrature.
+        if self.either_uncertain(o) {
+            let one = Number::from_i64(1);
+            let (a, b) = (one.clone(), one);
+            return self.uncertain_binary(
+                o,
+                move |_, _| Some(a),
+                move |_, _| Some(b),
+                Number::add_impl,
+            );
+        }
+        self.add_impl(o)
+    }
+
+    fn add_impl(&mut self, o: &Number) -> bool {
         // Complex handling: add parts independently.
         if o.has_imaginary_part() || self.has_imaginary_part() {
             let mut re = self.real_part();
@@ -116,6 +132,19 @@ impl Number {
 
     /// `multiply(o)`: self *= o.
     pub fn multiply(&mut self, o: &Number) -> bool {
+        // d(xy)/dx = y, d(xy)/dy = x.
+        if self.either_uncertain(o) {
+            return self.uncertain_binary(
+                o,
+                |_, y| Some(y.clone()),
+                |x, _| Some(x.clone()),
+                Number::multiply_impl,
+            );
+        }
+        self.multiply_impl(o)
+    }
+
+    fn multiply_impl(&mut self, o: &Number) -> bool {
         // Complex multiplication: (a+bi)(c+di) = (ac−bd) + (ad+bc)i
         if o.has_imaginary_part() || self.has_imaginary_part() {
             let a = self.real_part();
@@ -208,6 +237,25 @@ impl Number {
 
     /// `divide(o)`: self /= o. Fails on division by zero.
     pub fn divide(&mut self, o: &Number) -> bool {
+        // d(x/y)/dx = 1/y, d(x/y)/dy = -x/y².
+        if self.either_uncertain(o) {
+            return self.uncertain_binary(
+                o,
+                |_, y| {
+                    let mut d = y.clone();
+                    d.recip().then_some(d)
+                },
+                |x, y| {
+                    let mut d = y.clone();
+                    (d.square() && d.recip() && d.multiply(x) && d.negate()).then_some(d)
+                },
+                Number::divide_impl,
+            );
+        }
+        self.divide_impl(o)
+    }
+
+    fn divide_impl(&mut self, o: &Number) -> bool {
         if o.has_imaginary_part() || self.has_imaginary_part() {
             // z/w = z * conj(w) / |w|^2
             let mut recip = o.clone();
@@ -349,7 +397,7 @@ impl Number {
                         // spans zero: [0, max(l², u²)]
                         let l2 = lower.mul(lower, p, rnd(false));
                         let u2 = upper.mul(upper, p, rnd(false));
-                        let m = if l2.cmp(&u2) == Some(1) { l2 } else { u2 };
+                        let m = if matches!(l2.cmp(&u2), Some(c) if c > 0) { l2 } else { u2 };
                         (BigFloat::from_i8(0, p), m)
                     }
                 } else {
@@ -394,7 +442,7 @@ impl Number {
                     let p = context::bit_precision();
                     if let RealValue::Float { lower, upper } = &self.value {
                         let nl = lower.neg();
-                        let m = if nl.cmp(upper) == Some(1) { nl } else { upper.clone() };
+                        let m = if matches!(nl.cmp(upper), Some(c) if c > 0) { nl } else { upper.clone() };
                         self.value = RealValue::Float { lower: BigFloat::from_i8(0, p), upper: m };
                     }
                 }
@@ -497,13 +545,13 @@ fn interval_mul(
     ];
     let mut lo = candidates_lo[0].clone();
     for c in &candidates_lo[1..] {
-        if c.cmp(&lo) == Some(-1) || lo.is_nan() {
+        if matches!(c.cmp(&lo), Some(c) if c < 0) || lo.is_nan() {
             lo = c.clone();
         }
     }
     let mut hi = candidates_hi[0].clone();
     for c in &candidates_hi[1..] {
-        if c.cmp(&hi) == Some(1) || hi.is_nan() {
+        if matches!(c.cmp(&hi), Some(c) if c > 0) || hi.is_nan() {
             hi = c.clone();
         }
     }
@@ -512,6 +560,54 @@ fn interval_mul(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn interval_multiplication_keeps_both_bounds() {
+        // [4.997, 5.003]² = [24.970009, 25.030009] — the corner search has to
+        // compare bound *signs*, not `cmp(..) == Some(1)`; astro-float's
+        // `cmp` returns a signed magnitude, so the old test never fired and
+        // the product collapsed onto its lower corner.
+        let po = crate::options::ParseOptions::default();
+        let mut n = Number::new();
+        assert!(n.set_interval(
+            &Number::parse("4.997", &po),
+            &Number::parse("5.003", &po),
+            false
+        ));
+        let m = n.clone();
+        assert!(n.multiply(&m));
+        assert!(n.lower_end_point().is_less_than(&Number::parse("24.9701", &po)));
+        assert!(n.upper_end_point().is_greater_than(&Number::parse("25.03", &po)));
+    }
+
+    #[test]
+    fn variance_uncertainty_moves_with_multiplication_by_i() {
+        // `(5+/-0.003)i` puts the uncertainty on the imaginary component:
+        // d(iz)/dz = i, so the real and imaginary uncertainties swap.
+        let po = crate::options::ParseOptions::default();
+        let mut n = Number::from_i64(5);
+        n.add_variance_uncertainty(&Number::parse("0.003", &po));
+        let mut i = Number::new();
+        i.set_imaginary_part(&Number::from_i64(1));
+        assert!(n.multiply(&i));
+        let u = n.variance_uncertainty().expect("uncertainty survives");
+        assert!(u.real_part().is_zero(), "real component: {u:?}");
+        assert!(!u.imaginary_part().is_zero(), "imaginary component: {u:?}");
+    }
+
+    #[test]
+    fn independent_uncertainties_add_in_quadrature() {
+        // d(x+y)/dx = d(x+y)/dy = 1, so 0.3 ⊕ 0.4 = 0.5.
+        let po = crate::options::ParseOptions::default();
+        let mut a = Number::from_i64(1);
+        a.add_variance_uncertainty(&Number::parse("0.3", &po));
+        let mut b = Number::from_i64(2);
+        b.add_variance_uncertainty(&Number::parse("0.4", &po));
+        assert!(a.add(&b));
+        let u = a.variance_uncertainty().expect("uncertainty survives");
+        assert!(u.is_greater_than(&Number::parse("0.4999", &po)), "{u:?}");
+        assert!(u.is_less_than(&Number::parse("0.5001", &po)), "{u:?}");
+    }
     use super::*;
 
     #[test]
@@ -611,3 +707,4 @@ mod tests {
         assert!(n.internal_rational().unwrap() == &BigRational::from_integer(30000.into()));
     }
 }
+

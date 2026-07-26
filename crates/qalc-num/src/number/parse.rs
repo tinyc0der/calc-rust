@@ -399,6 +399,7 @@ impl Number {
                     approx: self.approx,
                     is_imag_part: false,
                     precision: self.precision,
+                    unc: None,
                 };
                 self.set_imaginary_part(&re);
             }
@@ -431,9 +432,14 @@ impl Number {
     }
 
     /// Port of `Number::setUncertainty(o, to_precision = false)` — Number.cc:1752.
-    /// Turns the value into a float interval `[self - o, self + o]`.
+    /// Widens the value into the float interval `[self - o, self + o]`.
+    ///
+    /// The variance-formula counterpart is
+    /// [`Number::add_variance_uncertainty`], which keeps the uncertainty
+    /// beside the value so later operations can scale it by their
+    /// derivative.
     pub fn set_uncertainty(&mut self, o: &Number) {
-        if o.is_zero() {
+        if o.is_zero() && !o.has_imaginary_part() {
             return;
         }
         if o.has_imaginary_part() {

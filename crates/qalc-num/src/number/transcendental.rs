@@ -38,6 +38,20 @@ impl Number {
 
     /// `ln()` — natural logarithm. Complex for negative reals.
     pub fn ln(&mut self) -> bool {
+        // d(ln x)/dx = 1/x.
+        if self.unc.is_some() {
+            return self.uncertain_unary(
+                |x| {
+                    let mut d = x.clone();
+                    d.recip().then_some(d)
+                },
+                Number::ln_impl,
+            );
+        }
+        self.ln_impl()
+    }
+
+    fn ln_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             // ln(z) = ln|z| + i·arg(z)
             let mut re = self.clone();
@@ -106,6 +120,20 @@ impl Number {
 
     /// `exp()`.
     pub fn exp(&mut self) -> bool {
+        // d(exp x)/dx = exp x.
+        if self.unc.is_some() {
+            return self.uncertain_unary(
+                |x| {
+                    let mut d = x.clone();
+                    d.exp().then_some(d)
+                },
+                Number::exp_impl,
+            );
+        }
+        self.exp_impl()
+    }
+
+    fn exp_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             // e^(a+bi) = e^a (cos b + i sin b)
             let mut ea = self.real_part();
@@ -243,7 +271,7 @@ impl Number {
         if lower.is_nan() || upper.is_nan() {
             return false;
         }
-        if lower.cmp(&upper) == Some(1) {
+        if matches!(lower.cmp(&upper), Some(c) if c > 0) {
             return false; // pole inside interval
         }
         self.value = RealValue::Float { lower, upper };
@@ -292,7 +320,7 @@ impl Number {
             if spans_zero {
                 let cl = al.cosh(p, RoundingMode::Up, cc);
                 let cu = au.cosh(p, RoundingMode::Up, cc);
-                let hi = if cl.cmp(&cu) == Some(1) { cl } else { cu };
+                let hi = if matches!(cl.cmp(&cu), Some(c) if c > 0) { cl } else { cu };
                 (BigFloat::from_i8(1, p), hi)
             } else if matches!(au.sign(), Some(astro_float::Sign::Neg)) {
                 // negative interval: decreasing
@@ -489,18 +517,25 @@ impl Number {
             *self = q;
             return true;
         }
-        // x contains/equals zero: y must be sign-definite → ±π/2
+        // x straddles zero, so `atan(y/x)` is useless; y must be sign-definite
+        // instead, and then `atan2(y, x) = ±π/2 − atan(x/y)` — continuous, and
+        // monotone in each variable, so interval arithmetic on it is tight.
+        // For a point x = 0 this collapses to ±π/2, as before.
         if self.real_part_is_positive() || self.real_part_is_negative() {
             let neg = self.real_part_is_negative();
-            let mut pi = Number::new();
-            pi.pi();
-            if !pi.divide(&Number::from_i64(2)) {
+            let mut half_pi = Number::new();
+            half_pi.pi();
+            if !half_pi.divide(&Number::from_i64(2)) {
                 return false;
             }
             if neg {
-                pi.negate();
+                half_pi.negate();
             }
-            *self = pi;
+            let mut q = x.clone();
+            if !q.divide(self) || !q.atan() || !q.negate() || !q.add(&half_pi) {
+                return false;
+            }
+            *self = q;
             return true;
         }
         false
@@ -570,7 +605,7 @@ impl Number {
         let two_pi = context::with_consts(|cc| {
             cc.pi(p, RoundingMode::Up).mul(&BigFloat::from_i8(2, p), p, RoundingMode::Up)
         });
-        let full_range = width.cmp(&two_pi) != Some(-1);
+        let full_range = !matches!(width.cmp(&two_pi), Some(c) if c < 0);
         let (mut has_max, mut has_min) = (full_range, full_range);
         if !full_range {
             // Count extremum points k in the interval: for sin the maxima are
@@ -582,8 +617,11 @@ impl Number {
             });
             let tl = al.div(&half_pi, p, RoundingMode::Down);
             let tu = au.div(&half_pi, p, RoundingMode::Up);
-            // Integers in [tl, tu] with the right residue mod 4.
-            let (kl, ku) = (bigfloat_floor_i(&tl), bigfloat_floor_i(&tu));
+            // Integers in [tl, tu] with the right residue mod 4. The lower
+            // end must be *rounded up*: `floor(tl)` sits below the interval
+            // and would report an extremum that is not in it — which is what
+            // made `cos(0.8976)` widen to `[cos(0.8976), 1]`.
+            let (kl, ku) = (bigfloat_ceil_i(&tl), bigfloat_floor_i(&tu));
             let mut k = kl.clone();
             let one = BigInt::from(1);
             while k <= ku {
@@ -624,14 +662,14 @@ impl Number {
         }
         let lower = if has_min {
             BigFloat::from_i8(-1, p)
-        } else if fl_l.cmp(&fu_l) == Some(1) {
+        } else if matches!(fl_l.cmp(&fu_l), Some(c) if c > 0) {
             fu_l
         } else {
             fl_l
         };
         let upper = if has_max {
             BigFloat::from_i8(1, p)
-        } else if fl_u.cmp(&fu_u) == Some(-1) {
+        } else if matches!(fl_u.cmp(&fu_u), Some(c) if c < 0) {
             fu_u
         } else {
             fl_u
@@ -650,6 +688,14 @@ fn bigfloat_floor_i(f: &BigFloat) -> BigInt {
     }
 }
 
+/// ceil of a BigFloat as BigInt (assumes finite).
+fn bigfloat_ceil_i(f: &BigFloat) -> BigInt {
+    match crate::float::bigfloat_to_ratio(f) {
+        Some((n, d)) => num_integer::Integer::div_ceil(&n, &d),
+        None => BigInt::zero(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -659,6 +705,51 @@ mod tests {
         let mut po = PrintOptions::default();
         po.show_ending_zeroes = true;
         po
+    }
+
+    #[test]
+    fn cos_does_not_invent_an_extremum() {
+        // Oracle: `cos(0.8975979)` = 0.6234898027. The extremum scan must
+        // only count multiples of π/2 that are actually inside the interval;
+        // counting `floor(l)` widened the result to `[cos x, 1]`, whose
+        // midpoint printed as 0.81.
+        let mut n = Number::parse("0.8975979", &Default::default());
+        assert!(n.cos());
+        assert_eq!(n.print(&po_ez()), "0.6234898027");
+    }
+
+    #[test]
+    fn sin_and_cos_still_clamp_a_contained_extremum() {
+        // An interval wider than 2π must map onto the whole range.
+        let mut n = Number::new();
+        assert!(n.set_interval(&Number::from_i64(0), &Number::from_i64(10), false));
+        assert!(n.cos());
+        assert!(n.lower_end_point().is_less_than_or_equal_to(&Number::from_i64(-1)));
+        assert!(n.upper_end_point().is_greater_than_or_equal_to(&Number::from_i64(1)));
+    }
+
+    #[test]
+    fn atan2_point_values() {
+        // Oracle: `atan2(5, 0.2)` = 1.530817640.
+        let mut y = Number::from_i64(5);
+        assert!(y.atan2(&Number::parse("0.2", &Default::default()), false));
+        assert_eq!(y.print(&po_ez()), "1.530817640");
+    }
+
+    #[test]
+    fn atan2_over_an_x_interval_straddling_zero() {
+        // `arg((5±0.003)i - 0±0.2)` is `1.571±0.040` in the reference: with x
+        // straddling zero the quadrant formula is useless and `±π/2 −
+        // atan(x/y)` has to take over, keeping the interval width.
+        let po = crate::options::ParseOptions::default();
+        let mut x = Number::new();
+        assert!(x.set_interval(&Number::parse("-0.2", &po), &Number::parse("0.2", &po), false));
+        let mut y = Number::new();
+        assert!(y.set_interval(&Number::parse("4.997", &po), &Number::parse("5.003", &po), false));
+        assert!(y.atan2(&x, false));
+        let mut pm = crate::options::PrintOptions::default();
+        pm.interval_display = crate::options::IntervalDisplay::PlusMinus;
+        assert_eq!(y.print(&pm), "1.571±0.040");
     }
 
     #[test]
