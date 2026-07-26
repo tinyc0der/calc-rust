@@ -99,7 +99,8 @@ pub mod id {
 /// "unknown" for everything else, which is what lets `0 * sin(x)` collapse to
 /// zero while `0 * solve(...)` does not.
 pub fn returns_scalar(id: u32) -> bool {
-    (1000..=1014).contains(&id)      // trigonometric and exponential
+    (1000..=1014).contains(&id)      // trigonometric
+        || (1201..=1208).contains(&id) // roots, exp, logarithms
         || (1400..=1412).contains(&id) // abs, sgn, gamma, erf, zeta, ...
         || (1500..=1502).contains(&id) // factorials and binomial
         || (1700..=1725).contains(&id) // integer and bitwise helpers

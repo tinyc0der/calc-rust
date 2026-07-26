@@ -1175,6 +1175,16 @@ impl MathStructure {
             }
         }
 
+        // A nested square root can sometimes be flattened:
+        // `sqrt(8 + 2sqrt(15))` is `sqrt(5) + sqrt(3)`.
+        if self.is_addition() && other.number().is_some_and(|n| n.equals(&half(), false, false)) {
+            if let Some(denested) = denest_square_root(self) {
+                *self = denested;
+                self.calculatesub_opt(eo, false);
+                return Merged;
+            }
+        }
+
         // A root of a sum is worth trying to factor: `sqrt(x + 2sqrt(x) + 1)`
         // is `sqrt((sqrt(x) + 1)^2)`, which the rule above then reduces.
         // Only an exact `1/n` is worth the attempt, and only when factoring
@@ -1466,6 +1476,114 @@ impl MathStructure {
 /// `eo.keep_zero_units` (MathStructure-calculate.cc:2989): multiplying by zero
 /// normally collapses the product, but a factor carrying a unit keeps it, so
 /// `0 m` stays `0 m` and can still be converted.
+/// One half, as a `Number`.
+fn half() -> Number {
+    Number::from_ints(1, 2, 0)
+}
+
+/// `sqrt(a + b*sqrt(c))` = `sqrt((a+d)/2) + sqrt((a-d)/2)`, where
+/// `d = sqrt(a^2 - b^2*c)`, whenever that `d` is itself rational.
+///
+/// This is the classical denesting: squaring the right-hand side gives back
+/// `a + b*sqrt(c)` exactly, so it is an identity rather than an
+/// approximation — and it only fires when `d` comes out rational, which is
+/// what keeps `sqrt(1 + sqrt(2))` alone.
+fn denest_square_root(sum: &MathStructure) -> Option<MathStructure> {
+    let MathStructure::Addition(terms) = sum else {
+        return None;
+    };
+    if terms.len() != 2 {
+        return None;
+    }
+    // One term is the rational part, the other a rational multiple of a
+    // square root of a rational.
+    let (a, radical) = match (terms[0].number(), terms[1].number()) {
+        (Some(n), None) => (n.clone(), &terms[1]),
+        (None, Some(n)) => (n.clone(), &terms[0]),
+        _ => return None,
+    };
+    if !a.is_rational() || a.is_approximate() {
+        return None;
+    }
+    let (b, c) = rational_multiple_of_square_root(radical)?;
+
+    // d^2 = a^2 - b^2*c
+    let mut d = a.clone();
+    d.square();
+    let mut subtrahend = b.clone();
+    subtrahend.square();
+    subtrahend.multiply(&c);
+    if !d.subtract(&subtrahend) || d.is_negative() {
+        return None;
+    }
+    if !d.sqrt() || !d.is_rational() || d.is_approximate() {
+        return None;
+    }
+
+    let two = Number::from_i64(2);
+    let mut p = a.clone();
+    let mut q = a;
+    if !p.add(&d) || !q.subtract(&d) || !p.divide(&two) || !q.divide(&two) {
+        return None;
+    }
+    if p.is_negative() || q.is_negative() {
+        return None;
+    }
+    // Emit `sqrt(n)` calls rather than `n^(1/2)` powers: that is the shape a
+    // typed `sqrt(5)` keeps in exact mode, and the two forms do not compare
+    // equal, so `sqrt(8 + 2sqrt(15)) - (sqrt(5) + sqrt(3))` would not cancel.
+    let root = |n: Number| MathStructure::Function {
+        id: crate::ids::FunctionId(crate::builtins::id::SQRT),
+        args: vec![MathStructure::Number(n)],
+    };
+    let second = if b.is_negative() {
+        MathStructure::Multiplication(vec![
+            MathStructure::Number(Number::from_i64(-1)),
+            root(q),
+        ])
+    } else {
+        root(q)
+    };
+    Some(MathStructure::Addition(vec![root(p), second]))
+}
+
+/// `b` and `c` when `m` is `b*sqrt(c)` (or a bare `sqrt(c)`) with both
+/// rational and `c` positive.
+fn rational_multiple_of_square_root(m: &MathStructure) -> Option<(Number, Number)> {
+    let (coefficient, power) = match m {
+        MathStructure::Power { .. } => (Number::from_i64(1), m),
+        MathStructure::Multiplication(v) if v.len() == 2 => {
+            (v[0].number()?.clone(), &v[1])
+        }
+        _ => return None,
+    };
+    if !coefficient.is_rational() || coefficient.is_approximate() {
+        return None;
+    }
+    // A square root reaches here in two shapes: as `n^(1/2)` when it was
+    // written that way, and as an unevaluated `sqrt(n)` call when exact mode
+    // refused to turn it into a float.
+    let radicand = match power {
+        MathStructure::Power { base, exponent }
+            if exponent
+                .number()
+                .is_some_and(|e| e.equals(&half(), false, false)) =>
+        {
+            base.number()?.clone()
+        }
+        MathStructure::Function { id, args }
+            if id.0 == crate::builtins::id::SQRT && args.len() == 1 =>
+        {
+            args[0].number()?.clone()
+        }
+        _ => return None,
+    };
+    if !radicand.is_rational() || radicand.is_approximate() || !radicand.is_positive() {
+        return None;
+    }
+    Some((coefficient, radicand))
+}
+
 /// `n` when `m` is exactly `1/n` for an integer `n >= 2`.
 fn reciprocal_integer(m: &MathStructure) -> Option<i64> {
     let n = m.number()?;
@@ -1929,5 +2047,36 @@ mod tests {
         approx.calculatesub(&EvaluationOptions::approximate());
         assert!(approx.is_number(), "{approx}");
         assert!(approx.number().expect("number").is_approximate());
+    }
+}
+
+#[cfg(test)]
+mod denest_tests {
+    use crate::session::Session;
+
+    fn session() -> Session {
+        let mut s = Session::new();
+        s.evaluate_line("/set approximation exact").ok();
+        s.evaluate_line("/set fr 2").ok();
+        s
+    }
+
+    #[test]
+    fn a_nested_square_root_flattens_when_it_can() {
+        let mut s = session();
+        assert_eq!(s.evaluate_line("sqrt(8 + 2*sqrt(15))").unwrap(), "sqrt(5) + sqrt(3)");
+        // The denested form has to be the same shape a typed `sqrt(5)` keeps,
+        // or the difference will not cancel.
+        assert_eq!(
+            s.evaluate_line("sqrt(8 + 2*sqrt(15)) - (sqrt(5) + sqrt(3))").unwrap(),
+            "0"
+        );
+        assert_eq!(s.evaluate_line("sqrt(3 - 2*sqrt(2))").unwrap(), "sqrt(2) - 1");
+    }
+
+    #[test]
+    fn a_root_that_does_not_denest_is_left_alone() {
+        let mut s = session();
+        assert_eq!(s.evaluate_line("sqrt(1 + sqrt(2))").unwrap(), "sqrt(1 + sqrt(2))");
     }
 }
