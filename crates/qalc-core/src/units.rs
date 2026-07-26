@@ -133,8 +133,22 @@ fn data_dir() -> Option<PathBuf> {
 /// `&self`) able to reach it. Returns `None` when no definition directory is
 /// present, in which case every name stays symbolic and the port behaves as it
 /// did before units existed.
-pub fn store() -> Option<&'static UnitStore> {
+/// The store *if it is already built*, without triggering a load.
+///
+/// Building the store parses unit relation strings, which re-enters the
+/// parser; anything the parser consults must use this rather than
+/// [`store`], or `get_or_init` deadlocks on itself.
+pub fn store_if_ready() -> Option<&'static UnitStore> {
+    store_cell().get().and_then(|o| o.as_ref())
+}
+
+fn store_cell() -> &'static OnceLock<Option<UnitStore>> {
     static STORE: OnceLock<Option<UnitStore>> = OnceLock::new();
+    &STORE
+}
+
+pub fn store() -> Option<&'static UnitStore> {
+    let STORE = store_cell();
     STORE
         .get_or_init(|| {
             let dir = data_dir()?;
@@ -356,6 +370,38 @@ impl UnitStore {
 
     /// A unit name, optionally with a prefix, but without the trailing-digit
     /// exponent shorthand.
+    /// The multiplier for a name that is *entirely* an SI prefix (`k`, `M`).
+    ///
+    /// NOT currently wired into parsing. Applying it to a prefix trailing a
+    /// number does give `11k` = 11000, but `k`, `c` and `d` are also
+    /// ordinary symbols, and doing so cost three transcript cases and six
+    /// polynomial tests. The reference distinguishes these through the
+    /// variable/unit registry, which this port does not yet consult for
+    /// single letters.
+    ///
+    /// This is deliberately not part of ordinary name resolution: the
+    /// reference gives a standalone `k` the value 0, and only treats a
+    /// prefix as a multiplier when it trails a number. Anything that is
+    /// also a unit or variable keeps that meaning — `2G` is the
+    /// gravitational constant, not 2e9.
+    #[allow(dead_code)]
+    pub fn bare_prefix_multiplier(&self, name: &str) -> Option<Number> {
+        if self.lookup_unit(name).is_some() {
+            return None;
+        }
+        for (pname, pid, case_sensitive) in &self.prefix_names {
+            let hit = if *case_sensitive {
+                pname == name
+            } else {
+                pname.eq_ignore_ascii_case(name)
+            };
+            if hit {
+                return Some(self.reg.prefix(*pid).value.clone());
+            }
+        }
+        None
+    }
+
     fn resolve_plain(&self, name: &str) -> Option<MathStructure> {
         if let Some(id) = self.lookup_unit(name) {
             return Some(MathStructure::unit(id));

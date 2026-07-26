@@ -41,6 +41,11 @@ impl Session {
             eval_options: EvaluationOptions::default(),
         };
         s.install_builtin_constants();
+        // Build the unit store up front. The parser consults it for bare SI
+        // prefixes (`11k`), and it can only do so through the non-blocking
+        // accessor — so the store has to already exist by the time any user
+        // expression is parsed.
+        let _ = crate::units::store();
         s
     }
 

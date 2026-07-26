@@ -1145,6 +1145,7 @@ fn analyse_bracket(content: &str) -> (bool, bool) {
     (b_comma, b_old_matrix >= 1)
 }
 
+
 /// Recognize a base name after `to`: `bin`, `bin16`, `oct`, `hex`, `dec`,
 /// `roman`, `sexa`, `float`, and the `binN`/`hexN` bit-width forms.
 fn base_target_from_name(lower: &str) -> Option<ConversionTarget> {
