@@ -649,6 +649,13 @@ impl MathStructure {
         other: &mut MathStructure,
         eo: &EvaluationOptions,
     ) -> MergeResult {
+        // x/abs(x)-sgn(x)=0 (MathStructure-calculate.cc:640). The two terms
+        // are the same value written two ways and share no factor, so nothing
+        // else in this branch would ever bring them together.
+        if signum_quotient_cancels(self, other, eo) || signum_quotient_cancels(other, self, eo) {
+            *self = MathStructure::from(0);
+            return MergeResult::Merged;
+        }
         let i1 = usize::from(self.get(0).is_some_and(MathStructure::is_number));
         let i2 = usize::from(other.get(0).is_some_and(MathStructure::is_number));
         if self.size() - i1 != other.size() - i2 {
@@ -1614,6 +1621,88 @@ fn factor_to_power(
         MathStructure::Multiplication(v) if v.iter().any(is_root_power) => Some(factored),
         _ => None,
     }
+}
+
+/// `x` from a product that spells out `sgn(x)`: either `x * abs(x)^-1` or
+/// `abs(x) * x^-1`.
+fn signum_quotient(m: &MathStructure) -> Option<&MathStructure> {
+    let MathStructure::Multiplication(v) = m else {
+        return None;
+    };
+    if v.len() != 2 {
+        return None;
+    }
+    fn inverse(f: &MathStructure) -> Option<&MathStructure> {
+        match f {
+            MathStructure::Power { base, exponent }
+                if exponent.number().is_some_and(Number::is_minus_one) =>
+            {
+                Some(base)
+            }
+            _ => None,
+        }
+    }
+    fn abs_of(f: &MathStructure) -> Option<&MathStructure> {
+        match f {
+            MathStructure::Function { id, args }
+                if id.0 == crate::builtins::id::ABS && args.len() == 1 =>
+            {
+                Some(&args[0])
+            }
+            _ => None,
+        }
+    }
+    for (i, j) in [(0usize, 1usize), (1, 0)] {
+        let Some(divisor) = inverse(&v[i]) else {
+            continue;
+        };
+        // x * abs(x)^-1
+        if abs_of(divisor).is_some_and(|a| a.equals(&v[j])) {
+            return Some(&v[j]);
+        }
+        // abs(x) * x^-1
+        if let Some(a) = abs_of(&v[j]) {
+            if a.equals(divisor) {
+                return Some(a);
+            }
+        }
+    }
+    None
+}
+
+/// Does `quotient` spell out `sgn(x)` while `negated` is `-sgn(x)`?
+///
+/// The C++ guard is `representsReal()`, which holds for an unknown because
+/// the reference's default assumption is `ASSUMPTION_TYPE_REAL`; this port's
+/// `represents::real` models the weaker `ASSUMPTION_TYPE_NUMBER` and says no
+/// for a symbol, so the test here is `representsNumber` instead. The identity
+/// holds either way — the reference's own `sgn` of a complex number is
+/// `z/abs(z)`.
+fn signum_quotient_cancels(
+    quotient: &MathStructure,
+    negated: &MathStructure,
+    eo: &EvaluationOptions,
+) -> bool {
+    let Some(x) = signum_quotient(quotient) else {
+        return false;
+    };
+    let MathStructure::Multiplication(v) = negated else {
+        return false;
+    };
+    let [coefficient, signum] = v.as_slice() else {
+        return false;
+    };
+    if !coefficient.number().is_some_and(Number::is_minus_one) {
+        return false;
+    }
+    let MathStructure::Function { id, args } = signum else {
+        return false;
+    };
+    if id.0 != crate::builtins::id::SIGNUM || args.len() != 1 || !args[0].equals(x) {
+        return false;
+    }
+    represents::number(x)
+        && (represents::non_zero(x) || (eo.assume_denominators_nonzero && !represents::zero(x)))
 }
 
 fn zero_may_absorb(other: &MathStructure, eo: &EvaluationOptions) -> bool {
