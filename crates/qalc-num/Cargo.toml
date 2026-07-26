@@ -1,0 +1,8 @@
+[package]
+name = "qalc-num"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Arbitrary-precision numeric core for rust-calc (GMP/MPFR replacement, pure Rust)"
+
+[dependencies]
