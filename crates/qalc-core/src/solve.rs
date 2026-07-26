@@ -2141,23 +2141,27 @@ pub fn newton_solve(
 ///
 /// Only an `=` comparison that actually contains an unknown is touched, so
 /// numeric comparisons and everything else keep their existing behaviour.
-pub fn isolate_x_toplevel(m: &mut MathStructure, eo: &EvaluationOptions) {
+/// Returns true when the comparison was replaced by a solution, so the caller
+/// knows the structure needs another trip through the merge engine.
+pub fn isolate_x_toplevel(m: &mut MathStructure, eo: &EvaluationOptions) -> bool {
     if !matches!(m, MathStructure::Comparison { op: ComparisonType::Equals, .. }) {
-        return;
+        return false;
     }
     // Solving is a top-level step. Several builtins re-enter the evaluator on
     // their own arguments, and the evaluator ends with this call, so without
     // a guard `x^3 = 5` recurses: solve -> evaluate -> solve -> ... The C++
     // isolates once, at the top, which is what this reproduces.
     if SOLVING.with(|s| s.get()) {
-        return;
+        return false;
     }
     SOLVING.with(|s| s.set(true));
     CURRENT_EO.with(|c| *c.borrow_mut() = eo.clone());
+    let mut solved = false;
     if let Some(xvar) = poly::find_x_var(m) {
-        isolate_x(m, &xvar);
+        solved = isolate_x(m, &xvar);
     }
     SOLVING.with(|s| s.set(false));
+    solved
 }
 
 thread_local! {

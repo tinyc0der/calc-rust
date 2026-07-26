@@ -197,6 +197,16 @@ pub fn evaluate_calculated(m: &mut MathStructure) {
 /// [`evaluate_calculated`] with explicit evaluation options — the session
 /// passes its own so `/set approximation exact` reaches the merge engine.
 pub fn evaluate_calculated_with(m: &mut MathStructure, eo: &EvaluationOptions) {
+    // `limit()` is evaluated before anything else gets to numerify its
+    // argument. The C++ `LimitFunction::calculate` forces
+    // `APPROXIMATION_EXACT` for the whole call, and the limit machinery needs
+    // it: it recognises `0/0` structurally, so an argument whose `sqrt(3)` has
+    // already become `1.732050808` no longer looks indeterminate. See
+    // `limit::resolve_exactly`. Under `Exact` the ordinary loop below already
+    // does exactly this, so the pre-pass only runs when it would differ.
+    if eo.approximation != crate::options::ApproximationMode::Exact {
+        crate::limit::resolve_exactly(m);
+    }
     for _ in 0..MAX_EVAL_PASSES {
         let functions_changed = builtins::calculate_functions_eo(m, eo);
         let merged = m.calculatesub(eo);
@@ -214,7 +224,31 @@ pub fn evaluate_calculated_with(m: &mut MathStructure, eo: &EvaluationOptions) {
     crate::datetime::apply(m);
     // `eo.isolate_x` (default on for the CLI): an equation in one unknown is
     // solved rather than merely simplified.
-    crate::solve::isolate_x_toplevel(m, eo);
+    //
+    // The C++ solves inside `MathStructure::calculatesub`, so a solution it
+    // produces is merged by the same loop that produced it. Here the solver is
+    // a separate top-level step (`SOLVING` guards against the re-entry that
+    // would otherwise occur), so its output has to be offered to the merge
+    // engine explicitly — otherwise `x^3 = 2` answers `x = cbrt(2)` even under
+    // `Approximate`, and `sin(3x) = 1/3` answers `pi / 6` where a second pass
+    // would have given the decimal.
+    //
+    // Restricted to the non-`Exact` modes on purpose. Under `Exact` the extra
+    // pass changes nothing about the *value* — there is nothing left to
+    // numerify — but it does re-associate the surds the closed forms are
+    // written in (`(sqrt(5) + 3) / 2` becomes `sqrt(5) / 2 + 3/2`), and the
+    // reference's spelling of those is what `polynomial.batch:6`,
+    // `solver.batch:7` and `solver.batch:19` pin.
+    let solved = crate::solve::isolate_x_toplevel(m, eo);
+    if solved && eo.approximation != crate::options::ApproximationMode::Exact {
+        for _ in 0..MAX_EVAL_PASSES {
+            let functions_changed = builtins::calculate_functions_eo(m, eo);
+            let merged = m.calculatesub(eo);
+            if !functions_changed && !merged {
+                break;
+            }
+        }
+    }
     // Canonical ordering, as the C++ does in evalSort before printing.
     crate::sort::sort(m);
 }

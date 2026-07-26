@@ -41,7 +41,7 @@
 //!
 //! | property | checked | violations |
 //! |---|---|---|
-//! | P1 | 652 | 29, in five classes — two of them wrong *values*, not spellings |
+//! | P1 | 674 | 7, in two classes — all of them spellings, none a wrong value |
 //! | P2 | 44  | 1 |
 //! | P3 | 60 of 63 equations | 0 |
 //! | P8 | 693 | 0 |
@@ -768,13 +768,31 @@ mod p1_exact_then_approximate {
 
     /// `(case id, diagnosis)`. See the module docs on `KNOWN_VIOLATIONS`.
     ///
-    /// Five defects, in descending order of how wrong they are.
+    /// Two defects remain, in descending order of how wrong they are. Three
+    /// classes have been retired:
     ///
-    /// **A. `Approximate` mode gets the wrong limit** (2 cases). Not a
-    /// formatting difference: the two paths return different *values*. Both
-    /// transcripts that cover these lines open with `/set approximation
-    /// exact`, so the parity suite runs only the path that works and the
-    /// approximate path has never been exercised.
+    /// Class **A** — `Approximate` mode returning a wrong limit *value* for
+    /// `limits.batch:325` and `:358` — is fixed. Its cause was the generic
+    /// bottom-up function pass numerifying a `limit()` call's argument before
+    /// dispatching the call, which destroyed the structural `0/0` the limit
+    /// machinery looks for: `sqrt(x+3) - sqrt(3)` reached it as
+    /// `sqrt(x+3) - 1.732050808`, whose value at `x = 0` exact evaluation
+    /// cannot collapse (one term symbolic, one a float), so the denominator
+    /// looked non-zero and the answer came back `0`.
+    /// `eval::evaluate_calculated_with` now resolves limit subtrees exactly
+    /// first, as `LimitFunction::calculate` does.
+    ///
+    /// Classes **C** (solver output left symbolic by `Approximate`, 8 cases)
+    /// and **E** (a rational multiple of `pi` folded on one path only, 13
+    /// cases) are fixed, and were one defect: `solve::isolate_x_toplevel` runs
+    /// *after* `evaluate_calculated_with`'s merge loop, so nothing merged its
+    /// output. The C++ solves inside `calculatesub`, where the loop that
+    /// produced a solution also merges it. `evaluate_calculated_with` now runs
+    /// the merge loop again when the solver fired — under `Approximate` only,
+    /// because under `Exact` the extra pass re-associates the surds the
+    /// reference's closed forms are spelled with (`(sqrt(5) + 3) / 2` becomes
+    /// `sqrt(5) / 2 + 3/2`), which `polynomial.batch:6`, `solver.batch:7` and
+    /// `solver.batch:19` pin.
     ///
     /// **B. Evaluation is not idempotent for `abs(a) - abs(-a)`** (1 case).
     /// Neither mode cancels `abs(x - y) - abs(y - x)` in one pass — both leave
@@ -785,40 +803,18 @@ mod p1_exact_then_approximate {
     /// optimal-SI post-conversion afterwards, and that gives the CLI its
     /// second pass.
     ///
-    /// **C. `Approximate` leaves solver output symbolic; a second pass
-    /// numerifies it** (8 cases). `solve` returns the closed form
-    /// (`cbrt(2)`, `2 sqrt(13) - 5`, `(sqrt(65) + 3) / 4`) even in
-    /// `Approximate` mode, because `isolate_x_toplevel` runs after the merge
-    /// loop and its output is never merged again. Re-evaluating the structure
-    /// does merge it, so the two paths print different things for the same
-    /// value.
-    ///
-    /// **D. The mirror image: `Approximate` numerifies what `Exact` leaves
-    /// symbolic** (5 cases). `ln(x) + x = 3` gives `x = 2.207940032` directly
-    /// but `x = lambertw(e^3)` via exact — here the *exact* result is the one
-    /// the second pass cannot finish, because `lambertw` sits inside a
-    /// `LogicalOr` of comparisons that `evaluate_calculated_with` does not
-    /// descend into for function evaluation.
-    ///
-    /// **E. A rational multiple of `pi` in a trigonometric solution folds to a
-    /// decimal on one path only** (13 cases). `pi / 6` versus
-    /// `0.1666666667 pi`. Same value, and the same root cause as C/D — the
-    /// second pass reaches coefficients the first one did not.
+    /// **D. `Approximate` numerifies what `Exact` leaves symbolic** (6 cases).
+    /// `ln(x) + x = 3` gives `x = 2.207940032` directly but `x = lambertw(e^3)`
+    /// via exact — here the *exact* result is the one the second pass cannot
+    /// finish. Not the same defect as C/E, and not fixed with them: this port
+    /// parses `e` to `Symbolic("e")` and never gives it a value in *any* mode
+    /// (`Session::install_builtin_constants` says so, and `qalc -t e` prints
+    /// `e`), so `lambertw(e^3)` has no numeric argument to work from, while
+    /// `solve.rs` reaches the number by its own numeric route. Retiring this
+    /// class means numerifying `e` (and `pi`) under `Approximate`, which is
+    /// part of the two-phase TRY_EXACT question the CLI's
+    /// `approximation = Approximate` stand-in defers, not a solver bug.
     pub const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
-        // --- A: wrong value under Approximate ---------------------------
-        (
-            "limits.batch:325",
-            "A: WRONG VALUE. limit((sin(2x))/(sqrt(x+3)-sqrt(3)),0) is 4*sqrt(3) = 6.928…, \
-             which exact-then-approximate gets; evaluating directly under Approximate \
-             returns 0. limits.batch runs `/set approximation exact`, so the parity \
-             suite never evaluates this line the failing way.",
-        ),
-        (
-            "limits.batch:358",
-            "A: WRONG VALUE. limit((sqrt(x+1)-sqrt(2))/(x^2-1),1) is 1/(4*sqrt(2)) = \
-             0.1767…; under Approximate the limit machinery gives up and leaves the \
-             indeterminate quotient `0.000000000 / 0.000000000`.",
-        ),
         // --- B: missing cancellation under Approximate -------------------
         (
             "polynomial.batch:23",
@@ -832,46 +828,13 @@ mod p1_exact_then_approximate {
              Approximate, once under Exact, and once more under Approximate \
              all print `|x - y| - |x - y|`.",
         ),
-        // --- C: solver output left symbolic by Approximate ---------------
-        (
-            "polynomial.batch:6",
-            "C: -x^2 + 3x = 1. Approximate returns the surd form \
-             `x = (sqrt(5) + 3) / 2 or x = 1.5 - sqrt(5) / 2`; a second pass over it \
-             numerifies to `2.618033989`/`0.3819660113`.",
-        ),
-        (
-            "solver.batch:7",
-            "C: x^3 + x^2 + x = 5. Approximate returns the Cardano closed form; the \
-             second pass collapses it to 1.278163073.",
-        ),
-        (
-            "solver.batch:13",
-            "C: x^(1/3) + x^(2/3) = 3. Approximate returns `2 * sqrt(13) - 5`; the \
-             second pass gives 2.211102551.",
-        ),
-        (
-            "constructed:2x^2 - 3x - 7 = 0",
-            "C: Approximate returns `(sqrt(65) + 3) / 4`; the second pass gives \
-             2.765564437.",
-        ),
-        (
-            "constructed:x^3 - 2 = 0",
-            "C: Approximate returns `cbrt(2)`; the second pass gives 1.259921050.",
-        ),
-        (
-            "constructed:x^3 + x^2 + x = 5",
-            "C: same as solver.batch:7.",
-        ),
-        (
-            "constructed:x^(1/3) + x^(2/3) = 3",
-            "C: same as solver.batch:13.",
-        ),
         // --- D: exact output left symbolic by the second pass ------------
         (
             "solver.batch:16",
             "D: ln(x) + x = 3. Direct Approximate gives x = 2.207940032; \
-             exact-then-approximate is stuck at `x = lambertw(e^3)`, because the \
-             re-evaluation does not evaluate functions inside a solved comparison.",
+             exact-then-approximate is stuck at `x = lambertw(e^3)`, because `e` \
+             is a bare symbol in this port in every mode, so `lambertw` has no \
+             numeric argument to evaluate.",
         ),
         (
             "constructed:ln(x) + x = 3",
@@ -894,39 +857,6 @@ mod p1_exact_then_approximate {
         (
             "constructed:x^(-3x) = 2",
             "D: same as solver.batch:22.",
-        ),
-        // --- E: rational multiple of pi folded on one path only ----------
-        (
-            "solver.batch:25",
-            "E: `pi / 6` (direct) versus `0.1666666667 pi` (exact-then-approximate) \
-             in the trigonometric general solution.",
-        ),
-        ("solver.batch:28", "E: `pi / 18` versus `0.05555555556 pi`."),
-        ("solver.batch:31", "E: `pi / 2` versus `0.5 pi`."),
-        ("solver.batch:34", "E: `pi / 2` versus `0.5 pi`."),
-        ("solver.batch:37", "E: `pi / 36` versus `0.02777777778 pi`."),
-        ("solver.batch:46", "E: `pi / 2` and `pi / 6` versus their decimals."),
-        ("solver.batch:49", "E: `pi / 2` versus `0.5 pi`."),
-        (
-            "solver.batch:55",
-            "E: `pi / 12` and `(pi * n) / 2 - pi / 4` versus their decimals.",
-        ),
-        (
-            "constructed:cos(2x) = 1/2",
-            "E: `pi / 6` versus `0.1666666667 pi`.",
-        ),
-        ("constructed:tan(x) = 1", "E: `pi / 4` versus `0.25 pi`."),
-        (
-            "constructed:1/3 * sin(3x) - 1/3 = 0",
-            "E: `pi / 6` versus `0.1666666667 pi`.",
-        ),
-        (
-            "constructed:2/3 * sin(3x) - 1/3 = 0",
-            "E: `pi / 18` versus `0.05555555556 pi`.",
-        ),
-        (
-            "constructed:sin(x) + cos(x) = 1",
-            "E: `pi / 2` versus `0.5 pi`.",
         ),
     ];
 

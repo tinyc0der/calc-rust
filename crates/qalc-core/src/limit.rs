@@ -1994,6 +1994,53 @@ thread_local! {
     static BUSY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Is `m` a `limit(…)` call this module would evaluate?
+fn is_limit_call(m: &MathStructure) -> bool {
+    matches!(m, MathStructure::Function { id, args }
+        if id.0 == id::LIMIT && (2..=4).contains(&args.len()))
+}
+
+/// Resolve every `limit(…)` call in `m` under `APPROXIMATION_EXACT`, before
+/// the surrounding evaluation gets to numerify anything.
+///
+/// `LimitFunction::calculate` (BuiltinFunctions-calculus.cc:744) runs the
+/// whole limit — argument evaluation included — with
+/// `eo2.approximation = APPROXIMATION_EXACT`, and the machinery in this module
+/// depends on that: it decides whether it is looking at an indeterminate form
+/// by asking whether a subexpression *is* zero, structurally. The generic
+/// bottom-up pass in `builtins::calculate_functions_eo` evaluates a call's
+/// arguments before dispatching the call, so under `APPROXIMATION_APPROXIMATE`
+/// the argument of `limit((sin 2x)/(sqrt(x+3) - sqrt(3)), 0)` arrives here as
+/// `sin(2x) / (sqrt(x+3) - 1.732050808)`. Substituting `x := 0` then leaves
+/// `sqrt(3) - 1.732050808`, which exact evaluation cannot collapse (one term is
+/// symbolic, the other a float), so the denominator looks non-zero, the `0/0`
+/// is never recognised, and the answer comes back `0` instead of `4 sqrt(3)`.
+///
+/// Running the limit subtrees first, exactly, is the same order the reference
+/// uses. A call this cannot resolve is left as it was, so the ordinary
+/// evaluation loop still gets its turn at it.
+pub fn resolve_exactly(m: &mut MathStructure) -> bool {
+    let mut changed = false;
+    for i in 0..m.size() {
+        if let Some(child) = m.get_mut(i) {
+            changed |= resolve_exactly(child);
+        }
+    }
+    if !is_limit_call(m) {
+        return changed;
+    }
+    let o = eo();
+    for _ in 0..8 {
+        let functions_changed = crate::builtins::calculate_functions_eo(m, &o);
+        let merged = m.calculatesub(&o);
+        if !functions_changed && !merged {
+            break;
+        }
+        changed = true;
+    }
+    changed
+}
+
 pub fn function_id_for_name(name: &str) -> Option<FunctionId> {
     match name {
         "limit" | "lim" => Some(FunctionId(id::LIMIT)),
