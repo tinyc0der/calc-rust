@@ -2,6 +2,7 @@
 //!
 //! Mirrors `Calculator::calculateAndPrint` (Calculator-calculate.cc).
 
+use crate::builtins;
 use crate::parser::{self, ParseError};
 use crate::print;
 use crate::structure::MathStructure;
@@ -31,10 +32,24 @@ pub fn evaluate_to_string(expr: &str) -> Result<String, String> {
 }
 
 /// Evaluate a structure in place using default evaluation options.
+///
+/// Mirrors `MathStructure::eval`: evaluate function calls, then run the
+/// arithmetic merge engine, repeating while either makes progress (a
+/// resolved function can expose a new merge, and a merge can complete a
+/// function's arguments).
 pub fn evaluate(m: &mut MathStructure) {
     let eo = EvaluationOptions::default();
-    m.calculatesub(&eo);
+    for _ in 0..MAX_EVAL_PASSES {
+        let functions_changed = builtins::calculate_functions(m);
+        let merged = m.calculatesub(&eo);
+        if !functions_changed && !merged {
+            break;
+        }
+    }
 }
+
+/// Guard against a pathological rewrite cycle.
+const MAX_EVAL_PASSES: usize = 16;
 
 #[cfg(test)]
 mod tests {

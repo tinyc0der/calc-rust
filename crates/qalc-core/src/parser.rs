@@ -68,8 +68,8 @@ impl NameResolver for SymbolicResolver {
     fn resolve(&self, name: &str) -> Option<MathStructure> {
         Some(MathStructure::symbolic(name))
     }
-    fn resolve_function(&self, _name: &str) -> Option<FunctionId> {
-        None
+    fn resolve_function(&self, name: &str) -> Option<FunctionId> {
+        crate::builtins::function_id_for_name(name)
     }
 }
 
@@ -336,6 +336,14 @@ impl<'a> Parser<'a> {
                     let right = self.parse_implicit_product()?;
                     left = builtin_call(BuiltinOp::Rem, vec![left, right]);
                 }
+                // `%` is binary mod when an operand follows (`6%2` = 0) and
+                // postfix percent otherwise (`50%` = 0.5) — both verified
+                // against the reference binary.
+                Tok::Percent if self.percent_is_binary() => {
+                    self.bump();
+                    let right = self.parse_implicit_product()?;
+                    left = builtin_call(BuiltinOp::Rem, vec![left, right]);
+                }
                 _ => break,
             }
         }
@@ -355,6 +363,15 @@ impl<'a> Parser<'a> {
         } else {
             MathStructure::Multiplication(factors)
         })
+    }
+
+    /// Is the `%` at the cursor a binary modulo rather than postfix percent?
+    /// True when an operand follows it.
+    fn percent_is_binary(&self) -> bool {
+        matches!(
+            self.toks.get(self.i + 1).map(|t| &t.tok),
+            Some(Tok::Number(_) | Tok::Ident(_) | Tok::LParen | Tok::Minus)
+        )
     }
 
     /// Can the current token begin an implicitly-multiplied factor?
@@ -427,7 +444,9 @@ impl<'a> Parser<'a> {
                         m = builtin_call(BuiltinOp::Factorial, vec![m]);
                     }
                 }
-                Tok::Percent => {
+                // Postfix percent only when no operand follows; otherwise
+                // this `%` is binary modulo and belongs to the caller.
+                Tok::Percent if !self.percent_is_binary() => {
                     self.bump();
                     // `x%` = x/100; represented as multiplication by 1/100.
                     let hundredth = MathStructure::Number(Number::from_ints(1, 100, 0));
@@ -518,6 +537,18 @@ impl<'a> Parser<'a> {
                 let m = m?;
                 self.eat(&Tok::BitOr);
                 Ok(builtin_call(BuiltinOp::Abs, vec![m]))
+            }
+            // Word operators double as function names when called:
+            // `mod(x, 2)` alongside `x mod 2`.
+            Tok::Mod | Tok::Rem if self.toks.get(self.i + 1).map(|t| &t.tok) == Some(&Tok::LParen) => {
+                let name = if tok.tok == Tok::Mod { "mod" } else { "rem" };
+                self.bump();
+                let fid = self
+                    .resolver
+                    .resolve_function(name)
+                    .unwrap_or_else(|| BuiltinOp::Mod.function_id());
+                let args = self.parse_call_args()?;
+                Ok(MathStructure::Function { id: fid, args })
             }
             Tok::Eof => self.err("unexpected end of expression"),
             ref t => self.err(format!("unexpected token {t:?}")),

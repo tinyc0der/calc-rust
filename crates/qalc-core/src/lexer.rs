@@ -21,8 +21,9 @@ pub enum Tok {
     Divide,
     /// `\` integer division (`//` also maps here).
     IntDivide,
+    /// `mod` and `%%` — floored modulo (sign follows the divisor).
     Mod,
-    /// `%%` remainder.
+    /// `rem` — truncated remainder (sign follows the dividend).
     Rem,
     Power,
     /// `.^` element-wise power.
@@ -137,6 +138,7 @@ pub fn tokenize(src: &str) -> Vec<Token> {
                 "minus" => Tok::Minus,
                 "times" => Tok::Times,
                 "per" => Tok::Divide,
+                "div" => Tok::IntDivide,
                 _ => Tok::Ident(s),
             }
         } else {
@@ -262,9 +264,13 @@ fn lex_operator(chars: &[char], i: &mut usize) -> Option<Tok> {
             Tok::Power
         }
         '%' => {
+            // Verified against the reference binary: `%%` is floored modulo
+            // (3 %% -2 = -1) while binary `%` is truncated remainder
+            // (-8%3 = -2). The word operators agree: `mod` floors, `rem`
+            // truncates.
             if next == Some('%') {
                 adv = 2;
-                Tok::Rem
+                Tok::Mod
             } else {
                 Tok::Percent
             }
@@ -430,7 +436,7 @@ mod tests {
         assert_eq!(toks("a<=b"), vec![Tok::Ident("a".into()), Tok::LessEquals, Tok::Ident("b".into()), Tok::Eof]);
         assert_eq!(toks("1<<2"), vec![Tok::Number("1".into()), Tok::ShiftLeft, Tok::Number("2".into()), Tok::Eof]);
         assert_eq!(toks("2**3"), vec![Tok::Number("2".into()), Tok::Power, Tok::Number("3".into()), Tok::Eof]);
-        assert_eq!(toks("5%%3"), vec![Tok::Number("5".into()), Tok::Rem, Tok::Number("3".into()), Tok::Eof]);
+        assert_eq!(toks("5%%3"), vec![Tok::Number("5".into()), Tok::Mod, Tok::Number("3".into()), Tok::Eof]);
         assert_eq!(toks("x:=5"), vec![Tok::Ident("x".into()), Tok::Assign, Tok::Number("5".into()), Tok::Eof]);
     }
 
