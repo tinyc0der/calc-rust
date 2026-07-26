@@ -4,4 +4,9 @@
 //! `MathStructure`, `Calculator`, units, variables, builtin functions,
 //! definitions loading, and output formatting.
 
+pub mod ids;
+pub mod structure;
+
+pub use ids::{FunctionId, UnitId, VariableId};
 pub use qalc_num::Number;
+pub use structure::{ComparisonType, MathStructure};
