@@ -106,6 +106,13 @@ fn print_units_group(units: &[MathStructure], po: &PrintOptions) -> String {
 /// the division structure spaced.
 fn print_number(n: &Number, po: &PrintOptions) -> String {
     use qalc_num::options::NumberFractionFormat as F;
+    // `restrict_fraction_length` (PrintOptions, set by `/set fractions on`):
+    // a fraction whose numerator or denominator is longer than the display
+    // precision allows is shown as a decimal instead — `(3/2)^30` prints as
+    // `191751.0592`, not `205891132094649/1073741824` (Number.cc:12957).
+    if let Some(s) = print_long_fraction_as_decimal(n, po) {
+        return s;
+    }
     if po.spacious
         && matches!(po.number_fraction_format, F::Fractional | F::Combined)
         && n.is_rational()
@@ -116,6 +123,34 @@ fn print_number(n: &Number, po: &PrintOptions) -> String {
         return n.print(&po2);
     }
     n.print(po)
+}
+
+
+
+fn print_long_fraction_as_decimal(n: &Number, po: &PrintOptions) -> Option<String> {
+    use qalc_num::options::NumberFractionFormat as F;
+    if !matches!(po.number_fraction_format, F::Fractional | F::Combined) {
+        return None;
+    }
+    if !n.is_rational() || n.is_integer() || n.is_approximate() || n.has_imaginary_part() {
+        return None;
+    }
+    // `precexp` in Number::print: the precision plus three digits.
+    let limit = (qalc_num::context::precision() + 3).max(4) as usize;
+    let len = n
+        .numerator()
+        .numerator_digits()
+        .max(n.denominator().numerator_digits());
+    if len <= limit {
+        return None;
+    }
+    let mut approx = n.clone();
+    if !approx.set_to_floating_point() {
+        return None;
+    }
+    let mut po2 = po.clone();
+    po2.number_fraction_format = F::Decimal;
+    Some(approx.print(&po2))
 }
 
 fn print_sub(m: &MathStructure, po: &PrintOptions, depth: usize) -> String {
@@ -511,8 +546,12 @@ fn print_multiplication(factors: &[MathStructure], po: &PrintOptions, depth: usi
     }
 }
 
-/// A multiplication whose first factor is the rational `1/d` (with fraction
-/// display enabled) prints as `rest / d`.
+/// A multiplication whose first factor is the rational `±1/d` (with fraction
+/// display enabled) prints as `rest / d` — `1/2 * x` is `x / 2` and
+/// `-1/2 * e` is `-e / 2`, matching `MathStructure::formatsub`.
+///
+/// When the rest of the product also contributes denominator factors the two
+/// denominators merge into one: `1/2 * e^-1` is `1 / (2e)`.
 fn print_unit_fraction_multiplication(
     factors: &[MathStructure],
     po: &PrintOptions,
@@ -525,34 +564,109 @@ fn print_unit_fraction_multiplication(
     let MathStructure::Number(n) = &factors[0] else {
         return None;
     };
-    if !n.is_rational() || n.is_integer() || n.is_approximate() || !n.numerator_is_one() {
+    if !n.is_rational() || n.is_integer() || n.is_approximate() {
         return None;
     }
-    let den = MathStructure::Number(n.denominator());
-    let rest: Vec<MathStructure> = factors[1..].to_vec();
-    let body = if rest.len() == 1 {
-        print_operand(&rest[0], po, depth, &MathStructure::Multiplication(Vec::new()))
+    let mut numerator = n.numerator();
+    let negative = numerator.is_negative();
+    if negative && !numerator.negate() {
+        return None;
+    }
+    if !numerator.is_one() {
+        return None;
+    }
+    let coeff_den = MathStructure::Number(n.denominator());
+    let mut numer: Vec<MathStructure> = Vec::new();
+    let mut denom: Vec<MathStructure> = Vec::new();
+    for f in &factors[1..] {
+        match as_inverse(f) {
+            Some(base) => denom.push(base),
+            None => numer.push(f.clone()),
+        }
+    }
+    // The coefficient's denominator leads a plain product (`1 / (2e)`) but
+    // trails one that already starts with a call (`1 / (sqrt(2) * 4)`).
+    let trailing = denom.iter().any(|d| renders_as_call(d));
+    if trailing {
+        denom.push(coeff_den);
     } else {
-        format!("({})", join_factors(&rest, po, depth))
-    };
-    let d = print_sub(&den, po, depth + 1);
+        denom.insert(0, coeff_den);
+    }
+    if numer.is_empty() {
+        numer.push(MathStructure::Number(Number::from_i64(1)));
+    }
+    // A multi-factor numerator keeps its parentheses (`(xy) / 2`).
+    let mut n_str = join_factors(&numer, po, depth);
+    if numer.len() > 1
+        || needs_parenthesis(&numer[0], &MathStructure::Multiplication(Vec::new()))
+    {
+        n_str = format!("({n_str})");
+    }
+    let mut d_str = join_factors(&denom, po, depth);
+    if denom.len() > 1 || (is_compound(&denom[0]) && !d_str.starts_with('(')) {
+        d_str = format!("({d_str})");
+    }
+    let sign = if negative { "-" } else { "" };
     Some(if po.spacious {
-        format!("{body} / {d}")
+        format!("{sign}{n_str} / {d_str}")
     } else {
-        format!("{body}/{d}")
+        format!("{sign}{n_str}/{d_str}")
     })
 }
 
-/// `x^-1` → `Some(x)`; used to recover division from the multiplication form.
-fn as_inverse(m: &MathStructure) -> Option<MathStructure> {
-    if let MathStructure::Power { base, exponent } = m {
-        if let MathStructure::Number(n) = exponent.as_ref() {
-            if n.is_minus_one() {
-                return Some((**base).clone());
-            }
+/// True when `m` prints as a function call (`sqrt(2)`, `ln(3)`, `cbrt(e)`),
+/// which the reference always separates from a neighbouring factor with an
+/// explicit `*`.
+fn renders_as_call(m: &MathStructure) -> bool {
+    match m {
+        MathStructure::Function { .. } => true,
+        MathStructure::Power { base, exponent } => {
+            is_one_half(exponent) || (is_one_third(exponent) && represents_non_negative(base))
         }
+        _ => false,
     }
-    None
+}
+
+/// `x^(1/3)` only prints as `cbrt(x)` when the base is known non-negative
+/// (the reference keeps `x^(1/3)` but writes `cbrt(2)` and `cbrt(e)`).
+fn is_one_third(m: &MathStructure) -> bool {
+    matches!(m, MathStructure::Number(n)
+        if n.is_rational() && !n.is_approximate()
+            && n.numerator().is_one() && n.denominator().equals(&Number::from_i64(3), false, false))
+}
+
+fn represents_non_negative(m: &MathStructure) -> bool {
+    match m {
+        MathStructure::Number(n) => !n.is_negative(),
+        MathStructure::Symbolic(s) => s == "e" || s == "pi",
+        _ => false,
+    }
+}
+
+/// `x^-n` → `Some(x^n)`; used to recover division from the multiplication
+/// form. `MathStructure::formatsub` does the same for *any* negative
+/// exponent, which is why the reference prints `x^-2` as `1 / x^2`.
+fn as_inverse(m: &MathStructure) -> Option<MathStructure> {
+    let MathStructure::Power { base, exponent } = m else {
+        return None;
+    };
+    let MathStructure::Number(n) = exponent.as_ref() else {
+        return None;
+    };
+    if !n.is_negative() {
+        return None;
+    }
+    if n.is_minus_one() {
+        return Some((**base).clone());
+    }
+    let mut p = n.clone();
+    if !p.negate() {
+        return None;
+    }
+    Some(MathStructure::Power {
+        base: base.clone(),
+        exponent: Box::new(MathStructure::Number(p)),
+    })
 }
 
 fn is_compound(m: &MathStructure) -> bool {
@@ -628,6 +742,11 @@ fn multiplication_sign(
             MulSign::None
         };
     }
+    // A factor that prints as a call is always separated by `*`
+    // (`4 * sqrt(3)`, `3 * ln(2)`, `e * sqrt(e)`).
+    if renders_as_call(this) {
+        return MulSign::Operator;
+    }
     match prev {
         // `a^b*c` needs the operator when the power prints flat.
         MathStructure::Power { .. } => MulSign::Operator,
@@ -665,6 +784,33 @@ fn print_power(
     if is_one_half(exponent) {
         return format!("sqrt({})", print_sub(base, po, depth + 1));
     }
+    if is_one_third(exponent) && represents_non_negative(base) {
+        return format!("cbrt({})", print_sub(base, po, depth + 1));
+    }
+    // `formatsub` turns a negative exponent into a division: `x^-2` prints
+    // as `1 / x^2` and `e^(-3/2)` as `1 / (e * sqrt(e))`.
+    if let Some(inner) = as_inverse(&MathStructure::Power {
+        base: Box::new(base.clone()),
+        exponent: Box::new(exponent.clone()),
+    }) {
+        let body = print_sub(&inner, po, depth + 1);
+        let body = if needs_denominator_parens(&body) {
+            format!("({body})")
+        } else {
+            body
+        };
+        return if po.spacious {
+            format!("1 / {body}")
+        } else {
+            format!("1/{body}")
+        };
+    }
+    // `e^(7/3)` prints as `e^2 * cbrt(e)`: a rational exponent whose
+    // denominator is 2 or 3 is split into its integer part and a root
+    // (Number::print does the same for a numeric base, giving `4 * cbrt(2)`).
+    if let Some(s) = print_split_root_power(base, exponent, po, depth) {
+        return s;
+    }
     if is_displayed_fraction(exponent, po) {
         let parent = MathStructure::Power {
             base: Box::new(MathStructure::Undefined),
@@ -683,6 +829,74 @@ fn print_power(
     let b = print_operand(base, po, depth, &parent);
     let e = print_operand(exponent, po, depth, &parent);
     format!("{b}^{e}")
+}
+
+/// `base^(p/q)` with `q` in `{2, 3}` and `|p/q| > 1` → `base^i * root(base)`.
+/// Only the constant `e` takes this path here: for a numeric base the merge
+/// engine already splits the power, and for a symbol of unknown sign the
+/// reference keeps `x^(7/3)` intact.
+fn print_split_root_power(
+    base: &MathStructure,
+    exponent: &MathStructure,
+    po: &PrintOptions,
+    depth: usize,
+) -> Option<String> {
+    if !matches!(base, MathStructure::Symbolic(s) if s == "e") {
+        return None;
+    }
+    let MathStructure::Number(n) = exponent else {
+        return None;
+    };
+    if !n.is_rational() || n.is_integer() || n.is_approximate() || n.is_negative() {
+        return None;
+    }
+    let den = n.denominator();
+    if !den.equals(&Number::from_i64(2), false, false)
+        && !den.equals(&Number::from_i64(3), false, false)
+    {
+        return None;
+    }
+    let mut whole = n.clone();
+    whole.floor();
+    if whole.is_zero() {
+        return None;
+    }
+    let mut frac = n.clone();
+    if !frac.subtract(&whole) {
+        return None;
+    }
+    let int_part = if whole.is_one() {
+        base.clone()
+    } else {
+        MathStructure::Power {
+            base: Box::new(base.clone()),
+            exponent: Box::new(MathStructure::Number(whole)),
+        }
+    };
+    let root_part = MathStructure::Power {
+        base: Box::new(base.clone()),
+        exponent: Box::new(MathStructure::Number(frac)),
+    };
+    Some(join_factors(&[int_part, root_part], po, depth))
+}
+
+/// A printed denominator needs parentheses when it is a compound expression:
+/// any operator or space outside brackets would otherwise re-associate
+/// (`1 / e * sqrt(e)` must be `1 / (e * sqrt(e))`).
+fn needs_denominator_parens(s: &str) -> bool {
+    let mut pars = 0i32;
+    let mut brackets = 0i32;
+    for c in s.chars() {
+        match c {
+            '[' => brackets += 1,
+            ']' => brackets = (brackets - 1).max(0),
+            '(' => pars += 1,
+            ')' => pars = (pars - 1).max(0),
+            ' ' if pars == 0 && brackets == 0 => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 fn comparison_sign(op: ComparisonType, po: &PrintOptions) -> &'static str {
@@ -742,6 +956,8 @@ fn function_name(id: crate::ids::FunctionId) -> &'static str {
         f::ACOSH => "acosh",
         f::ATANH => "atanh",
         f::ATAN2 => "atan2",
+        f::COT => "cot",
+        f::ACOT => "acot",
         f::GAMMA => "gamma",
         f::ERF => "erf",
         f::ERFC => "erfc",
@@ -772,6 +988,8 @@ fn function_name(id: crate::ids::FunctionId) -> &'static str {
         f::BITWISE_NOT => "bitnot",
         f::PERCENT => "percent",
         other => crate::polynomial::function_name(other)
+            .or_else(|| crate::differentiate::function_name(other))
+            .or_else(|| crate::limit::function_name(other))
             .or_else(|| crate::solve::function_name(other))
             .or_else(|| crate::matrix::function_name(other))
             .or_else(|| crate::geometry::function_name(other))

@@ -38,6 +38,11 @@ pub mod id {
     pub const ACOSH: u32 = 1010;
     pub const ATANH: u32 = 1011;
     pub const ATAN2: u32 = 1012;
+    /// `cot`/`acot` are XML-defined in the reference
+    /// (`cos(x)/sin(x)` and `atan(1/x)`); the port gives them ids in the
+    /// trigonometric block so the parser can resolve the names.
+    pub const COT: u32 = 1013;
+    pub const ACOT: u32 = 1014;
 
     pub const ABS: u32 = 1400;
     pub const SIGNUM: u32 = 1401;
@@ -98,6 +103,15 @@ pub fn calculate_function_exact(m: &mut MathStructure, exact: bool) -> bool {
     // Polynomial and solver builtins take structured (non-numeric)
     // arguments too, so they are dispatched before the numeric fast path.
     if crate::polynomial::calculate_function(m) {
+        return true;
+    }
+    // Calculus builtins (`diff`, `limit`) take structured arguments and
+    // re-enter the evaluator on their own, so they go before the numeric
+    // fast path too.
+    if crate::differentiate::calculate_function(m) {
+        return true;
+    }
+    if crate::limit::calculate_function(m) {
         return true;
     }
     if crate::solve::calculate_function(m) {
@@ -192,6 +206,25 @@ fn apply(id: u32, args: &[Number]) -> Option<Number> {
         (id::ASIN, 1) => unary(args, |n| n.asin()),
         (id::ACOS, 1) => unary(args, |n| n.acos()),
         (id::ATAN, 1) => unary(args, |n| n.atan()),
+        // cot(x) = cos(x)/sin(x), acot(x) = atan(1/x) (data/functions.xml.in).
+        (id::COT, 1) => {
+            let mut c = args[0].clone();
+            let mut s = args[0].clone();
+            if !c.cos() || !s.sin() || s.is_zero() || !c.divide(&s) {
+                return None;
+            }
+            Some(c)
+        }
+        (id::ACOT, 1) => {
+            if args[0].is_zero() {
+                return None;
+            }
+            let mut v = Number::from_i64(1);
+            if !v.divide(&args[0]) || !v.atan() {
+                return None;
+            }
+            Some(v)
+        }
         (id::SINH, 1) => unary(args, |n| n.sinh()),
         (id::COSH, 1) => unary(args, |n| n.cosh()),
         (id::TANH, 1) => unary(args, |n| n.tanh()),
@@ -472,6 +505,8 @@ pub fn function_id_for_name(name: &str) -> Option<FunctionId> {
         "acosh" | "arcosh" => id::ACOSH,
         "atanh" | "artanh" => id::ATANH,
         "atan2" | "arg" => id::ATAN2,
+        "cot" => id::COT,
+        "acot" | "arccot" => id::ACOT,
         "gamma" => id::GAMMA,
         "erf" => id::ERF,
         "erfc" => id::ERFC,
@@ -506,6 +541,8 @@ pub fn function_id_for_name(name: &str) -> Option<FunctionId> {
             // Matrix names come first: `multiply` is the entrywise (Hadamard)
             // product in data/functions.xml.in, not an alias for `expand`.
             return crate::matrix::function_id_for_name(name)
+                .or_else(|| crate::differentiate::function_id_for_name(name))
+                .or_else(|| crate::limit::function_id_for_name(name))
                 .or_else(|| crate::polynomial::function_id_for_name(name))
                 .or_else(|| crate::solve::function_id_for_name(name))
                 .or_else(|| crate::geometry::function_id_for_name(name))
