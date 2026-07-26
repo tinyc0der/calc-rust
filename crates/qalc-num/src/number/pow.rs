@@ -79,6 +79,44 @@ impl Number {
                 }
             }
         }
+        // An exact integer exponent is always done by repeated squaring,
+        // never by the transcendental fallback below.
+        //
+        // Two reasons. It is far cheaper — exp(b·ln a) costs eight
+        // directed-rounding pow calls per operation, which made numeric root
+        // finding (thousands of evaluations of `x^3`) take minutes. And it
+        // is the only correct route for a negative base: `ln` of a negative
+        // number does not converge, so `(-6)^3` through the pow path hangs
+        // rather than returning -216. The exact-rational path above is
+        // skipped whenever `try_exact` is false, which is exactly what the
+        // approximate evaluation mode used by root finding requests, so this
+        // has to catch rationals too, not just floats.
+        if let Some(exp) = o.to_i64() {
+            if exp != 0 && exp.unsigned_abs() <= 1_000_000 {
+                let neg = exp < 0;
+                let mut e = exp.unsigned_abs();
+                let mut acc = Number::from_i64(1);
+                let mut sq = self.clone();
+                while e > 0 {
+                    if e & 1 == 1 && !acc.multiply(&sq) {
+                        return false;
+                    }
+                    e >>= 1;
+                    if e > 0 {
+                        let s = sq.clone();
+                        if !sq.multiply(&s) {
+                            return false;
+                        }
+                    }
+                }
+                if neg && !acc.recip() {
+                    return false;
+                }
+                *self = acc;
+                self.set_precision_and_approximate_from(o);
+                return true;
+            }
+        }
         // Float fallback: a^b = exp(b·ln(a)) computed by astro-float pow with
         // directed rounding on interval corners.
         let p = context::bit_precision();

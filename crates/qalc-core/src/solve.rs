@@ -551,11 +551,24 @@ pub fn isolate_x_toplevel(m: &mut MathStructure, eo: &EvaluationOptions) {
     if !matches!(m, MathStructure::Comparison { op: ComparisonType::Equals, .. }) {
         return;
     }
-    CURRENT_EO.with(|c| *c.borrow_mut() = eo.clone());
-    let Some(xvar) = poly::find_x_var(m) else {
+    // Solving is a top-level step. Several builtins re-enter the evaluator on
+    // their own arguments, and the evaluator ends with this call, so without
+    // a guard `x^3 = 5` recurses: solve -> evaluate -> solve -> ... The C++
+    // isolates once, at the top, which is what this reproduces.
+    if SOLVING.with(|s| s.get()) {
         return;
-    };
-    isolate_x(m, &xvar);
+    }
+    SOLVING.with(|s| s.set(true));
+    CURRENT_EO.with(|c| *c.borrow_mut() = eo.clone());
+    if let Some(xvar) = poly::find_x_var(m) {
+        isolate_x(m, &xvar);
+    }
+    SOLVING.with(|s| s.set(false));
+}
+
+thread_local! {
+    /// True while `isolate_x_toplevel` is on the stack.
+    static SOLVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Try to isolate `xvar` in a comparison, rewriting it in place.
