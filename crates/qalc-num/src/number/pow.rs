@@ -96,6 +96,51 @@ impl Number {
                 }
             }
         }
+        // Square root of a negative rational: exact and *purely* imaginary
+        // whenever the magnitude is a perfect square.
+        //
+        // Port of the `complex_result` branch of `Number::raise`
+        // (Number.cc:4067). The reference raises to the exponent's numerator
+        // first, negates, and only then takes the integer square root, so
+        // `(-4)^(1/2)` is exactly `2i` and `(-4)^(3/2)` exactly `-8i`. Going
+        // through `exp(w·ln z)` instead leaves ~1e-58 of rounding dust in the
+        // real part, which then contaminates everything downstream
+        // (`(-1)^(1/2)*(-1)^(1/2)` printed `-1.000000000 - 3.1E-58i`).
+        //
+        // Only a denominator of 2 is handled: the reference restricts its
+        // negative-base exact path to `i_root <= 2` as well, which is what
+        // keeps `(-8)^(1/3)` on the principal (complex) branch.
+        if !self.is_imag_part {
+            if let (RealValue::Rational(base_r), RealValue::Rational(oe)) =
+                (&self.value, &o.value)
+            {
+                if base_r.is_negative() && oe.denom().to_u32() == Some(2) {
+                    if let Some(num) = oe.numer().to_i64() {
+                        if num != 0 && num.unsigned_abs() <= 1_000_000 {
+                            // The exponent is in lowest terms, so a
+                            // denominator of 2 forces an odd numerator and
+                            // `base^num` stays negative.
+                            let powed = base_r.pow(num as i32);
+                            let mut mag = Number::from_rational(-powed);
+                            if mag.exact_root(2) {
+                                // i^num cycles: the sign flips for
+                                // num ≡ 3 (mod 4), and again for a negative
+                                // numerator (1/i = -i).
+                                let flip = (num < 0) != (num.unsigned_abs() % 4 == 3);
+                                if flip && !mag.negate() {
+                                    return false;
+                                }
+                                let mut result = Number::new();
+                                result.set_imaginary_part(&mag);
+                                *self = result;
+                                self.set_precision_and_approximate_from(o);
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // Negative rational base with non-integer exponent → complex result;
         // only even roots produce complex values. Odd denominators of the
         // reduced exponent keep it real for negative bases? In libqalculate
@@ -373,6 +418,14 @@ impl Number {
             return false;
         }
         *self = l;
+        // `exp(w·ln z)` leaves rounding dust in whichever part should have
+        // cancelled: `(-2)^0.5` came out `-2.2E-58 + 1.414213562i`. The
+        // reference clears it in `testComplex` (Number.cc:2309), reached from
+        // the `testFloatResult` at the end of every float operation, and the
+        // test is *relative* — a part is dropped only when adding it to the
+        // other part changes nothing at `BIT_PRECISION - 10` — so a genuinely
+        // small-but-significant part survives.
+        self.drop_negligible_parts();
         self.set_precision_and_approximate_from(o);
         true
     }
@@ -686,6 +739,47 @@ mod tests {
         let mut f = Number::from_ints(4, 9, 0);
         assert!(f.sqrt());
         assert!(f.internal_rational().unwrap() == &BigRational::new(2.into(), 3.into()));
+    }
+
+    /// An even root of a negative real is *purely* imaginary — no ~1e-58
+    /// rounding dust in the real part. Every value here is
+    /// `printf 'EXPR\n' | qalc -t +u8`'s.
+    #[test]
+    fn even_roots_of_negatives_have_no_real_part() {
+        let po = crate::options::PrintOptions::default();
+        let pow = |base: &str, num: i64, den: i64| {
+            let mut n = Number::parse(base, &crate::options::ParseOptions::default());
+            assert!(n.raise(&Number::from_ints(num, den, 0), true));
+            n.print(&po)
+        };
+        // The exact cases: perfect squares stay exact and rational.
+        assert_eq!(pow("-4", 1, 2), "2i");
+        assert_eq!(pow("-9", 1, 2), "3i");
+        assert_eq!(pow("-1", 1, 2), "i");
+        assert_eq!(pow("-1", 2, 4), "i");
+        assert_eq!(pow("-4", 3, 2), "-8i");
+        assert_eq!(pow("-4", -1, 2), "-0.5i");
+        assert_eq!(pow("-1", 3, 2), "-i");
+        assert_eq!(pow("-1", -1, 2), "-i");
+        // The inexact ones go through `exp(w·ln z)`, where the real part has
+        // to be dropped as negligible rather than printed as dust.
+        assert_eq!(pow("-2", 1, 2), "1.414213562i");
+        assert_eq!(pow("-4.5", 1, 2), "2.121320344i");
+        // Genuine two-part results are untouched.
+        assert_eq!(pow("-2", 1, 4), "0.8408964153 + 0.8408964153i");
+    }
+
+    /// `sqrt(-4)` is `2i`, so `sqrt(-1)^2` is exactly `-1` — dust in the
+    /// real part used to propagate as `-1.000000000 - 3.1E-58i`.
+    #[test]
+    fn imaginary_roots_multiply_back_exactly() {
+        let po = crate::options::PrintOptions::default();
+        let half = Number::from_ints(1, 2, 0);
+        let mut a = Number::from_i64(-1);
+        assert!(a.raise(&half, true));
+        let b = a.clone();
+        assert!(a.multiply(&b));
+        assert_eq!(a.print(&po), "-1");
     }
 
     #[test]

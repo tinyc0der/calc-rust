@@ -854,6 +854,56 @@ impl Number {
         n.print(po)
     }
 
+    /// Fix the bit width of a binary (or hexadecimal-two's-complement)
+    /// integer — Number.cc:11594-11657.
+    ///
+    /// Two jobs, both of which re-enter `print_integer` with `binary_bits`
+    /// pinned so that `format_number_string` zero-pads to a whole width:
+    ///
+    /// * a negative value is replaced by `value + 2^bits`, its two's
+    ///   complement, and printed unsigned — `-5 to bin8` is `1111 1011`,
+    ///   not the sign-magnitude `-0000 0101` (which is not a bit pattern
+    ///   at all, and would read back as `-5`'s complement of itself);
+    /// * a value too wide for the requested width, or one printed with no
+    ///   width at all, gets the next power-of-two width of at least 8, so
+    ///   `5 to bin` is `0000 0101` and `256 to bin8` widens to
+    ///   `0000 0001 0000 0000`.
+    ///
+    /// Returns `None` when the value needs no such treatment.
+    fn print_integer_binary_bits(
+        &self,
+        z: &BigInt,
+        po: &PrintOptions,
+        neg: bool,
+    ) -> Option<String> {
+        if po.base != 2 && !(po.base == 16 && po.hexadecimal_twos_complement) {
+            return None;
+        }
+        if (po.base == 16 || po.twos_complement) && neg {
+            // The width has to hold `value + 1`: -128 fits in 8 bits
+            // (`1000 0000`) because -128+1 = -127 is 7 bits wide.
+            let mut bits = po.binary_bits as u64;
+            let needed = integer_length(&(z + 1)) + 1;
+            if bits == 0 || bits < needed {
+                bits = round_up_bits(needed);
+            }
+            let twos = z + (BigInt::one() << bits);
+            let mut po2 = po.clone();
+            po2.twos_complement = false;
+            po2.binary_bits = bits.min(u32::MAX as u64) as u32;
+            let mut nr = self.clone();
+            nr.value = RealValue::Rational(BigRational::from_integer(twos.clone()));
+            return Some(nr.print_integer(&twos, &po2));
+        }
+        let len = integer_length(z);
+        if po.binary_bits == 0 || (po.binary_bits as u64) < len {
+            let mut po2 = po.clone();
+            po2.binary_bits = round_up_bits(len + 1).min(u32::MAX as u64) as u32;
+            return Some(self.print_integer(z, &po2));
+        }
+        None
+    }
+
     /// Integer printing path — Number.cc:11555-11901.
     fn print_integer(&self, z: &BigInt, po: &PrintOptions) -> String {
         let pp = self.compute_print_precision(po);
@@ -864,6 +914,9 @@ impl Number {
             0
         };
         let neg = z.sign() == Sign::Minus;
+        if let Some(s) = self.print_integer_binary_bits(z, po, neg) {
+            return s;
+        }
         let mut ivalue = z.magnitude().clone();
         let mut rerun = false;
         let mut exact = true;
@@ -1648,6 +1701,18 @@ fn ieee_width(base: i32) -> Option<u32> {
     })
 }
 
+/// `Number::integerLength()` (Number.cc:3106) — `mpz_sizeinbase(_, 2)`,
+/// which GMP defines as 1 for zero, not 0.
+fn integer_length(z: &BigInt) -> u64 {
+    z.magnitude().bits().max(1)
+}
+
+/// Round a bit count up to a printable width: the next power of two, never
+/// below 8 (Number.cc:11604).
+fn round_up_bits(bits: u64) -> u64 {
+    bits.max(8).next_power_of_two()
+}
+
 /// Space-separated groups of four bits.
 fn group_bits(bits: &str) -> String {
     let mut out = String::with_capacity(bits.len() + bits.len() / 4);
@@ -1895,7 +1960,59 @@ mod tests {
         assert_eq!(Number::from_i64(8).print(&po), "010");
         po.base = 2;
         // 11 = 1011 padded to 8 bits in groups of four
-        assert_eq!(Number::from_i64(11).print(&po), "1011");
+        assert_eq!(Number::from_i64(11).print(&po), "0000 1011");
+    }
+
+    /// Every value here is `printf 'EXPR\n' | qalc -t +u8`'s.
+    #[test]
+    fn binary_widths_are_whole_bytes() {
+        let mut po = PrintOptions::default();
+        po.base = 2;
+        let b = |n: i64, po: &PrintOptions| Number::from_i64(n).print(po);
+        assert_eq!(b(5, &po), "0000 0101");
+        assert_eq!(b(255, &po), "0000 0000 1111 1111");
+        assert_eq!(b(0, &po), "0000 0000");
+        assert_eq!(b(11, &po), "0000 1011");
+        // A requested width too narrow for the value is widened, not honoured.
+        po.binary_bits = 8;
+        assert_eq!(b(256, &po), "0000 0001 0000 0000");
+        assert_eq!(b(5, &po), "0000 0101");
+        po.binary_bits = 4;
+        assert_eq!(b(15, &po), "1111");
+        po.binary_bits = 2;
+        assert_eq!(b(7, &po), "0000 0111");
+    }
+
+    /// Negative binary integers are two's complement, not sign-magnitude:
+    /// `-0000 0001` is not a bit pattern at all. Oracle values again.
+    #[test]
+    fn negative_binaries_are_twos_complement() {
+        let mut po = PrintOptions::default();
+        po.base = 2;
+        let b = |n: i64, po: &PrintOptions| Number::from_i64(n).print(po);
+        po.binary_bits = 8;
+        assert_eq!(b(-1, &po), "1111 1111");
+        assert_eq!(b(-5, &po), "1111 1011");
+        // -128 still fits in 8 bits; -129 and -256 do not, and widen to 16.
+        assert_eq!(b(-128, &po), "1000 0000");
+        assert_eq!(b(-129, &po), "1111 1111 0111 1111");
+        assert_eq!(b(-256, &po), "1111 1111 0000 0000");
+        po.binary_bits = 16;
+        assert_eq!(b(-255, &po), "1111 1111 0000 0001");
+        po.binary_bits = 32;
+        assert_eq!(b(-1, &po), "1111 1111 1111 1111 1111 1111 1111 1111");
+        po.binary_bits = 4;
+        assert_eq!(b(-3, &po), "1101");
+        po.binary_bits = 0;
+        assert_eq!(b(-1, &po), "1111 1111");
+        assert_eq!(b(-5, &po), "1111 1011");
+        assert_eq!(
+            b(-65536, &po),
+            "1111 1111 1111 1111 0000 0000 0000 0000"
+        );
+        // With two's complement off the sign-magnitude form is kept.
+        po.twos_complement = false;
+        assert_eq!(b(-5, &po), "-0000 0101");
     }
 
     #[test]
