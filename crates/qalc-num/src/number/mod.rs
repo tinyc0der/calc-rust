@@ -1017,6 +1017,35 @@ mod tests {
         assert!(n.is_plus_infinity() && n.is_infinite(true) && !n.is_real());
     }
 
+    /// `setInterval` takes an infinite end point (Number.cc:1502) — the values
+    /// `test_intervals` builds as `[-infinity:-1]`, `[1:+infinity]` and
+    /// `[-infinity:+infinity]` are intervals, not infinities, and only a pair
+    /// of matching infinities collapses back to one.
+    #[test]
+    fn half_infinite_intervals_are_built_and_stay_intervals() {
+        let mut inf = Number::new();
+        inf.set_plus_infinity(false, false);
+        let mut minf = Number::new();
+        minf.set_minus_infinity(false, false);
+
+        let mut n = Number::new();
+        assert!(n.set_interval(&minf, &Number::from_i64(-1), false));
+        assert!(n.is_interval(true) && n.includes_infinity() && n.includes_minus_infinity());
+        assert!(!n.includes_plus_infinity() && !n.is_infinite(true));
+        assert!(n.lower_end_point().is_minus_infinity(), "the end point is an infinity");
+        assert_eq!(n.upper_end_point().to_i64(), Some(-1));
+
+        assert!(n.set_interval(&Number::from_i64(1), &inf, false));
+        assert!(n.is_interval(true) && n.includes_plus_infinity() && n.is_positive());
+
+        assert!(n.set_interval(&minf, &inf, false));
+        assert!(n.is_interval(true) && !n.is_nonzero());
+
+        // Both ends the same infinity is that infinity, not an interval.
+        assert!(n.set_interval(&inf, &inf, false));
+        assert!(n.is_plus_infinity() && !n.is_interval(true));
+    }
+
     #[test]
     fn float_demotion() {
         // 5.0 as float must demote to exact integer 5 via testInteger.

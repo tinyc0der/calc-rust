@@ -218,6 +218,16 @@ impl Number {
     }
 
     fn sin_impl(&mut self) -> bool {
+        // An unbounded real interval is the one infinite argument whose sine
+        // is known without evaluating anything: the whole of `[-1:1]`. The
+        // reference answers it here (Number.cc:6522) and refuses every other
+        // infinite argument.
+        if self.includes_infinity() {
+            if !self.has_imaginary_part() && self.is_interval(true) {
+                return self.set_interval(&Number::from_i64(-1), &Number::from_i64(1), true);
+            }
+            return false;
+        }
         if self.has_imaginary_part() {
             // sin(a+bi) = sin a cosh b + i cos a sinh b
             let a = self.real_part();
@@ -261,6 +271,13 @@ impl Number {
     }
 
     fn cos_impl(&mut self) -> bool {
+        // As in `sin_impl` (Number.cc:6852).
+        if self.includes_infinity() {
+            if !self.has_imaginary_part() && self.is_interval(true) {
+                return self.set_interval(&Number::from_i64(-1), &Number::from_i64(1), true);
+            }
+            return false;
+        }
         if self.has_imaginary_part() {
             // cos(a+bi) = cos a cosh b − i sin a sinh b
             let a = self.real_part();

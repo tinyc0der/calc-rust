@@ -44,41 +44,42 @@
 //!
 //! # KNOWN_DIVERGENCES
 //!
-//! Same contract as `crates/qalc/tests/transcripts.rs`, one size up: 5 178 of
+//! Same contract as `crates/qalc/tests/transcripts.rs`, one size up: 1 539 of
 //! the 16 324 rows do not match yet, so the ledger lives in a second golden
 //! file (`interval_closure_divergences.txt`, `key<TAB>diagnosis`) rather than
-//! in a 5 000-element array literal. A new divergence fails the test; so does a
+//! in a 1 500-element array literal. A new divergence fails the test; so does a
 //! listed one that has started matching. The set can only shrink.
 //!
 //! Fixing the arithmetic is not this suite's job — keeping the set from growing
-//! is. What the ledger says, in rough order of blast radius:
+//! is. What the ledger says, by operation:
 //!
-//! * **3 753 rows: `v31`–`v38` were never built.** `Number::set_interval`
-//!   returns false for an infinite endpoint, because `is_real()` excludes
-//!   ±infinity — so `setInterval(-infinity, -1)` and the seven values after it
-//!   silently leave `v30`'s `[-3:-2]` in place, and every row mentioning one of
-//!   them is comparing the wrong thing. One bug, a quarter of the table.
-//! * **~600 rows: an operand includes an infinity the port refuses.** `*`, `/`,
-//!   `log`, `sq` and the integer forms return false against a value whose
-//!   imaginary part is infinite (`v11`, `v20`, `v38`); the reference carries the
-//!   infinity through componentwise.
-//! * **~400 rows: complex interval arithmetic is composed, not computed.**
-//!   `z/w` goes through `z·(1/w)` with `1/w = conj(w)/|w|²`, which mentions
-//!   `w`'s parts more than once, so the enclosure is wider than the
-//!   reference's; `recip`, `tan`, `tanh`, `asin`, `acos`, `acosh`, `atanh` and
-//!   `^` on complex intervals lose the same way.
-//! * **~350 rows: the port refuses where the reference leaves the real line.**
-//!   `sqrt`, `cbrt`, `root`, `ln`, `log`, `asin`, `acos`, `acosh`, `atanh`,
-//!   `erf`, `erfc` return false on an interval whose image is complex or
-//!   unbounded, instead of continuing into the complex plane.
-//! * **125 rows: `^` never returns** on a dyadic base with an integral interval
-//!   exponent — see [`closure_table::NON_TERMINATING`].
-//! * **63 rows: `atan2` runs past +π** when `y` straddles zero and `x` may be
-//!   negative; it stays on one branch instead of widening to `[-π, π]`.
-//! * A long tail of individually diagnosed rows: `gamma` evaluated only at the
-//!   endpoints (so it misses the minimum near 1.4616), an interval straddling
-//!   zero squared to a range that dips below zero, `besselj`/`bessely` stubs,
-//!   and the four rows where the *reference* segfaults.
+//! * **511 rows: `log`** (and 15 more for bare `ln`). Most of them are a base
+//!   the port refuses — zero, negative, or an interval containing zero — where
+//!   the reference divides `ln(x)` by `ln(base)` and carries `ln(0)`'s infinite
+//!   endpoint through; the rest are an operand that includes an infinity, or a
+//!   complex `ln` composed out of real-interval operations that mention each
+//!   part more than once.
+//! * **352 rows: `^`.** It drops an imaginary component the reference keeps,
+//!   composes `exp(w·ln z)` where the reference has a dedicated complex power
+//!   formula, and answers some indeterminate powers (`0` or an infinity to an
+//!   exponent that is not known non-zero) that the reference refuses outright.
+//! * **230 rows: `/`, 7 more for `recip`.** `z/w` goes through `z·(1/w)` with
+//!   `1/w = conj(w)/|w|²`, which mentions `w`'s parts more than once, so the
+//!   enclosure comes out wider than the reference's — and for an unbounded `w`
+//!   it fails altogether, where the reference has an interval reciprocal that
+//!   stays finite (Number.cc:3662).
+//! * **154 rows: `atan2`**, composed as `atan(y/x)` where the reference calls
+//!   `mpfr_atan2` on each corner: it runs past +π when `y` straddles zero and
+//!   `x` may be negative, and an operand that reaches infinity either collapses
+//!   the arc to its limiting angle or is refused.
+//! * **~120 rows: the port refuses where the reference leaves the real line.**
+//!   `sqrt`, `cbrt`, `root`, `asin`, `acos`, `acosh`, `atanh`, `erf`, `erfc`
+//!   return false on an interval whose image is complex or unbounded, instead
+//!   of continuing into the complex plane.
+//! * A long tail of individually diagnosed rows: `besselj`/`bessely` stubs (43),
+//!   `gamma` evaluated only at the endpoints (so it misses the minimum near
+//!   1.4616), an interval straddling zero squared to a range that dips below
+//!   zero, and the four rows where the *reference* segfaults.
 //!
 //! # Diagnosing one row
 //!
@@ -311,51 +312,29 @@ mod closure_table {
 
     /// Rows this port does not *finish*.
     ///
-    /// A row listed here is never evaluated. Unlike a panic, a computation that
-    /// never returns cannot be caught, and Rust cannot cancel a running thread,
-    /// so one of these would take the whole suite with it — each was confirmed
-    /// still running after two minutes in a release build. They are reported as
-    /// `NONTERMINATING`, and since the reference answers every one of them,
-    /// they are all divergences and all carry a diagnosis in the ledger.
+    /// Empty. Keep it that way: a row listed here is never evaluated, so it can
+    /// never match the reference and has to carry a ledger entry of its own —
+    /// the list is a quarantine, not a fix.
     ///
-    /// Every one is `^` with a base whose endpoints are dyadic against an
-    /// exponent interval with an integral endpoint (`[-2:2]`, `[0:2]`,
-    /// `[1:2]`, `[2:3]`, `[-2:-1]`, `[-3:-2]`, and the four stale values that
-    /// also hold `[-3:-2]`). `raise_impl`'s interval branch hands those to
-    /// astro-float's `pow` with directed rounding; its Ziv refinement never
-    /// settles when the true result is exactly representable. `pow.rs` already
-    /// knows about this for the *non*-interval branch and works around it
-    /// there — the interval branch has the same problem and no workaround.
+    /// It held 125 rows, every one of them `^` with a dyadic base against an
+    /// exponent interval with an integral endpoint (`[-2:2]`, `[0:2]`, `[1:2]`,
+    /// `[2:3]`, `[-2:-1]`, `[-3:-2]`). `raise_impl`'s interval branch handed
+    /// those corners to astro-float's `pow`, whose Ziv refinement never settles
+    /// when the true result is exactly representable — `0.5^(-2)` is exactly 4,
+    /// and no amount of extra precision decides which side of 4 to round
+    /// towards. `pow.rs` already kept *point* operands away from `pow` for that
+    /// reason; `pow_bound` now does the same for the interval corners, by
+    /// computing an exactly representable corner as a rational instead.
+    ///
+    /// A computation that never returns cannot be caught the way a panic can,
+    /// and Rust cannot cancel a running thread, so a new one would take the
+    /// whole suite with it. [`run_guarded`]'s deadline is the backstop; this
+    /// list is what keeps the backstop from having to fire.
     ///
     /// The C++ shim meets the mirror image of this and forks per evaluation, so
     /// the reference's own five `besselj`/`bessely` hangs are recorded as
     /// `HANG` in the golden file instead of ending the run.
-    #[rustfmt::skip]
-    pub const NON_TERMINATING: &[&str] = &[
-        "v03 ^ v15", "v03 ^ v22", "v03 ^ v25", "v03 ^ v26", "v03 ^ v29", "v03 ^ v30",
-        "v03 ^ v31", "v03 ^ v32", "v03 ^ v33", "v03 ^ v34", "v03 ^ v35",
-        "v07 ^ v15", "v07 ^ v22", "v07 ^ v25", "v07 ^ v26", "v07 ^ v29", "v07 ^ v30",
-        "v07 ^ v31", "v07 ^ v32", "v07 ^ v33", "v07 ^ v34", "v07 ^ v35",
-        "v08 ^ v15", "v08 ^ v22", "v08 ^ v25", "v08 ^ v26", "v08 ^ v29", "v08 ^ v30",
-        "v08 ^ v31", "v08 ^ v32", "v08 ^ v33", "v08 ^ v34", "v08 ^ v35",
-        "v12 ^ v15", "v12 ^ v22", "v12 ^ v25", "v12 ^ v26", "v12 ^ v29", "v12 ^ v30",
-        "v12 ^ v31", "v12 ^ v32", "v12 ^ v33", "v12 ^ v34", "v12 ^ v35",
-        "v15 ^ v15", "v15 ^ v22", "v15 ^ v25", "v15 ^ v26", "v15 ^ v29", "v15 ^ v30",
-        "v15 ^ v31", "v15 ^ v32", "v15 ^ v33", "v15 ^ v34", "v15 ^ v35",
-        "v16 ^ v15", "v16 ^ v22", "v16 ^ v25", "v16 ^ v26", "v16 ^ v29", "v16 ^ v30",
-        "v16 ^ v31", "v16 ^ v32", "v16 ^ v33", "v16 ^ v34", "v16 ^ v35",
-        "v22 ^ v15", "v22 ^ v22", "v22 ^ v25", "v22 ^ v26", "v22 ^ v29", "v22 ^ v30",
-        "v22 ^ v31", "v22 ^ v32", "v22 ^ v33", "v22 ^ v34", "v22 ^ v35",
-        "v23 ^ v15", "v23 ^ v22", "v23 ^ v25", "v23 ^ v26", "v23 ^ v29", "v23 ^ v30",
-        "v23 ^ v31", "v23 ^ v32", "v23 ^ v33", "v23 ^ v34", "v23 ^ v35",
-        "v25 ^ v15", "v25 ^ v22", "v25 ^ v25", "v25 ^ v26", "v25 ^ v29", "v25 ^ v30",
-        "v25 ^ v31", "v25 ^ v32", "v25 ^ v33", "v25 ^ v34", "v25 ^ v35",
-        "v26 ^ v15", "v26 ^ v22", "v26 ^ v25", "v26 ^ v26", "v26 ^ v29", "v26 ^ v30",
-        "v26 ^ v31", "v26 ^ v32", "v26 ^ v33", "v26 ^ v34", "v26 ^ v35",
-        "v39 ^ v15", "v39 ^ v22", "v39 ^ v25", "v39 ^ v26", "v39 ^ v29", "v39 ^ v30",
-        "v39 ^ v31", "v39 ^ v32", "v39 ^ v33", "v39 ^ v34", "v39 ^ v35",
-        "v42 ^ v15", "v42 ^ v22", "v42 ^ v25", "v42 ^ v26",
-    ];
+    pub const NON_TERMINATING: &[&str] = &[];
 
     /// Every row, as `(key, job)`, in the golden file's order: the 44 value
     /// renderings first, then the 16 280 operation rows.
@@ -483,14 +462,14 @@ mod closure_table {
 
     /// How long a single row may take before it is abandoned. Generous: it is
     /// a backstop for a *new* non-terminating row, not a performance budget —
-    /// the known ones are skipped outright, and the slowest row that does
-    /// finish is three orders of magnitude under this even in a debug build.
+    /// every row terminates today, and the slowest is three orders of magnitude
+    /// under this even in a debug build.
     const ROW_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
     /// Run one job with a deadline, so a row that never returns is reported
     /// instead of wedging the suite. There is no way to cancel a running
     /// thread in Rust, so a timed-out row leaves its worker spinning — which
-    /// is exactly why [`NON_TERMINATING`] exists: the known offenders are
+    /// is why [`NON_TERMINATING`] exists at all: a row known not to finish is
     /// never started, and this stays a backstop that fires zero times.
     fn run_guarded(nrs: &std::sync::Arc<Vec<Number>>, job: Job) -> String {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -642,39 +621,30 @@ fn every_value_and_operation_matches_the_reference() {
 /// The vector itself, before any operation touches it.
 ///
 /// Split out and named loudly because a divergence here mistrains everything
-/// downstream: `v34` is not `[-1:+infinity]` in this port, so none of the ~670
-/// rows that mention it is comparing what it claims to compare. Exactly eight
-/// values are wrong — the eight `set_interval` refuses to build — and this
-/// pins that number, so the contamination cannot spread quietly.
+/// downstream: while `set_interval` refused an infinite endpoint, `v34` was
+/// `[-3:-2]` rather than `[-1:+infinity]`, and none of the ~670 rows that
+/// mention it was comparing what it claimed to. All 44 now build as the
+/// reference builds them, and this is what says so — a value that regresses
+/// fails here, in one line, instead of as a thousand row diffs.
 #[test]
-fn only_the_eight_half_infinite_values_are_built_differently() {
+fn every_edge_value_is_built_as_the_reference_builds_it() {
     let values = closure_table::values();
     assert_eq!(values.len(), 44, "test.cc builds 44 values");
 
     let theirs = golden_rows();
-    let known = known_divergences();
     let mut wrong: Vec<String> = Vec::new();
-    let mut unlisted: Vec<String> = Vec::new();
     for (i, v) in values.iter().enumerate() {
         let (gkey, want) = theirs[i];
         assert_eq!(closure_table::vname(i), gkey);
         let got = closure_table::canon(v);
         if got != want {
-            wrong.push(gkey.to_string());
-            if !known.contains_key(gkey) {
-                unlisted.push(format!("{gkey}: reference {want}, ours {got}"));
-            }
+            wrong.push(format!("{gkey}: reference {want}, ours {got}"));
         }
     }
     assert!(
-        unlisted.is_empty(),
-        "an edge value diverges without a diagnosis:\n{}",
-        unlisted.join("\n")
-    );
-    assert_eq!(
-        wrong,
-        ["v31", "v32", "v33", "v34", "v35", "v36", "v37", "v38"],
-        "the set of mis-built edge values changed"
+        wrong.is_empty(),
+        "an edge value is not the reference's:\n{}",
+        wrong.join("\n")
     );
 }
 
@@ -715,7 +685,7 @@ fn the_divergence_ledger_is_well_formed() {
             "ledger entry for {key} is not a diagnosis: {why:?}"
         );
     }
-    assert_eq!(seen.len(), 5178, "the recorded divergence count changed");
+    assert_eq!(seen.len(), 1539, "the recorded divergence count changed");
 
     for key in closure_table::NON_TERMINATING {
         assert!(
@@ -747,7 +717,15 @@ fn worker() {
             let (a, b) = v.split_once(',').expect("QALC_CLOSURE_RANGE=start,end");
             (a.parse().unwrap(), b.parse::<usize>().unwrap().min(plan.len()))
         }
-        Err(_) => (0, plan.len()),
+        // No range: the whole table, through the same parallel path the suite
+        // itself uses. Sequentially it would take a `ROW_DEADLINE` per
+        // never-returning row, which is the case one runs this for.
+        Err(_) => {
+            for ((key, _), value) in plan.iter().zip(ours().iter().map(|(_, v)| v)) {
+                println!("{key}\t{value}");
+            }
+            return;
+        }
     };
     let slice = &plan[start..end];
     let trace = std::env::var_os("QALC_CLOSURE_TRACE").is_some();

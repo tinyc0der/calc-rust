@@ -3,7 +3,7 @@
 
 use super::{Number, RealValue};
 use crate::context;
-use crate::float::bigfloat_from_ratio;
+use crate::float::{bigfloat_from_ratio, bigfloat_to_ratio};
 use astro_float::{BigFloat, RoundingMode};
 use num_bigint::BigInt;
 use num_rational::BigRational;
@@ -36,16 +36,23 @@ impl Number {
     fn raise_impl(&mut self, o: &Number, try_exact: bool) -> bool {
         // Infinite base/exponent, *before* the `x^0 = 1` shortcut.
         //
-        // The reference orders it this way (Number.cc:3832, whose
+        // The reference orders it this way (Number.cc:3841, whose
         // `!o.isNonZero() -> return false` runs long before its own
         // `o.isZero()` branch at :3925), which is what leaves `infinity^0`
         // unevaluated as `(+infinity)^0` rather than answering 1. Taking the
         // shortcut first would decide the indeterminate form.
-        if (self.is_infinite(true) || o.is_infinite(true))
+        //
+        // The test is `includesInfinity`, not "is an infinity": a half-infinite
+        // interval decides the same cases a plain infinity does. `raise_infinite`
+        // answers some of them outright and hands the rest back, sometimes with
+        // `self` rewritten — see its documentation.
+        if (self.includes_infinity() || o.includes_infinity())
             && !self.has_imaginary_part()
             && !o.has_imaginary_part()
         {
-            return self.raise_infinite(o);
+            if let Some(answer) = self.raise_infinite(o) {
+                return answer;
+            }
         }
         // Handle x^0 and x^1 quickly.
         if o.is_zero() {
@@ -338,71 +345,102 @@ impl Number {
         true
     }
 
-    fn raise_infinite(&mut self, o: &Number) -> bool {
-        // Port of the infinity cases of Number::raise (Number.cc:3832).
-        //
-        // An exponent that is not *known* non-zero is indeterminate against
-        // an infinite base, and a base that is not known non-zero is
-        // indeterminate under an infinite exponent — both `!isNonZero()`
-        // tests in the reference. They are why `infinity^0`, `0^infinity` and
-        // `0^(-infinity)` are left as powers rather than answered.
+    /// The infinity cases of `Number::raise` (Number.cc:3841).
+    ///
+    /// `Some(r)`: `raise` is finished, return `r`. `None`: keep going with the
+    /// rest of `raise_impl` — and possibly with a *modified* `self`. That last
+    /// part is the reference's design, not an accident of translation: when the
+    /// exponent is an interval reaching to infinity rather than an infinity
+    /// itself, the reference decides the limit here (`0.5^(-infinity)` is
+    /// `+infinity`), writes it into the base, and lets the ordinary float path
+    /// take the power of *that* against the whole exponent interval. It is what
+    /// makes `0.5^[-infinity:-1]` come out as `0`.
+    ///
+    /// An exponent that is not *known* non-zero is indeterminate against an
+    /// infinite base, and a base that is not known non-zero is indeterminate
+    /// under an infinite exponent — both `!isNonZero()` tests in the reference.
+    /// They are why `infinity^0`, `0^infinity` and `0^(-infinity)` are left as
+    /// powers rather than answered.
+    fn raise_infinite(&mut self, o: &Number) -> Option<bool> {
         if self.is_infinite(false) {
-            if o.real_part_is_negative() {
+            if o.is_negative() {
                 self.clear(true);
-                return true;
+                return Some(true);
             }
             if !o.is_nonzero() {
-                return false;
+                return Some(false);
             }
             if self.is_minus_infinity() {
                 if o.is_even() {
                     self.value = RealValue::PlusInfinity;
                 } else if !o.is_integer() {
-                    return false;
+                    return Some(false);
                 }
                 // an odd integer keeps minus infinity
             }
-            return true;
+            self.set_precision_and_approximate_from(o);
+            return Some(true);
         }
-        if o.is_plus_infinity() {
+        // An unbounded base needs an exponent that is definitely not zero:
+        // `[1:+infinity]^0` is anything from 1 to an indeterminate form.
+        if self.includes_infinity() && !o.is_nonzero() {
+            return Some(false);
+        }
+        let one = Number::from_i64(1);
+        let mone = Number::from_i64(-1);
+        if o.includes_minus_infinity() {
+            // An exponent interval that reaches both infinities decides
+            // nothing: `x^[-infinity:+infinity]` is `[0:+infinity]` at best.
+            if o.is_floating_point() && o.includes_plus_infinity() {
+                return Some(false);
+            }
             if !self.is_nonzero() {
-                return false;
-            }
-            // x^∞: |x|>1 → ∞; |x|<1 → 0; else undefined.
-            let one = Number::from_i64(1);
-            let mut a = self.clone();
-            if !a.abs() {
-                return false;
-            }
-            if a.is_greater_than(&one) {
-                if self.real_part_is_negative() {
-                    return false; // oscillates in sign
+                return Some(false);
+            } else if self.is_negative() {
+                if !self.is_less_than(&mone) {
+                    return Some(false);
                 }
-                self.set_plus_infinity(true, false);
-                return true;
+                if !o.is_floating_point() {
+                    self.clear(true);
+                }
+            } else if self.is_greater_than(&one) {
+                if !o.is_floating_point() {
+                    self.clear(true);
+                }
+            } else if self.is_positive() && self.is_less_than(&one) {
+                self.set_plus_infinity(true, true);
+            } else {
+                return Some(false);
             }
-            if a.is_less_than(&one) {
-                self.clear(true);
-                return true;
+            if !o.is_floating_point() {
+                self.set_precision_and_approximate_from(o);
+                return Some(true);
             }
-            return false;
-        }
-        if o.is_minus_infinity() {
+        } else if o.includes_plus_infinity() {
             if !self.is_nonzero() {
-                return false;
+                return Some(false);
+            } else if self.is_negative() {
+                if !self.is_greater_than(&mone) {
+                    return Some(false);
+                }
+                if !o.is_floating_point() {
+                    self.clear(true);
+                }
+            } else if self.is_greater_than(&one) {
+                self.set_plus_infinity(true, true);
+            } else if self.is_positive() && self.is_less_than(&one) {
+                if !o.is_floating_point() {
+                    self.clear(true);
+                }
+            } else {
+                return Some(false);
             }
-            let one = Number::from_i64(1);
-            let mut a = self.clone();
-            if !a.abs() {
-                return false;
+            if !o.is_floating_point() {
+                self.set_precision_and_approximate_from(o);
+                return Some(true);
             }
-            if a.is_greater_than(&one) {
-                self.clear(true);
-                return true;
-            }
-            return false;
         }
-        false
+        None
     }
 
     fn raise_complex(&mut self, o: &Number) -> bool {
@@ -434,6 +472,15 @@ impl Number {
                 self.set_precision_and_approximate_from(o);
                 return true;
             }
+        }
+        // `exp(w·ln z)` has nothing to say about a base with an unbounded
+        // component: `ln z` is unbounded, `w·ln z` spreads that infinity
+        // across both parts, and `exp` of it is whatever the compositions
+        // happen to produce. The reference answers such a base only for the
+        // exact integer powers handled above (`([-0.5:0.5]+(infinity)i)^2` is
+        // `-infinity+([-infinity:+infinity])i`) and refuses the rest.
+        if self.includes_infinity() {
+            return false;
         }
         // General complex power: z^w = exp(w * ln z), with ln and exp
         // handling their own complex cases. The principal branch is used,
@@ -782,10 +829,47 @@ fn exact_power_in_range(base: &BigRational, i_pow: i64, i_root: u64, try_exact: 
 /// succeeds the exact value replaces `pow`'s answer, and when it fails the
 /// result is irrational, `pow`'s Ziv loop terminates, and nothing changes.
 fn pow_bound(a: &BigFloat, b: &BigFloat, p: usize, rm: RoundingMode) -> BigFloat {
+    if let Some(f) = infinite_power(a, b, p) {
+        return f;
+    }
     if let Some(f) = exact_dyadic_power(a, b, p, rm) {
         return f;
     }
     context::with_consts(|cc| a.pow(b, p, rm, cc))
+}
+
+/// `a^b` when one of them is infinite: the IEEE limits, which is what MPFR
+/// gives the reference and what a half-infinite interval bound needs.
+///
+/// astro-float computes `pow` as `exp(b·ln a)` throughout and gets two of these
+/// wrong — `2^(-infinity)` comes back as `-infinity` and `0.5^(-infinity)` as
+/// `0`, both sign errors from `ln a` — which turned `2^[-infinity:-1]` into the
+/// enclosure `[-infinity:0.5]`. Only a positive base is decided here; a
+/// negative one keeps whatever astro-float makes of it, including the NaN that
+/// stands for "no real value".
+fn infinite_power(a: &BigFloat, b: &BigFloat, p: usize) -> Option<BigFloat> {
+    if !a.is_inf() && !b.is_inf() {
+        return None;
+    }
+    if a.is_nan() || b.is_nan() || matches!(a.sign(), Some(astro_float::Sign::Neg)) && !a.is_zero() {
+        return None;
+    }
+    let zero = BigFloat::from_i8(0, p);
+    let one = BigFloat::from_i8(1, p);
+    let inf = BigFloat::from_f64(f64::INFINITY, p);
+    // `1^anything` is 1, infinite exponent included.
+    if !a.is_inf() && matches!(a.cmp(&one), Some(0)) {
+        return Some(one);
+    }
+    if b.is_inf() {
+        let big = a.is_inf() || matches!(a.cmp(&one), Some(c) if c > 0);
+        return Some(if big == b.is_inf_pos() { inf } else { zero });
+    }
+    // `a` is infinite and `b` is finite.
+    if b.is_zero() {
+        return Some(one);
+    }
+    Some(if matches!(b.sign(), Some(astro_float::Sign::Pos)) { inf } else { zero })
 }
 
 /// `a^b` when it is exactly a rational, rounded to `p` bits in direction `rm`.
@@ -800,13 +884,14 @@ fn exact_dyadic_power(a: &BigFloat, b: &BigFloat, p: usize, rm: RoundingMode) ->
     if !matches!(a.sign(), Some(astro_float::Sign::Pos)) || a.is_zero() || a.is_inf() {
         return None;
     }
-    let (bn, bd) = crate::float::bigfloat_to_ratio(b)?;
+    let (bn, bd) = bigfloat_to_ratio(b)?;
     let e = BigRational::new(bn, bd);
-    // The denominator is a power of two, so the root is exact or impossible;
-    // the numerator is the integer power that follows it.
+    // Every finite `BigFloat` is `n/2^k`, so the reduced denominator is a power
+    // of two: the root is either exact or impossible, and the numerator is the
+    // integer power that follows it.
     let root = e.denom().to_u32().filter(|r| *r <= (1 << 20))?;
     let i_pow = e.numer().to_i64()?;
-    let (an, ad) = crate::float::bigfloat_to_ratio(a)?;
+    let (an, ad) = bigfloat_to_ratio(a)?;
     let base = BigRational::new(an, ad);
     if !exact_power_in_range(&base, i_pow, u64::from(root), true) {
         return None;
@@ -821,7 +906,8 @@ fn exact_dyadic_power(a: &BigFloat, b: &BigFloat, p: usize, rm: RoundingMode) ->
     if i_pow < 0 && r.is_zero() {
         return None;
     }
-    let r = r.pow(i_pow.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
+    // `exact_power_in_range` has already bounded |i_pow| by 1 000 000.
+    let r = r.pow(i_pow as i32);
     Some(bigfloat_from_ratio(r.numer(), r.denom(), p, rm))
 }
 
@@ -912,6 +998,54 @@ mod tests {
         assert_eq!(raised("4", (3, 2)), "8");
         assert_eq!(raised("16", (1, 4)), "2");
         assert_eq!(raised("0.25", (1, 2)), "0.5");
+    }
+
+    /// The interval branch has the same trap as the point branch one level
+    /// down: `0.5^[-2:2]` evaluates the corner `0.5^(-2)`, which is exactly 4,
+    /// and astro-float's `pow` never settles the rounding of an exactly
+    /// representable result. This used to run forever. Every value here is the
+    /// reference's, via the C++ shim of `tests/interval_closure.rs`.
+    #[test]
+    fn interval_exponents_with_exactly_representable_corners_terminate() {
+        let po = crate::options::PrintOptions::default();
+        let raised = |base: Number, lo: i64, hi: i64| {
+            let mut e = Number::new();
+            assert!(e.set_interval(&Number::from_i64(lo), &Number::from_i64(hi), false));
+            let mut n = base;
+            assert!(n.raise(&e, true));
+            format!(
+                "[{}:{}]",
+                n.lower_end_point().print(&po),
+                n.upper_end_point().print(&po)
+            )
+        };
+        assert_eq!(raised(Number::from_ints(1, 2, 0), -2, 2), "[0.25:4]");
+        assert_eq!(raised(Number::from_ints(1, 2, 0), 0, 2), "[0.25:1]");
+        assert_eq!(raised(Number::from_i64(2), -2, 2), "[0.25:4]");
+        assert_eq!(raised(Number::from_i64(2), 2, 3), "[4:8]");
+    }
+
+    /// astro-float computes `pow` as `exp(b·ln a)` and loses the sign of
+    /// `ln a` at an infinite exponent: `2^(-infinity)` came back as
+    /// `-infinity`, which made `2^[-infinity:-1]` the enclosure
+    /// `[-infinity:0.5]`. The reference (and MPFR) give `[0:0.5]`.
+    #[test]
+    fn infinite_exponents_take_the_ieee_limit() {
+        let po = crate::options::PrintOptions::default();
+        let mut minf = Number::new();
+        minf.set_minus_infinity(false, false);
+        let mut e = Number::new();
+        assert!(e.set_interval(&minf, &Number::from_i64(-1), false));
+        let mut n = Number::from_i64(2);
+        assert!(n.raise(&e, true));
+        assert_eq!(
+            format!(
+                "[{}:{}]",
+                n.lower_end_point().print(&po),
+                n.upper_end_point().print(&po)
+            ),
+            "[0:0.5]"
+        );
     }
 
     #[test]

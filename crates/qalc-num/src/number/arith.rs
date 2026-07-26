@@ -157,6 +157,29 @@ impl Number {
     }
 
     fn multiply_impl(&mut self, o: &Number) -> bool {
+        // Only one side is complex: scale both of its parts and stop. The
+        // general product below would multiply the other side's absent
+        // imaginary part in as an exact zero and add it back — numerically the
+        // same thing, but `0 × [1:+infinity]` is undefined, so the cross terms
+        // turn `([1:+infinity]+(-infinity)i) × 1` into a failure. The reference
+        // scales the parts separately for exactly this shape (Number.cc:3433).
+        if self.has_imaginary_part() != o.has_imaginary_part() {
+            let (complex, real) = if self.has_imaginary_part() {
+                (&*self, o)
+            } else {
+                (o, &*self)
+            };
+            let mut re = complex.real_part();
+            let mut im = complex.imaginary_part();
+            if !re.multiply(real) || !im.multiply(real) {
+                return false;
+            }
+            *self = re;
+            if !im.is_zero() {
+                self.set_imaginary_part(&im);
+            }
+            return true;
+        }
         // Complex multiplication: (a+bi)(c+di) = (ac−bd) + (ad+bc)i
         if o.has_imaginary_part() || self.has_imaginary_part() {
             let a = self.real_part();
@@ -280,48 +303,56 @@ impl Number {
     }
 
     fn divide_impl(&mut self, o: &Number) -> bool {
-        // Everything that is not rational-by-rational goes through `1/o` and
-        // `multiply`, exactly as the reference dispatches it (Number.cc:3595).
-        // That is not a simplification for its own sake: it is what puts
-        // `multiply`'s infinity guards in the way of `[-infinity:-1] / infinity`
-        // (`1/infinity` is zero, and an operand that includes infinity times a
-        // possibly-zero one is undefined) and of `-infinity / [-infinity:-1]`,
-        // whose reciprocal `[-1:0]` contains zero. Deciding those here instead
-        // would mean a second copy of the same case analysis.
-        if self.is_infinite(false)
-            || o.is_infinite(false)
-            || o.has_imaginary_part()
-            || o.is_floating_point()
-            || self.is_floating_point()
-        {
-            let mut inv = o.clone();
-            if !inv.recip() {
+        if o.has_imaginary_part() || self.has_imaginary_part() {
+            // z/w = z * conj(w) / |w|^2
+            let mut recip = o.clone();
+            if !recip.recip() {
                 return false;
             }
-            return self.multiply(&inv);
+            return self.multiply(&recip);
         }
-        if !o.is_nonzero() {
+        if o.is_zero() {
             return false;
         }
-        if self.is_zero() {
-            self.set_precision_and_approximate_from(o);
-            return true;
-        }
-        if self.has_imaginary_part() {
-            let mut im = self.imaginary_part();
-            if !im.divide(o) {
-                return false;
-            }
-            self.set_imaginary_part(&im);
+        if !o.is_nonzero() && o.is_floating_point() {
+            return false; // interval containing zero
         }
         match (&self.value, &o.value) {
+            (RealValue::PlusInfinity | RealValue::MinusInfinity,
+             RealValue::PlusInfinity | RealValue::MinusInfinity) => false,
+            (RealValue::PlusInfinity | RealValue::MinusInfinity, _) => {
+                let flip = o.real_part_is_negative();
+                if flip {
+                    self.negate();
+                }
+                self.set_precision_and_approximate_from(o);
+                true
+            }
+            (_, RealValue::PlusInfinity | RealValue::MinusInfinity) => {
+                // finite / ∞ = 0 — but an *unbounded* numerator is not
+                // finite. The reference reaches this case as `x · (1/∞)`,
+                // i.e. `x · 0`, which its `multiply` refuses whenever `x`
+                // includes an infinity (Number.cc:3380): `[-infinity:-1] /
+                // infinity` is indeterminate, not zero.
+                if self.includes_infinity() {
+                    return false;
+                }
+                self.clear(true);
+                self.set_precision_and_approximate_from(o);
+                true
+            }
             (RealValue::Rational(a), RealValue::Rational(b)) => {
                 self.value = RealValue::Rational(a / b);
                 self.set_precision_and_approximate_from(o);
                 true
             }
-            // Unreachable: the dispatch above leaves only rationals here.
-            _ => false,
+            _ => {
+                let mut recip = o.clone();
+                if !recip.recip() {
+                    return false;
+                }
+                self.multiply(&recip)
+            }
         }
     }
 
