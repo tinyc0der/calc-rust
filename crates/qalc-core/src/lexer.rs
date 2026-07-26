@@ -30,6 +30,12 @@ pub enum Tok {
     ElementPower,
     /// `.*` element-wise multiply / dot product.
     ElementTimes,
+    /// `./` element-wise (right) division.
+    ElementDivide,
+    /// `.'` postfix matrix transpose.
+    Transpose,
+    /// A lone `.` — the dot-product operator.
+    Dot,
     LParen,
     RParen,
     LBracket,
@@ -95,6 +101,13 @@ pub fn tokenize(src: &str) -> Vec<Token> {
     }
     let mut i = 0usize;
     let mut space_before = false;
+    // Inside `[…]` (outside any nested parentheses) a space separates matrix
+    // columns rather than digit groups, so `[1 2]` is two elements while
+    // `1 2` is the number 12 — see the matlab-matrix branch of
+    // `Calculator::parse` (Calculator-parse.cc:2056). `paren_stack` holds the
+    // parenthesis depth of each enclosing bracket level.
+    let mut paren_stack: Vec<usize> = Vec::new();
+    let mut parens = 0usize;
     while i < chars.len() {
         let c = chars[i];
         if is_space(c) {
@@ -104,8 +117,9 @@ pub fn tokenize(src: &str) -> Vec<Token> {
         }
         let pos = offsets[i];
         let start = i;
-        let tok = if c.is_ascii_digit() || (c == '.' && !is_element_wise_op(&chars, i)) {
-            let s = lex_number(&chars, &mut i);
+        let join_digit_groups = paren_stack.is_empty() || parens > 0;
+        let tok = if c.is_ascii_digit() || (c == '.' && dot_starts_number(&chars, i)) {
+            let s = lex_number(&chars, &mut i, join_digit_groups);
             Tok::Number(s)
         } else if c == '"' || c == '\'' {
             let quote = c;
@@ -153,6 +167,18 @@ pub fn tokenize(src: &str) -> Vec<Token> {
             }
         };
         debug_assert!(i > start, "lexer made no progress at {start}");
+        match tok {
+            Tok::LBracket => {
+                paren_stack.push(parens);
+                parens = 0;
+            }
+            Tok::RBracket => {
+                parens = paren_stack.pop().unwrap_or(0);
+            }
+            Tok::LParen => parens += 1,
+            Tok::RParen => parens = parens.saturating_sub(1),
+            _ => {}
+        }
         out.push(Token { tok, pos, space_before });
         space_before = false;
     }
@@ -167,7 +193,7 @@ pub fn tokenize(src: &str) -> Vec<Token> {
 /// Lex a numeric literal: digits, a decimal point, base prefixes, and
 /// exponent suffixes. Digit-group spaces are *not* consumed here — the
 /// parser joins adjacent number tokens per libqalculate's separator rules.
-fn lex_number(chars: &[char], i: &mut usize) -> String {
+fn lex_number(chars: &[char], i: &mut usize, join_digit_groups: bool) -> String {
     let mut s = String::new();
     // Base prefix (0x, 0b, 0o, 0d) — pass through to Number::set.
     if chars[*i] == '0' && *i + 1 < chars.len() && matches!(chars[*i + 1], 'x' | 'X' | 'b' | 'B' | 'o' | 'O' | 'd' | 'D') {
@@ -204,7 +230,8 @@ fn lex_number(chars: &[char], i: &mut usize) -> String {
         while j < chars.len() && is_space(chars[j]) {
             j += 1;
         }
-        let continues = j < chars.len()
+        let continues = join_digit_groups
+            && j < chars.len()
             && (chars[j].is_ascii_digit()
                 || (chars[j] == '.' && !is_element_wise_op(chars, j)));
         if !continues {
@@ -274,7 +301,13 @@ fn lex_operator(chars: &[char], i: &mut usize) -> Option<Tok> {
         }
         '\\' => Tok::IntDivide,
         '^' => {
-            Tok::Power
+            // `^^` is bitwise xor (5 ^^ 3 = 6), not a repeated power.
+            if next == Some('^') {
+                adv = 2;
+                Tok::BitXor
+            } else {
+                Tok::Power
+            }
         }
         '%' => {
             // Verified against the reference binary: `%%` is floored modulo
@@ -382,8 +415,17 @@ fn lex_operator(chars: &[char], i: &mut usize) -> Option<Tok> {
             } else if next == Some('*') {
                 adv = 2;
                 Tok::ElementTimes
+            } else if next == Some('/') {
+                adv = 2;
+                Tok::ElementDivide
+            } else if next == Some('\'') {
+                adv = 2;
+                Tok::Transpose
             } else {
-                return None;
+                // A lone `.` between two operands is the dot-product
+                // operator (`(1;2).(3;4)` = 11); `Calculator::parseAdd`
+                // rewrites it to the internal `\x16` operator.
+                Tok::Dot
             }
         }
         _ => return None,
@@ -392,9 +434,16 @@ fn lex_operator(chars: &[char], i: &mut usize) -> Option<Tok> {
     Some(tok)
 }
 
-/// Is the `.` at `i` the start of `.^` or `.*` rather than part of a number?
+/// Is the `.` at `i` the start of an element-wise operator (`.^ .* ./ .'`)
+/// or the dot-product operator rather than part of a number?
 fn is_element_wise_op(chars: &[char], i: usize) -> bool {
-    matches!(chars.get(i + 1), Some('^') | Some('*'))
+    matches!(chars.get(i + 1), Some('^') | Some('*') | Some('/') | Some('\''))
+}
+
+/// Does the `.` at `i` begin a numeric literal (`.5`)? A `.` that is not
+/// followed by a digit is an operator, not a decimal point.
+fn dot_starts_number(chars: &[char], i: usize) -> bool {
+    matches!(chars.get(i + 1), Some(c) if c.is_ascii_digit())
 }
 
 fn is_space(c: char) -> bool {

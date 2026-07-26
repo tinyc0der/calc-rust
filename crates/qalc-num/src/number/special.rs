@@ -32,8 +32,9 @@ const RM: RoundingMode = RoundingMode::ToEven;
 /// Guard bits added on top of the working precision for every series.
 const GUARD: usize = 64;
 
-/// Largest Bernoulli index computed exactly (the recurrence is O(n²)).
-const BERNOULLI_MAX: usize = 1024;
+/// Largest Bernoulli index computed exactly (the recurrence is O(n²) on
+/// integers that grow like `n log n` digits).
+const BERNOULLI_MAX: usize = 2048;
 
 /// Largest |x| accepted by the (non-asymptotic) exponential/trigonometric
 /// integral series.
@@ -48,8 +49,8 @@ thread_local! {
 }
 
 /// `B_n` as an exact rational, in the `B_1 = −1/2` convention libqalculate
-/// uses (`bernoulli_numbers.h`).  Computed from
-/// `Σ_{j≤m} C(m+1, j)·B_j = 0` and memoized per thread.
+/// uses (`bernoulli_numbers.h`).  Memoized per thread; `None` once `n`
+/// exceeds [`BERNOULLI_MAX`].
 pub(crate) fn bernoulli_rational(n: usize) -> Option<BigRational> {
     if n > 1 && n % 2 == 1 {
         return Some(BigRational::zero());
@@ -59,32 +60,51 @@ pub(crate) fn bernoulli_rational(n: usize) -> Option<BigRational> {
     }
     BERNOULLI_CACHE.with(|c| {
         let mut v = c.borrow_mut();
-        if v.is_empty() {
-            v.push(BigRational::one()); // B_0 = 1
-        }
-        while v.len() <= n {
-            let m = v.len();
-            if m > 1 && m % 2 == 1 {
-                v.push(BigRational::zero());
-                continue;
-            }
-            // B_m = −1/(m+1) · Σ_{j<m} C(m+1, j)·B_j
-            let mut sum = BigRational::zero();
-            let mut binom = BigInt::one(); // C(m+1, 0)
-            for j in 0..m {
-                if j > 0 {
-                    // C(m+1, j) = C(m+1, j−1)·(m+2−j)/j
-                    binom = binom * BigInt::from(m + 2 - j) / BigInt::from(j);
-                }
-                if !v[j].is_zero() {
-                    sum += v[j].clone() * BigRational::from_integer(binom.clone());
-                }
-            }
-            sum /= BigRational::from_integer(BigInt::from(m + 1));
-            v.push(-sum);
+        if v.len() <= n {
+            // Grow with slack so a sweep over consecutive indices rebuilds once.
+            *v = build_bernoulli((n + n / 4 + 16).min(BERNOULLI_MAX + 1));
         }
         Some(v[n].clone())
     })
+}
+
+/// `B_0 … B_limit` from the Knuth–Buckholtz tangent-number recurrence —
+/// integer-only (no gcds), unlike the binomial recurrence on rationals.
+/// `B_{2k} = (−1)^{k−1}·2k·T_k / (4^k(4^k−1))`.
+fn build_bernoulli(limit: usize) -> Vec<BigRational> {
+    let m = limit / 2; // highest tangent number needed
+    let mut t = vec![BigInt::zero(); m + 2];
+    if m >= 1 {
+        t[1] = BigInt::one();
+    }
+    for k in 2..=m {
+        t[k] = BigInt::from(k - 1) * &t[k - 1];
+    }
+    for k in 2..=m {
+        for j in k..=m {
+            let a = BigInt::from(j - k) * &t[j - 1];
+            t[j] = a + BigInt::from(j - k + 2) * &t[j];
+        }
+    }
+    let mut out = Vec::with_capacity(limit + 1);
+    out.push(BigRational::one()); // B_0
+    if limit >= 1 {
+        out.push(BigRational::new(BigInt::from(-1), BigInt::from(2))); // B_1
+    }
+    for i in 2..=limit {
+        if i % 2 == 1 {
+            out.push(BigRational::zero());
+            continue;
+        }
+        let k = i / 2;
+        let p4 = BigInt::one() << (2 * k); // 4^k
+        let mut num = BigInt::from(2 * k) * &t[k];
+        if k % 2 == 0 {
+            num = -num; // (−1)^{k−1}
+        }
+        out.push(BigRational::new(num, &p4 * (&p4 - BigInt::one())));
+    }
+    out
 }
 
 // ----------------------------------------------------------------------
@@ -163,26 +183,35 @@ fn stirling_ln_gamma(z: &BigFloat, wp: usize, cc: &mut Consts) -> BigFloat {
     let z2 = z.mul(z, wp, RM);
     let mut zpow = f_i(1, wp).div(z, wp, RM); // z^−(2k−1), k = 1
     let mut prev = BigFloat::from_f64(f64::INFINITY, wp);
+    let mut converged = false;
     for k in 1..=stirling_terms(wp) {
         let b = match bernoulli_rational(2 * k) {
             Some(b) => b,
-            None => break,
+            None => break, // ran out of Bernoulli numbers — not converged
         };
         let den = b.denom() * BigInt::from(2 * k) * BigInt::from(2 * k - 1);
         let coef = bigfloat_from_ratio(b.numer(), &den, wp, RM);
         let term = coef.mul(&zpow, wp, RM);
         let at = term.abs();
         if at.cmp(&prev) == Some(1) {
-            break; // asymptotic series has started to diverge
+            // Past the smallest term.  `z` is chosen so the minimum term is
+            // far below 2^−wp, so this counts as converged.
+            converged = true;
+            break;
         }
         acc = acc.add(&term, wp, RM);
         if negligible(&at, &acc, wp) {
+            converged = true;
             break;
         }
         prev = at;
         zpow = zpow.div(&z2, wp, RM);
     }
-    acc
+    if converged {
+        acc
+    } else {
+        BigFloat::nan(None)
+    }
 }
 
 /// `ln Γ(x)` for `x > 0`: shift the argument up into the asymptotic regime.
@@ -275,6 +304,7 @@ fn digamma_pos(x: &BigFloat, wp: usize, cc: &mut Consts) -> BigFloat {
     let z2 = z.mul(&z, wp, RM);
     let mut zpow = one.div(&z2, wp, RM);
     let mut prev = BigFloat::from_f64(f64::INFINITY, wp);
+    let mut converged = false;
     for k in 1..=stirling_terms(wp) {
         let b = match bernoulli_rational(2 * k) {
             Some(b) => b,
@@ -285,14 +315,19 @@ fn digamma_pos(x: &BigFloat, wp: usize, cc: &mut Consts) -> BigFloat {
         let term = coef.mul(&zpow, wp, RM);
         let at = term.abs();
         if at.cmp(&prev) == Some(1) {
+            converged = true;
             break;
         }
         acc = acc.sub(&term, wp, RM);
         if negligible(&at, &acc, wp) {
+            converged = true;
             break;
         }
         prev = at;
         zpow = zpow.div(&z2, wp, RM);
+    }
+    if !converged {
+        return BigFloat::nan(None);
     }
     acc.sub(&shift, wp, RM)
 }
