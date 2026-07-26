@@ -48,6 +48,9 @@ pub fn owns(fid: u32) -> bool {
 
 /// Evaluate one of this module's builtins in place.
 pub fn calculate_function(m: &mut MathStructure, exact: bool) -> bool {
+    if calculate_logarithm(m) {
+        return true;
+    }
     let MathStructure::Function { id, args } = m else {
         return false;
     };
@@ -354,4 +357,42 @@ mod tests {
         assert_eq!(function_name(crate::builtins::id::UNCERTAINTY), None);
         assert!(!owns(1));
     }
+}
+
+/// `ln(u^n)` is `n * ln(u)` when `u` is positive — the power rule of
+/// `LogFunction::calculate`. A sum is factored first, so `ln(x^2 + 2x + 1)`
+/// becomes `2 ln(x + 1)` once `/assume positive` makes `x + 1` positive.
+fn calculate_logarithm(m: &mut MathStructure) -> bool {
+    let MathStructure::Function { id, args } = m else {
+        return false;
+    };
+    if id.0 != crate::builtins::id::LN || args.len() != 1 {
+        return false;
+    }
+    let eo = crate::options::EvaluationOptions::default();
+    let argument = match &args[0] {
+        MathStructure::Addition(_) => crate::polynomial::factor(&args[0], &eo),
+        other => other.clone(),
+    };
+    let MathStructure::Power { base, exponent } = &argument else {
+        return false;
+    };
+    // Only an exact power of a positive base: `ln((-2)^2)` is not `2 ln(-2)`.
+    if !crate::calculate::represents::positive(base) {
+        return false;
+    }
+    let Some(n) = exponent.number() else {
+        return false;
+    };
+    if !n.is_rational() || n.is_one() {
+        return false;
+    }
+    *m = MathStructure::Multiplication(vec![
+        MathStructure::Number(n.clone()),
+        MathStructure::Function {
+            id: crate::ids::FunctionId(crate::builtins::id::LN),
+            args: vec![(**base).clone()],
+        },
+    ]);
+    true
 }

@@ -82,6 +82,13 @@ impl Session {
         // the options the transcripts depend on are honoured; the rest are
         // accepted and ignored so a transcript keeps running.
         if let Some(rest) = line.strip_prefix('/') {
+            // `/assume <sign>` is its own command, not a `set` option.
+            if let Some(word) = rest.strip_prefix("assume ") {
+                if let Some(sign) = crate::assumptions::parse_sign(word.trim()) {
+                    crate::assumptions::set_sign(sign);
+                }
+                return Ok(String::new());
+            }
             return Ok(self.set_option(rest));
         }
         // The CLI accepts the same commands without the slash.

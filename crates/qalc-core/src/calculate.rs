@@ -111,7 +111,7 @@ type MergeFn = fn(&mut MathStructure, &mut MathStructure, &EvaluationOptions, bo
 /// sign, so only `represents_number` and `represents_non_matrix` hold.
 /// Variables, units, functions and date/times always answer conservatively
 /// here because the registries are not ported yet.
-mod represents {
+pub(crate) mod represents {
     use crate::structure::MathStructure as M;
 
     /// `representsNumber(false)`
@@ -166,6 +166,7 @@ mod represents {
     /// `representsPositive(false)`
     pub fn positive(m: &M) -> bool {
         match m {
+            M::Symbolic(_) => crate::assumptions::unknowns_are_positive(),
             M::Number(n) => n.is_positive(),
             M::Addition(v) => v.iter().all(positive),
             M::Multiplication(v) => {
@@ -213,6 +214,7 @@ mod represents {
     /// `representsNonNegative(false)`
     pub fn non_negative(m: &M) -> bool {
         match m {
+            M::Symbolic(_) => crate::assumptions::unknowns_are_positive(),
             M::Number(n) => n.is_non_negative(),
             M::Addition(v) => v.iter().all(non_negative),
             M::Multiplication(v) => {
@@ -1130,8 +1132,14 @@ impl MathStructure {
             return Merged;
         }
 
-        if self.is_multiplication() && represents::integer(other) {
-            // (xy)^a=x^a*y^a
+        // (xy)^a=x^a*y^a — always for an integer exponent, and for any real
+        // exponent when every factor is non-negative, which is what splits
+        // `sqrt(xy)` under `/assume positive`.
+        if self.is_multiplication()
+            && (represents::integer(other)
+                || (represents::real(other)
+                    && self.children().all(represents::non_negative)))
+        {
             let exp = std::mem::take(other);
             let n = nary_mut(self).expect("multiplication").len();
             for i in 0..n {
@@ -1164,6 +1172,19 @@ impl MathStructure {
                 exp.calculate_multiply(b, eo);
                 self.calculate_raise_exponent(eo);
                 return Merged;
+            }
+        }
+
+        // A root of a sum is worth trying to factor: `sqrt(x + 2sqrt(x) + 1)`
+        // is `sqrt((sqrt(x) + 1)^2)`, which the rule above then reduces.
+        // Only an exact `1/n` is worth the attempt, and only when factoring
+        // actually produces an `n`-th power, so this cannot loop.
+        if self.is_addition() {
+            if let Some(root) = reciprocal_integer(other) {
+                if let Some(factored) = factor_to_power(self, root, eo) {
+                    *self = factored;
+                    return self.merge_power(other, eo);
+                }
             }
         }
 
@@ -1445,6 +1466,38 @@ impl MathStructure {
 /// `eo.keep_zero_units` (MathStructure-calculate.cc:2989): multiplying by zero
 /// normally collapses the product, but a factor carrying a unit keeps it, so
 /// `0 m` stays `0 m` and can still be converted.
+/// `n` when `m` is exactly `1/n` for an integer `n >= 2`.
+fn reciprocal_integer(m: &MathStructure) -> Option<i64> {
+    let n = m.number()?;
+    if !n.is_rational() || n.is_approximate() {
+        return None;
+    }
+    let mut inverted = n.clone();
+    if !inverted.recip() || !inverted.is_integer() {
+        return None;
+    }
+    inverted.to_i64().filter(|v| *v >= 2)
+}
+
+/// Factor `m` and keep the result only when it came out as an exact `root`-th
+/// power (possibly with a numeric coefficient in front).
+fn factor_to_power(
+    m: &MathStructure,
+    root: i64,
+    eo: &EvaluationOptions,
+) -> Option<MathStructure> {
+    let factored = crate::polynomial::factor(m, eo);
+    let is_root_power = |x: &MathStructure| {
+        matches!(x, MathStructure::Power { exponent, .. }
+            if exponent.number().is_some_and(|e| e.equals_i64(root)))
+    };
+    match &factored {
+        x if is_root_power(x) => Some(factored),
+        MathStructure::Multiplication(v) if v.iter().any(is_root_power) => Some(factored),
+        _ => None,
+    }
+}
+
 fn zero_may_absorb(other: &MathStructure, eo: &EvaluationOptions) -> bool {
     !eo.keep_zero_units || !crate::units::contains_unit(other)
 }

@@ -5,6 +5,7 @@
 //! definitions loading, and output formatting.
 
 pub mod absolute;
+pub mod assumptions;
 pub mod builtins;
 pub mod calculate;
 pub mod datetime;
