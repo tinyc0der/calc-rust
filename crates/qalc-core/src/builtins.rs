@@ -192,6 +192,9 @@ pub fn calculate_functions(m: &mut MathStructure) -> bool {
         MathStructure::BitwiseNot(x) | MathStructure::LogicalNot(x) => {
             changed |= calculate_functions(x);
         }
+        MathStructure::Conversion { value, .. } => {
+            changed |= calculate_functions(value);
+        }
         MathStructure::Function { args, .. } => {
             for a in args.iter_mut() {
                 changed |= calculate_functions(a);
@@ -202,10 +205,70 @@ pub fn calculate_functions(m: &mut MathStructure) -> bool {
     if matches!(m, MathStructure::Function { .. }) {
         changed |= calculate_function(m);
     }
-    // `~x` and `!x` are dedicated node types rather than calls, but their
-    // numeric evaluation belongs here.
+    // Bitwise/logical operators are dedicated node types rather than calls,
+    // but their numeric evaluation belongs here.
     changed |= calculate_unary_node(m);
+    changed |= calculate_nary_node(m);
     changed
+}
+
+/// Fold an n-ary bitwise/logical node over numeric operands.
+fn calculate_nary_node(m: &mut MathStructure) -> bool {
+    enum Op {
+        And,
+        Or,
+        Xor,
+        LAnd,
+        LOr,
+        LXor,
+    }
+    let (op, items) = match m {
+        MathStructure::BitwiseAnd(v) => (Op::And, v),
+        MathStructure::BitwiseOr(v) => (Op::Or, v),
+        MathStructure::BitwiseXor(v) => (Op::Xor, v),
+        MathStructure::LogicalAnd(v) => (Op::LAnd, v),
+        MathStructure::LogicalOr(v) => (Op::LOr, v),
+        MathStructure::LogicalXor(v) => (Op::LXor, v),
+        _ => return false,
+    };
+    if items.len() < 2 {
+        return false;
+    }
+    let mut nums: Vec<Number> = Vec::with_capacity(items.len());
+    for i in items.iter() {
+        match i {
+            MathStructure::Number(n) => nums.push(n.clone()),
+            _ => return false,
+        }
+    }
+    let mut acc = nums[0].clone();
+    for rhs in &nums[1..] {
+        let ok = match op {
+            Op::And => acc.bit_and(rhs),
+            Op::Or => acc.bit_or(rhs),
+            Op::Xor => acc.bit_xor(rhs),
+            Op::LAnd => {
+                let v = acc.get_boolean() == 1 && rhs.get_boolean() == 1;
+                acc.set_true(v);
+                true
+            }
+            Op::LOr => {
+                let v = acc.get_boolean() == 1 || rhs.get_boolean() == 1;
+                acc.set_true(v);
+                true
+            }
+            Op::LXor => {
+                let v = (acc.get_boolean() == 1) != (rhs.get_boolean() == 1);
+                acc.set_true(v);
+                true
+            }
+        };
+        if !ok {
+            return false;
+        }
+    }
+    *m = MathStructure::Number(acc);
+    true
 }
 
 /// Evaluate `BitwiseNot`/`LogicalNot` over a numeric operand.

@@ -371,6 +371,7 @@ impl MathStructure {
                 _ => None,
             },
             BitwiseNot(c) | LogicalNot(c) => (index == 0).then_some(&**c),
+            Conversion { value, .. } => (index == 0).then_some(&**value),
             _ => None,
         }
     }
@@ -393,6 +394,7 @@ impl MathStructure {
                 _ => None,
             },
             BitwiseNot(c) | LogicalNot(c) => (index == 0).then_some(&mut **c),
+            Conversion { value, .. } => (index == 0).then_some(&mut **value),
             _ => None,
         }
     }

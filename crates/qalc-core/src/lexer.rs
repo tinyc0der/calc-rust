@@ -350,7 +350,7 @@ fn lex_operator(chars: &[char], i: &mut usize) -> Option<Tok> {
                 Tok::BitAnd
             }
         }
-        '∧' => Tok::LogicalAnd,
+        '∧' => Tok::BitAnd,
         '|' => {
             if next == Some('|') {
                 adv = 2;
