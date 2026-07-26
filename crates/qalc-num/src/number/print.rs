@@ -6,7 +6,7 @@
 //! complex join, and floats via their exact binary-rational value.
 //! TODO(port): interval displays other than SIGNIFICANT_DIGITS/MIDPOINT,
 //! preserve_format ellipses, indicate_infinite_series, two's complement,
-//! sexagesimal/time/special bases, BCD, bijective-26, IEEE-float bases.
+//! special bases, BCD, bijective-26, IEEE-float bases.
 
 use super::{Number, RealValue};
 use crate::context;
@@ -18,6 +18,14 @@ use crate::options::{
 use num_bigint::{BigInt, BigUint, Sign};
 use num_rational::BigRational;
 use num_traits::{One, Signed, ToPrimitive, Zero};
+
+/// `BASE_IS_SEXAGESIMAL(x)` (includes.h:337) — the degree/latitude/longitude
+/// family, which shares a printer with `BASE_TIME` but not its formatting.
+pub fn is_sexagesimal_base(b: i32) -> bool {
+    use crate::options::base;
+    (base::SEXAGESIMAL..=base::SEXAGESIMAL_3).contains(&b)
+        || (base::LATITUDE..=base::LONGITUDE_2).contains(&b)
+}
 
 /// `get_rounding_mode(po)` — legacy `round_halfway_to_even` folds in.
 pub(crate) fn get_rounding_mode(po: &PrintOptions) -> RoundingMode {
@@ -258,6 +266,11 @@ impl Number {
         if self.has_imaginary_part() {
             return self.print_complex(po);
         }
+        if (is_sexagesimal_base(po.base) || po.base == crate::options::base::TIME)
+            && !self.is_infinite(false)
+        {
+            return self.print_sexagesimal(po);
+        }
         match &self.value {
             RealValue::PlusInfinity => {
                 if po.use_unicode_signs {
@@ -282,6 +295,162 @@ impl Number {
                 }
             }
         }
+    }
+
+    /// The `BASE_IS_SEXAGESIMAL || BASE_TIME` branch of `Number::print`
+    /// (Number.cc:11251).
+    ///
+    /// The value is split left to right into three sections — whole units,
+    /// sixtieths, and thirty-six-hundredths — and each section is printed in
+    /// base 10. `52.34 to sexa` is `52°20′24″`; `(19+1/60) to time` is
+    /// `19:01`, the seconds omitted because time format hides a zero third
+    /// section while degree formats always show it.
+    fn print_sexagesimal(&self, po: &PrintOptions) -> String {
+        use crate::options::base;
+        let is_time = po.base == base::TIME;
+        let two_part = matches!(
+            po.base,
+            base::SEXAGESIMAL_2 | base::LATITUDE_2 | base::LONGITUDE_2
+        );
+        // Time and the one-letter latitude/longitude forms pad each section
+        // to two digits; the plain degree form does not.
+        let pad_sections =
+            matches!(po.base, base::TIME | base::LATITUDE | base::LONGITUDE);
+        // `PRECISION_DIGITS` (Number.cc:10679).
+        let precision_digits = if po.use_max_decimals && po.max_decimals < -1 {
+            (-po.max_decimals).min(crate::context::precision())
+        } else {
+            crate::context::precision()
+        };
+
+        let mut nr = self.clone();
+        match po.interval_display {
+            IntervalDisplay::Lower => nr = nr.lower_end_point(),
+            IntervalDisplay::Upper => nr = nr.upper_end_point(),
+            _ => {}
+        }
+        let neg = nr.is_negative();
+        if neg {
+            nr.negate();
+        }
+
+        let mut po2 = po.clone();
+        po2.base = 10;
+        po2.number_fraction_format = NumberFractionFormat::Decimal;
+        po2.show_ending_zeroes = false;
+
+        let mut nr1 = nr.clone();
+        nr1.trunc();
+        let mut nr2 = nr.clone();
+        nr2.frac();
+
+        let mut str3 = String::new();
+        if two_part {
+            nr2.multiply_i64(60);
+        } else {
+            nr2.set_approximate(false);
+            nr2.multiply_i64(60);
+            nr2.trunc();
+
+            let mut nr3 = nr.clone();
+            nr3.frac();
+            nr3.multiply_i64(60);
+            nr3.frac();
+            nr3.multiply_i64(60);
+            if po.base == base::SEXAGESIMAL_3 && !nr3.is_integer() {
+                nr3.round(po.rounding);
+            }
+            // A zero third section is dropped in time format but kept in the
+            // degree formats.
+            if !nr3.is_zero() || is_sexagesimal_base(po.base) {
+                let mut po3 = po2.clone();
+                if nr1.is_zero() && nr2.is_zero() {
+                    po3.min_exp = precision_digits;
+                } else {
+                    po3.min_exp = crate::options::exp_mode::NONE;
+                    if po3.max_decimals < 0 || !po3.use_max_decimals {
+                        po3.max_decimals = precision_digits;
+                        po3.use_max_decimals = true;
+                    }
+                }
+                str3 = nr3.print(&po3);
+                // Rounding can push the third section to a full 60; carry it.
+                if str3.starts_with("60") {
+                    str3.replace_range(0..2, "0");
+                    nr2.add_i64(1);
+                    if nr2.equals_i64(60) {
+                        nr2 = Number::new();
+                        nr1.add_i64(1);
+                    }
+                }
+            }
+        }
+
+        if (po.min_exp > 0 && po.min_exp < precision_digits)
+            || (po.min_exp < 0 && -po.min_exp < precision_digits)
+        {
+            po2.min_exp = crate::options::exp_mode::PRECISION;
+        } else {
+            po2.min_exp = po.min_exp;
+        }
+        let mut str = nr1.print(&po2);
+        // An exponent in the first section means the value is too large for
+        // sexagesimal notation to be readable; fall back to base 10.
+        if str.contains('E') || str.contains('^') {
+            let mut po_dec = po.clone();
+            po_dec.base = 10;
+            po_dec.number_fraction_format = NumberFractionFormat::Decimal;
+            return self.print(&po_dec);
+        }
+        if !is_time {
+            str.push(if po.use_unicode_signs { '\u{b0}' } else { 'o' });
+        } else {
+            str.push(':');
+        }
+        if pad_sections && nr2.is_less_than_i64(10) {
+            str.push('0');
+        }
+        if two_part {
+            let mut po3 = po2.clone();
+            if nr1.is_zero() {
+                po3.min_exp = precision_digits;
+            } else {
+                po3.min_exp = crate::options::exp_mode::NONE;
+                if po3.max_decimals < 0 || !po3.use_max_decimals {
+                    po3.max_decimals = precision_digits;
+                    po3.use_max_decimals = true;
+                }
+            }
+            str.push_str(&nr2.print(&po3));
+        } else {
+            po2.min_exp = crate::options::exp_mode::NONE;
+            str.push_str(&nr2.numerator().print(&po2));
+        }
+        if !is_time {
+            str.push_str(if po.use_unicode_signs { "\u{2032}" } else { "'" });
+        }
+        if !str3.is_empty() {
+            if is_time {
+                str.push(':');
+            }
+            if pad_sections && (str3.chars().count() == 1 || str3.find(&po.decimalpoint) == Some(1))
+            {
+                str.push('0');
+            }
+            str.push_str(&str3);
+            if !is_time {
+                str.push_str(if po.use_unicode_signs { "\u{2033}" } else { "\"" });
+            }
+        }
+        match po.base {
+            base::LONGITUDE | base::LONGITUDE_2 => str.push(if neg { 'W' } else { 'E' }),
+            base::LATITUDE | base::LATITUDE_2 => str.push(if neg { 'S' } else { 'N' }),
+            _ if neg => {
+                str.insert_str(0, if po.use_unicode_signs { "\u{2212}" } else { "-" });
+            }
+            _ => {}
+        }
+        str
     }
 
     fn print_complex(&self, po: &PrintOptions) -> String {
@@ -1370,6 +1539,42 @@ mod tests {
 
     fn p(n: &Number) -> String {
         n.print(&PrintOptions::default())
+    }
+
+    #[test]
+    fn sexagesimal_and_time_sections() {
+        use crate::options::base;
+        let mut po = PrintOptions::default();
+
+        // 52.34° = 52°20′24″ (oracle, after `/set unicode 1`).
+        po.base = base::SEXAGESIMAL;
+        po.use_unicode_signs = true;
+        let n = Number::parse("52.34", &Default::default());
+        assert_eq!(n.print(&po), "52°20′24″");
+        po.use_unicode_signs = false;
+        assert_eq!(n.print(&po), "52o20'24\"");
+
+        // Time format hides a zero third section and pads to two digits.
+        po.base = base::TIME;
+        let mut t = Number::from_i64(1);
+        assert!(t.divide(&Number::from_i64(60)));
+        assert!(t.add(&Number::from_i64(19)));
+        assert_eq!(t.print(&po), "19:01");
+
+        // ...but shows it when it is non-zero, padded and unrounded.
+        let n2 = Number::parse("19.0166666667", &Default::default());
+        assert_eq!(n2.print(&po), "19:01:00.00000012");
+
+        // The sign goes in front for time and degrees, and becomes a compass
+        // letter for the latitude/longitude bases.
+        let mut neg = n.clone();
+        neg.negate();
+        po.base = base::SEXAGESIMAL;
+        assert_eq!(neg.print(&po), "-52o20'24\"");
+        po.base = base::LATITUDE;
+        assert_eq!(neg.print(&po), "52o20'24\"S");
+        po.base = base::LONGITUDE;
+        assert_eq!(n.print(&po), "52o20'24\"E");
     }
 
     #[test]
