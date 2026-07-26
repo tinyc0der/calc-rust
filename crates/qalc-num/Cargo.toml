@@ -6,6 +6,10 @@ license.workspace = true
 description = "Arbitrary-precision numeric core for rust-calc (GMP/MPFR replacement, pure Rust)"
 
 [dependencies]
+# `default-features = false` is LOAD-BEARING, not tidiness: astro-float's
+# defaults are ["std", "random", "serde"], and `random` pulls
+# rand -> getrandom -> libc, which would break the project's zero-C-linkage
+# constraint. scripts/check-pure-rust.sh guards this.
 astro-float = { version = "0.9.5", default-features = false, features = ["std"] }
 num-bigint = "0.4"
 num-integer = "0.1.46"

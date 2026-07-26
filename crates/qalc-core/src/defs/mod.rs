@@ -728,21 +728,32 @@ impl Registry {
     // -- functions --------------------------------------------------------
 
     pub fn add_function(&mut self, mut f: FunctionDef) -> FunctionId {
-        let id = FunctionId(self.functions.len() as u32);
+        // Tagged, not dense: see `ids::REGISTRY_ID_BIT`. Without the tag the
+        // 173 functions in functions.xml take ids 0..172, and the block that
+        // `builtins` hand-assigns starts at 1000 — so growing the definition
+        // files far enough would silently make an XML function dispatch as a
+        // builtin.
+        let id = FunctionId::from_registry_index(self.functions.len());
         f.id = id;
         self.function_names.insert(&f.names, id);
         self.functions.push(f);
         id
     }
 
+    /// The slot a registry function id refers to.
+    fn function_index(&self, id: FunctionId) -> usize {
+        id.registry_index().unwrap_or(id.0 as usize)
+    }
+
     pub fn functions(&self) -> &[FunctionDef] {
         &self.functions
     }
     pub fn function(&self, id: FunctionId) -> &FunctionDef {
-        &self.functions[id.0 as usize]
+        &self.functions[self.function_index(id)]
     }
     pub fn function_mut(&mut self, id: FunctionId) -> &mut FunctionDef {
-        &mut self.functions[id.0 as usize]
+        let index = self.function_index(id);
+        &mut self.functions[index]
     }
     pub fn find_function(&self, name: &str) -> Option<&FunctionDef> {
         self.function_names.get(name).map(|id| self.function(id))

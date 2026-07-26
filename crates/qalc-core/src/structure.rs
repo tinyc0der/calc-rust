@@ -35,10 +35,6 @@ pub enum ComparisonType {
     NotEquals,
 }
 
-/// Placeholder for `QalculateDateTime` until the date/time module is ported.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct DateTime;
-
 /// A date/time value carried in the expression tree.
 pub type DateTimeValue = qalc_datetime::QalculateDateTime;
 
