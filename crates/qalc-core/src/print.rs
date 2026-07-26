@@ -172,7 +172,7 @@ fn print_sub(m: &MathStructure, po: &PrintOptions, depth: usize) -> String {
         MathStructure::Undefined => "undefined".to_string(),
         MathStructure::Aborted => "aborted".to_string(),
         // The reference prints a date as a quoted ISO string.
-        MathStructure::DateTime(dt) => format!("\"{}\"", dt.to_iso_string()),
+        MathStructure::DateTime(dt) => format!("\"{}\"", dt.print(po)),
         // A conversion that survived evaluation prints as its value; the
         // target has already been folded into the print options.
         MathStructure::Conversion { value, .. } => print_sub(value, po, depth),

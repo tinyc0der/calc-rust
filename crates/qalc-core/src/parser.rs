@@ -250,6 +250,9 @@ impl<'a> Parser<'a> {
                 let m = self.parse_logical_and()?;
                 return Ok(ConversionTarget::Base(Box::new(m)));
             }
+            if let Some(t) = self.time_zone_target(&lower) {
+                return Ok(t);
+            }
             if let Some(t) = base_target_from_name(&lower) {
                 self.bump();
                 return Ok(t);
@@ -261,6 +264,39 @@ impl<'a> Parser<'a> {
             expr: Box::new(m),
             mix,
             prefix,
+        })
+    }
+
+    /// `to utc`, `to gmt`, `to utc+8`, `to utc-05:30`
+    /// (Calculator-calculate.cc:2818).
+    ///
+    /// The C++ reads the offset with `sscanf("%2u:%2u")`, so `utc+05:30` is
+    /// five and a half hours. Here the colon has already made `05:30` a single
+    /// sexagesimal number worth 5.5, and multiplying by 60 lands on the same
+    /// 330 minutes.
+    fn time_zone_target(&mut self, lower: &str) -> Option<ConversionTarget> {
+        if lower != "utc" && lower != "gmt" {
+            return None;
+        }
+        self.bump();
+        let sign = match self.peek() {
+            Tok::Plus => 1,
+            Tok::Minus => -1,
+            _ => return Some(ConversionTarget::TimeZone { offset_minutes: None }),
+        };
+        let Some(Tok::Number(text)) = self.toks.get(self.i + 1).map(|t| t.tok.clone()) else {
+            return Some(ConversionTarget::TimeZone { offset_minutes: None });
+        };
+        let mut hours = qalc_num::Number::parse(&text, &ParseOptions::default());
+        hours.multiply_i64(60);
+        hours.round(qalc_num::options::RoundingMode::HalfAwayFromZero);
+        let Some(minutes) = hours.to_i64() else {
+            return Some(ConversionTarget::TimeZone { offset_minutes: None });
+        };
+        self.bump();
+        self.bump();
+        Some(ConversionTarget::TimeZone {
+            offset_minutes: Some((sign * minutes) as i32),
         })
     }
 

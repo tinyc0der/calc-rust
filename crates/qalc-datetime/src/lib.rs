@@ -25,6 +25,7 @@
 
 use std::cmp::Ordering;
 
+use qalc_num::options::TimeZoneMode;
 use qalc_num::{Number, PrintOptions};
 
 /// `SECONDS_PER_DAY`
@@ -299,15 +300,31 @@ impl QalculateDateTime {
         str
     }
 
-    /// `print(const PrintOptions&)`.
+    /// `print(const PrintOptions&)` (QalculateDateTime.cc:628).
     ///
-    /// TODO(port): locale output (`DATE_TIME_FORMAT_LOCALE` /
-    /// `toLocalString`) and time-zone display (`TIME_ZONE_UTC`, custom time
-    /// zones, trailing "Z"/"+HH:MM") are not supported; always prints the
-    /// ISO form in the stored (local) zone, which is what the qalc CLI shows
-    /// by default.
-    pub fn print(&self, _po: &PrintOptions) -> String {
-        self.to_iso_string()
+    /// Values are stored in UTC here (`set_str` normalizes a parsed offset
+    /// away), which is also what the reference's local zone resolves to in the
+    /// `--test-file` environment, so `TIME_ZONE_LOCAL` prints the stored value
+    /// unchanged and the other two modes shift from it directly.
+    ///
+    /// TODO(port): locale output (`DATE_TIME_FORMAT_LOCALE` / `toLocalString`).
+    pub fn print(&self, po: &PrintOptions) -> String {
+        match po.time_zone {
+            TimeZoneMode::Local => self.to_iso_string(),
+            TimeZoneMode::Utc => format!("{}Z", self.to_iso_string()),
+            TimeZoneMode::Custom => {
+                let tz = po.custom_time_zone;
+                let mut shifted = self.clone();
+                shifted.add_minutes(&Number::from_i64(tz as i64), false, false);
+                format!(
+                    "{}{}{:02}:{:02}",
+                    shifted.to_iso_string(),
+                    if tz < 0 { '-' } else { '+' },
+                    tz.abs() / 60,
+                    tz.abs() % 60
+                )
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1681,5 +1698,25 @@ mod tests {
         ival.i_day = 10;
         assert!(d.add(&ival));
         assert_eq!(iso(&d), "2021-07-30");
+    }
+}
+
+#[cfg(test)]
+mod time_zone_print_tests {
+    use super::*;
+
+    #[test]
+    fn zone_modes_shift_and_suffix() {
+        let dt = QalculateDateTime::from_str("2020-07-10T07:50CET").expect("parses");
+        let mut po = PrintOptions::default();
+        // Stored in UTC: CET is one hour east.
+        assert_eq!(dt.print(&po), "2020-07-10T06:50:00");
+        po.time_zone = TimeZoneMode::Utc;
+        assert_eq!(dt.print(&po), "2020-07-10T06:50:00Z");
+        po.time_zone = TimeZoneMode::Custom;
+        po.custom_time_zone = 8 * 60;
+        assert_eq!(dt.print(&po), "2020-07-10T14:50:00+08:00");
+        po.custom_time_zone = -(5 * 60 + 30);
+        assert_eq!(dt.print(&po), "2020-07-10T01:20:00-05:30");
     }
 }

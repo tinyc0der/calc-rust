@@ -145,6 +145,12 @@ pub enum ConversionTarget {
     },
     /// `to base` with no argument: expand to base units.
     BaseUnits,
+    /// `to utc` / `to gmt` / `to utc±HH[:MM]` — a print-time zone, not a
+    /// conversion of the value (Calculator-calculate.cc:2808).
+    TimeZone {
+        /// Minutes east of UTC; `None` is plain UTC.
+        offset_minutes: Option<i32>,
+    },
 }
 
 /// `MathStructure()` initializes to the number zero (`init()` sets

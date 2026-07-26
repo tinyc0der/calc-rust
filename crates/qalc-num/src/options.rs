@@ -228,6 +228,19 @@ impl Default for ParseOptions {
     }
 }
 
+/// Which time zone dates are printed in (`TIME_ZONE_*`, includes.h).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TimeZoneMode {
+    /// The zone the value is stored in; no suffix.
+    #[default]
+    Local,
+    /// UTC, with a trailing `Z`.
+    Utc,
+    /// `PrintOptions::custom_time_zone` minutes east of UTC, with a
+    /// trailing `+HH:MM` / `-HH:MM`.
+    Custom,
+}
+
 /// Options controlling number/expression printing. Mirrors `PrintOptions`
 /// (the fields consumed by `Number::print`).
 #[derive(Debug, Clone)]
@@ -265,6 +278,8 @@ pub struct PrintOptions {
     pub hexadecimal_twos_complement: bool,
     pub binary_bits: u32,
     pub duodecimal_symbols: bool,
+    /// Which zone dates are rendered in (`TIME_ZONE_*`).
+    pub time_zone: TimeZoneMode,
     /// Custom time zone; also carries the TZ_TRUNCATE hack (see Number.cc).
     pub custom_time_zone: i32,
 }
@@ -305,6 +320,7 @@ impl Default for PrintOptions {
             hexadecimal_twos_complement: false,
             binary_bits: 0,
             duodecimal_symbols: false,
+            time_zone: TimeZoneMode::Local,
             custom_time_zone: 0,
         }
     }

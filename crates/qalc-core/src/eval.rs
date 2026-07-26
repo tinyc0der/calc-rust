@@ -87,6 +87,17 @@ pub fn apply_conversion(m: &mut MathStructure, po: &mut PrintOptions) -> Result<
             evaluate_calculated(&mut v);
             *m = v;
         }
+        ConversionTarget::TimeZone { offset_minutes } => {
+            match offset_minutes {
+                None => po.time_zone = qalc_num::options::TimeZoneMode::Utc,
+                Some(n) => {
+                    po.time_zone = qalc_num::options::TimeZoneMode::Custom;
+                    po.custom_time_zone = *n;
+                }
+            }
+            let v = (**value).clone();
+            *m = v;
+        }
         ConversionTarget::Unit { expr, mix, prefix } => {
             let store = crate::units::store()
                 .ok_or_else(|| "unit definitions are not available".to_string())?;
