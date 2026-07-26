@@ -104,7 +104,7 @@ pub fn tokenize(src: &str) -> Vec<Token> {
         }
         let pos = offsets[i];
         let start = i;
-        let tok = if c.is_ascii_digit() || (c == '.' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit()) {
+        let tok = if c.is_ascii_digit() || (c == '.' && !is_element_wise_op(&chars, i)) {
             let s = lex_number(&chars, &mut i);
             Tok::Number(s)
         } else if c == '"' || c == '\'' {
@@ -190,14 +190,27 @@ fn lex_number(chars: &[char], i: &mut usize) -> String {
         }
         return s;
     }
-    while *i < chars.len() && (chars[*i].is_ascii_digit() || chars[*i] == '.') {
-        // A '.' only belongs to the number if followed by a digit, otherwise
-        // it is the element-wise operator prefix or a trailing separator.
-        if chars[*i] == '.' && !(*i + 1 < chars.len() && chars[*i + 1].is_ascii_digit()) {
+    // Whitespace inside a run of number characters is a separator and is
+    // discarded, so `1 . 5` is 1.5, `2 3` is 23 and `1 2 + 3` is 15 — all
+    // verified against the reference binary.
+    loop {
+        while *i < chars.len() && (chars[*i].is_ascii_digit() || chars[*i] == '.') {
+            s.push(chars[*i]);
+            *i += 1;
+        }
+        // Look past spaces: continue the number only if more number
+        // material follows, otherwise leave the spaces for the next token.
+        let mut j = *i;
+        while j < chars.len() && is_space(chars[j]) {
+            j += 1;
+        }
+        let continues = j < chars.len()
+            && (chars[j].is_ascii_digit()
+                || (chars[j] == '.' && !is_element_wise_op(chars, j)));
+        if !continues {
             break;
         }
-        s.push(chars[*i]);
-        *i += 1;
+        *i = j;
     }
     // Scientific exponent: E/e followed by optional sign and digits.
     if *i < chars.len() && matches!(chars[*i], 'e' | 'E') {
@@ -377,6 +390,11 @@ fn lex_operator(chars: &[char], i: &mut usize) -> Option<Tok> {
     };
     *i += adv;
     Some(tok)
+}
+
+/// Is the `.` at `i` the start of `.^` or `.*` rather than part of a number?
+fn is_element_wise_op(chars: &[char], i: usize) -> bool {
+    matches!(chars.get(i + 1), Some('^') | Some('*'))
 }
 
 fn is_space(c: char) -> bool {
