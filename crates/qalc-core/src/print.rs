@@ -45,6 +45,9 @@ fn print_sub(m: &MathStructure, po: &PrintOptions, depth: usize) -> String {
         MathStructure::Undefined => "undefined".to_string(),
         MathStructure::Aborted => "aborted".to_string(),
         MathStructure::DateTime(dt) => format!("{dt:?}"),
+        // A conversion that survived evaluation prints as its value; the
+        // target has already been folded into the print options.
+        MathStructure::Conversion { value, .. } => print_sub(value, po, depth),
         MathStructure::Vector(items) => print_vector(items, po, depth),
         MathStructure::Addition(terms) => print_addition(terms, po, depth),
         MathStructure::Multiplication(factors) => print_multiplication(factors, po, depth),

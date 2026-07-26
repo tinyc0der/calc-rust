@@ -5,7 +5,7 @@
 use crate::builtins;
 use crate::parser::{self, ParseError};
 use crate::print;
-use crate::structure::MathStructure;
+use crate::structure::{ConversionTarget, MathStructure};
 use crate::options::EvaluationOptions;
 use qalc_num::{ParseOptions, PrintOptions};
 
@@ -28,7 +28,41 @@ pub fn parse_expression(expr: &str) -> Result<MathStructure, ParseError> {
 pub fn evaluate_to_string(expr: &str) -> Result<String, String> {
     let mut m = parse_expression(expr).map_err(|e| e.to_string())?;
     evaluate(&mut m);
-    Ok(print::print(&m, &batch_print_options()))
+    let mut po = batch_print_options();
+    apply_conversion(&mut m, &mut po)?;
+    Ok(print::print(&m, &po))
+}
+
+/// Fold an outer `to <base>` conversion into the print options, mirroring
+/// how the C++ CLI applies a parsed "to" expression to `printops` rather
+/// than to the value.
+fn apply_conversion(m: &mut MathStructure, po: &mut PrintOptions) -> Result<(), String> {
+    let MathStructure::Conversion { value, target } = m else {
+        return Ok(());
+    };
+    match target {
+        ConversionTarget::NumberBase { base, bits } => {
+            po.base = *base;
+            po.binary_bits = *bits;
+        }
+        ConversionTarget::Base(expr) => {
+            let mut b = (**expr).clone();
+            evaluate(&mut b);
+            match &b {
+                MathStructure::Number(n) => match n.to_i64() {
+                    Some(v) if (2..=36).contains(&v) => po.base = v as i32,
+                    _ => return Err("unsupported number base".to_string()),
+                },
+                _ => return Err("number base must evaluate to a number".to_string()),
+            }
+        }
+        ConversionTarget::Unit(_) => {
+            // TODO(port): unit conversion needs the unit registry.
+            return Err("unit conversion is not implemented yet".to_string());
+        }
+    }
+    *m = (**value).clone();
+    Ok(())
 }
 
 /// Evaluate a structure in place using default evaluation options.

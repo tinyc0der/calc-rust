@@ -29,7 +29,7 @@
 
 use crate::ids::FunctionId;
 use crate::lexer::{tokenize, Tok, Token};
-use crate::structure::{ComparisonType, MathStructure};
+use crate::structure::{ComparisonType, ConversionTarget, MathStructure};
 use qalc_num::{Number, ParseOptions};
 
 /// A parse failure with the byte offset where it was detected.
@@ -162,7 +162,38 @@ impl<'a> Parser<'a> {
     // ---------------------------------------------------------------
 
     fn parse_expression(&mut self) -> Result<MathStructure, ParseError> {
-        self.parse_logical_and()
+        let left = self.parse_logical_and()?;
+        // `expr to <target>` — the conversion operator binds loosest of all
+        // (`Calculator::separateToExpression` splits it off before parsing).
+        if *self.peek() == Tok::To {
+            self.bump();
+            let target = self.parse_conversion_target()?;
+            return Ok(MathStructure::Conversion {
+                value: Box::new(left),
+                target,
+            });
+        }
+        Ok(left)
+    }
+
+    /// Parse what follows `to`: a base name, `base N`, or a unit expression.
+    fn parse_conversion_target(&mut self) -> Result<ConversionTarget, ParseError> {
+        if let Tok::Ident(name) = self.peek().clone() {
+            let lower = name.to_ascii_lowercase();
+            // `to base N`
+            if lower == "base" {
+                self.bump();
+                let m = self.parse_logical_and()?;
+                return Ok(ConversionTarget::Base(Box::new(m)));
+            }
+            if let Some(t) = base_target_from_name(&lower) {
+                self.bump();
+                return Ok(t);
+            }
+        }
+        // Anything else is a unit expression.
+        let m = self.parse_logical_and()?;
+        Ok(ConversionTarget::Unit(Box::new(m)))
     }
 
     fn parse_logical_and(&mut self) -> Result<MathStructure, ParseError> {
@@ -570,6 +601,38 @@ impl<'a> Parser<'a> {
         self.eat(&Tok::RParen);
         Ok(args)
     }
+}
+
+/// Recognize a base name after `to`: `bin`, `bin16`, `oct`, `hex`, `dec`,
+/// `roman`, `sexa`, `float`, and the `binN`/`hexN` bit-width forms.
+fn base_target_from_name(lower: &str) -> Option<ConversionTarget> {
+    use qalc_num::options::base;
+    // `binN` / `hexN` carry an explicit bit width.
+    for (prefix, b) in [("bin", 2i32), ("hex", 16i32), ("oct", 8i32)] {
+        if let Some(rest) = lower.strip_prefix(prefix) {
+            if rest.is_empty() {
+                return Some(ConversionTarget::NumberBase { base: b, bits: 0 });
+            }
+            if let Ok(bits) = rest.parse::<u32>() {
+                return Some(ConversionTarget::NumberBase { base: b, bits });
+            }
+            return None;
+        }
+    }
+    let b = match lower {
+        "binary" => 2,
+        "octal" => 8,
+        "dec" | "decimal" => 10,
+        "duo" | "duodecimal" => 12,
+        "hexadecimal" => 16,
+        "roman" => base::ROMAN_NUMERALS,
+        "sexa" | "sexagesimal" => base::SEXAGESIMAL,
+        "time" => base::TIME,
+        "float" => base::FP32,
+        "double" => base::FP64,
+        _ => return None,
+    };
+    Some(ConversionTarget::NumberBase { base: b, bits: 0 })
 }
 
 /// Builtin operations the parser desugars into function calls. Real

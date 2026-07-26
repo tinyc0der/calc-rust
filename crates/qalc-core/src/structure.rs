@@ -98,6 +98,27 @@ pub enum MathStructure {
     Aborted,
     /// `STRUCT_DATETIME`
     DateTime(DateTime),
+    /// An `expr to target` conversion.
+    ///
+    /// The C++ handles `to` outside the structure tree — the CLI splits it
+    /// off with `Calculator::separateToExpression` and applies it to the
+    /// print options or via `Calculator::convert`. Representing it as a node
+    /// keeps the parser total; evaluation unwraps it.
+    Conversion {
+        value: Box<MathStructure>,
+        target: ConversionTarget,
+    },
+}
+
+/// What an `expr to target` conversion asks for.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConversionTarget {
+    /// A number base, with an optional fixed bit width (`bin16`).
+    NumberBase { base: i32, bits: u32 },
+    /// `to base N`, where N is an expression.
+    Base(Box<MathStructure>),
+    /// A unit expression.
+    Unit(Box<MathStructure>),
 }
 
 /// `MathStructure()` initializes to the number zero (`init()` sets
@@ -321,6 +342,8 @@ impl MathStructure {
         match self {
             Number(_) | Symbolic(_) | Variable(_) | Unit(_) | Undefined | Aborted
             | DateTime(_) => 0,
+            // A conversion wraps exactly one value.
+            Conversion { .. } => 1,
             Vector(v) | Addition(v) | Multiplication(v) | BitwiseAnd(v) | BitwiseOr(v)
             | BitwiseXor(v) | LogicalAnd(v) | LogicalOr(v) | LogicalXor(v) => v.len(),
             Function { args, .. } => args.len(),
@@ -690,6 +713,7 @@ impl fmt::Display for MathStructure {
         match self {
             Number(n) => write!(f, "{}", n.print(&PrintOptions::default())),
             Symbolic(s) => write!(f, "{s}"),
+            Conversion { value, .. } => write!(f, "{value}"),
             Vector(v) => {
                 write!(f, "[")?;
                 for (i, c) in v.iter().enumerate() {
