@@ -11,8 +11,10 @@
 mod arith;
 mod compare;
 mod convert;
+mod parse;
 mod pow;
 mod print;
+mod transcendental;
 
 use crate::context;
 use crate::float::{
