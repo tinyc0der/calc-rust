@@ -5,7 +5,7 @@ use super::{Number, RealValue};
 use crate::context;
 use crate::float::{bigfloat_from_ratio, bigfloat_to_ratio};
 use astro_float::{BigFloat, RoundingMode};
-use num_bigint::BigInt;
+use num_bigint::{BigInt, BigUint};
 use num_rational::BigRational;
 use num_traits::{One, Signed, ToPrimitive, Zero};
 
@@ -832,10 +832,148 @@ fn pow_bound(a: &BigFloat, b: &BigFloat, p: usize, rm: RoundingMode) -> BigFloat
     if let Some(f) = infinite_power(a, b, p) {
         return f;
     }
+    if let Some(f) = exact_representable_integer_power(a, b, p, rm) {
+        return f;
+    }
     if let Some(f) = exact_dyadic_power(a, b, p, rm) {
         return f;
     }
     context::with_consts(|cc| a.pow(b, p, rm, cc))
+}
+
+/// `a^n` for an exact integer `n`, when the result is exactly representable in
+/// `p` bits — the one shape `exact_dyadic_power` below is forbidden to reach.
+///
+/// The reference never comes here: past the exact-rational size guard it falls
+/// through to MPFR (Number.cc:4127, `setToFloatingPoint`), and `mpfr_pow` with
+/// an integer exponent is `mpfr_pow_z` — binary exponentiation on floats, which
+/// takes ~log2(n) steps and stops. astro-float's `pow` is `exp(n·ln a)` refined
+/// until the rounding is decided, and a result that lands *on* a representable
+/// value never decides it: `2^10000000` is a one-bit mantissa times `2^10000000`,
+/// so no working precision ever separates the true value from the candidate and
+/// the Ziv loop runs forever. That is what hung `2^10000000`, `2^-10000000`,
+/// `(-2)^10000001` and every other power-of-two base past the size guard;
+/// `3^10000000` was never affected, because its result is irrational-shaped in
+/// binary and `pow` settles in under a millisecond.
+///
+/// (`2^-10000000` still does not answer, but no longer here: `print_float`
+/// spells a float out by converting it to an exact rational, and a rational
+/// with a ten-million-bit denominator goes through `print_rational_decimal`'s
+/// digit-at-a-time long division three million times. That is a separate,
+/// quadratic problem in the printer, and it is why `2^10000000` costs 1.9s
+/// where the reference costs 0.10s.)
+///
+/// `exact_dyadic_power` catches the small exact cases by building the power as a
+/// rational, but it is held to the reference's guard (`|n| < 1000000`, and
+/// `|n|·length1 < 1000000`) so that it cannot materialise a million-digit
+/// integer. This function is the other half: it decides exactness *without*
+/// building anything. Write `a = M·2^E` with `M` odd. Then `a^n = M^n·2^(E·n)`,
+/// and the result fits in `p` bits exactly when `M^n` does. Since
+/// `bits(M^n) ≥ n·(bits(M)−1)+1`, an `M > 1` needs `n ≲ p` — so the only way a
+/// *large* exponent is exact at all is `M = 1`, a power-of-two base, where the
+/// answer is a shift of the exponent field. Everything else returns `None`,
+/// falls through unchanged, and `pow`'s loop terminates on its own.
+///
+/// Unlike `exact_dyadic_power` this accepts a negative base: `pow` returns NaN
+/// only for a *non-integer* exponent there, and `b` is known to be an integer.
+///
+/// Overflowing astro-float's exponent range answers infinity rather than `None`
+/// — `None` would hand the case back to the loop that cannot finish. It is also
+/// what MPFR does, and the caller's "an infinity the operands did not contain is
+/// a pole" check then leaves the expression unevaluated, which is the
+/// reference's answer for `2^1000000000000`.
+fn exact_representable_integer_power(
+    a: &BigFloat,
+    b: &BigFloat,
+    p: usize,
+    rm: RoundingMode,
+) -> Option<BigFloat> {
+    if a.is_zero() || a.is_inf() || a.is_nan() || b.is_inf() || b.is_nan() {
+        return None;
+    }
+    // `|b| < 2^exponent`, so anything past 64 cannot be an `i64` — and must be
+    // rejected *before* it is spelled out as an integer, or a float with a
+    // billion-bit exponent turns into a hundred-megabyte `BigInt` on the way to
+    // failing `to_i64`.
+    if b.exponent()? > 64 || !crate::float::bigfloat_is_integer(b) {
+        return None;
+    }
+    let n = crate::float::bigfloat_to_bigint_trunc(b)?.to_i64()?;
+    if n == 0 {
+        return None;
+    }
+    // `a = mantissa × 2^(e − p_a)`, the raw form; strip the trailing zeros to
+    // get the odd part and fold them into the exponent.
+    let (words, _n, sign, e, _inexact) = a.as_raw_parts()?;
+    let mantissa = biguint_from_words(words);
+    if mantissa.is_zero() {
+        return None;
+    }
+    let tz = mantissa.trailing_zeros().unwrap_or(0);
+    let odd = &mantissa >> tz;
+    let exp2 = i128::from(e) - (words.len() * astro_float::WORD_BIT_SIZE) as i128 + tz as i128;
+    let bits = odd.bits();
+    let magnitude = n.unsigned_abs();
+    let odd_powed = if bits == 1 {
+        // `a` is ±2^exp2: exact for either sign of `n`.
+        BigUint::one()
+    } else {
+        // `1/M^|n|` is not dyadic for `M > 1`, so a negative exponent is out.
+        if n < 0 {
+            return None;
+        }
+        if (bits - 1).checked_mul(magnitude)? >= p as u64 {
+            return None;
+        }
+        let q = odd.pow(u32::try_from(magnitude).ok()?);
+        if q.bits() > p as u64 {
+            return None;
+        }
+        q
+    };
+    let negative = sign == astro_float::Sign::Neg && n % 2 != 0;
+    let mut m = BigInt::from(odd_powed);
+    if negative {
+        m = -m;
+    }
+    let mut f = crate::float::bigfloat_from_bigint(&m, p, rm);
+    let shifted = i128::from(f.exponent()?) + exp2 * i128::from(n);
+    if shifted > i128::from(MPFR_EXPONENT_MAX) {
+        return Some(BigFloat::from_f64(
+            if negative { f64::NEG_INFINITY } else { f64::INFINITY },
+            p,
+        ));
+    }
+    if shifted < -i128::from(MPFR_EXPONENT_MAX) {
+        // Underflow is a refusal, not a zero: `testFloatResult` opens with
+        // `if(mpfr_underflow_p()) return false` (Number.cc:2387), which is why
+        // `2^-2000000000` prints back as `1 / 2^2000000000`. NaN is the signal
+        // the caller already reads that way.
+        return Some(BigFloat::from_f64(f64::NAN, p));
+    }
+    f.set_exponent(shifted as astro_float::Exponent);
+    Some(f)
+}
+
+/// MPFR's default exponent range, `±(2^30 − 1)`, on the same `0.m × 2^e`
+/// convention astro-float uses — the reference does not move it
+/// (no `mpfr_set_emax`/`mpfr_set_emin` anywhere in libqalculate), so this is
+/// where its answers stop: `2^1073741822` is `1.049289358E323228496` and
+/// `2^1073741823` prints back unevaluated, and likewise `2^-1073741822`
+/// against `2^-2000000000`. astro-float's own range is four times wider
+/// (`i32::MAX`), so without this the port would answer in a band the
+/// reference refuses — and answer it by spending minutes in the decimal
+/// printer, which materialises the exact value.
+const MPFR_EXPONENT_MAX: astro_float::Exponent = (1 << 30) - 1;
+
+/// astro-float hands its mantissa out as little-endian 64-bit words.
+fn biguint_from_words(words: &[astro_float::Word]) -> BigUint {
+    let mut v = Vec::with_capacity(words.len() * 2);
+    for w in words {
+        v.push(*w as u32);
+        v.push((*w >> 32) as u32);
+    }
+    BigUint::new(v)
 }
 
 /// `a^b` when one of them is infinite: the IEEE limits, which is what MPFR
@@ -1046,6 +1184,93 @@ mod tests {
             ),
             "[0:0.5]"
         );
+    }
+
+    /// Raise an integer base to an integer exponent the way the evaluator
+    /// does, and print the result at the default precision.
+    fn raise_int(base: i64, exp: i64) -> Number {
+        let mut n = Number::from_i64(base);
+        assert!(n.raise(&Number::from_i64(exp), true), "{base}^{exp} failed");
+        n
+    }
+
+    /// `show_ending_zeroes` so the strings are the reference CLI's verbatim.
+    fn shown(base: i64, exp: i64) -> String {
+        let mut po = crate::options::PrintOptions::default();
+        po.show_ending_zeroes = true;
+        raise_int(base, exp).print(&po)
+    }
+
+    /// `2^10000000` ran forever. Past the reference's exact-power size guard
+    /// the port had nothing left but astro-float's `pow`, which is
+    /// `exp(n·ln a)` refined until the rounding is decided — and `2^10000000`
+    /// is a one-bit mantissa times `2^10000000`, an exactly representable
+    /// result, which never decides it. The reference answers from
+    /// `mpfr_pow_z`, binary exponentiation on floats, in 0.10s.
+    ///
+    /// The value is pinned against the exact integer rather than against the
+    /// reference's `9.049817306E3010299`, which says the same thing about ten
+    /// significant digits instead of ten million: spelling the answer out in
+    /// decimal costs seconds (see `print_float`, which goes through the exact
+    /// rational), and the shift is both cheaper and stricter.
+    #[test]
+    fn a_power_of_two_base_past_the_size_guard_terminates() {
+        let n = raise_int(2, 10000000);
+        assert!(n.is_approximate(), "the size guard declines the exact path");
+        let exact = Number::from_bigint(BigInt::from(1) << 10000000u32);
+        assert!(n.equals(&exact, false, false), "2^10000000 is not 2^10000000");
+    }
+
+    /// Either side of the exact-power size guard, which is the threshold that
+    /// decides whether the answer is built as a rational or as a float.
+    ///
+    /// `|i_pow|·length1 < 1000000` (Number.cc:4053) with `length1 = 1` for
+    /// base 2, so `2^999999` is the last exponent the exact-rational path
+    /// takes and `2^1000000` the first it declines — and the declined side is
+    /// where the hang was. Both values are the reference binary's, and so is
+    /// the split between an exact and an approximate answer.
+    #[test]
+    fn the_exact_power_size_guard_hands_over_without_a_gap() {
+        assert_eq!(shown(2, 999999), "4.950328115E301029");
+        assert_eq!(shown(2, 1000000), "9.900656229E301029");
+        assert!(!raise_int(2, 999999).is_approximate());
+        assert!(raise_int(2, 1000000).is_approximate());
+    }
+
+    /// The other side of the new branch's own threshold: it fires only when
+    /// the result is exactly representable, which for a large exponent means
+    /// an odd mantissa of 1. `3^1000000` has the same exponent and the same
+    /// declined size guard but an irrational-shaped result, so it stays on
+    /// `pow` — where it always terminated, in under a millisecond. Negative
+    /// bases take the branch too; `pow` returns NaN there only for a
+    /// non-integer exponent. Both values are the reference binary's.
+    #[test]
+    fn only_exactly_representable_results_leave_the_pow_path() {
+        assert_eq!(shown(3, 1000000), "1.797710117E477121");
+        assert_eq!(shown(-2, 1000001), "-1.980131246E301030");
+        assert_eq!(shown(-3, 1000001), "-5.393130350E477121");
+    }
+
+    /// Either side of MPFR's default exponent range, which is where the
+    /// reference's answers stop: `2^1073741822` has exponent `2^30 − 1` and is
+    /// answered, `2^1073741823` needs one more and prints back unevaluated.
+    /// Overflow answers infinity rather than `None` so that the case is never
+    /// handed back to the loop that cannot finish; the caller's pole check
+    /// turns that into the refusal.
+    ///
+    /// The accepted side is only checked for *acceptance*: printing a
+    /// 323-million-digit value is minutes of work in this port's decimal
+    /// printer.
+    #[test]
+    fn the_exponent_range_ends_where_mpfrs_does() {
+        let mut n = Number::from_i64(2);
+        assert!(n.raise(&Number::from_i64(1_073_741_822), true));
+        let mut n = Number::from_i64(2);
+        assert!(!n.raise(&Number::from_i64(1_073_741_823), true));
+        let mut n = Number::from_i64(2);
+        assert!(!n.raise(&Number::from_i64(-2_000_000_000), true));
+        let mut n = Number::from_i64(2);
+        assert!(!n.raise(&Number::from_i64(1_000_000_000_000), true));
     }
 
     #[test]

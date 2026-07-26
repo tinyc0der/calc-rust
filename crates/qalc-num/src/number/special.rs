@@ -805,8 +805,29 @@ impl Number {
         if self.is_minus_infinity() {
             return false;
         }
+        // The exact closed forms below are the reference's, but the reference
+        // only *reaches* them for an argument below 1000
+        // (`GammaFunction::calculate`, BuiltinFunctions-special.cc:155:
+        // `isRational() && (approximation == EXACT || (TRY_EXACT &&
+        // isLessThan(1000)))`, and TRY_EXACT is the default). Past that it
+        // hands the whole thing to `Number::gamma`, which is MPFR throughout.
+        //
+        // Without the bound `gamma(1000000)` builds 999999! exactly — an
+        // 18-million-bit integer — and takes over 150s where the reference
+        // takes 0.35s. The printed answer is identical either way, because a
+        // 5.5-million-digit integer is still rounded to ten significant digits
+        // on the way out; all the exactness buys is the arithmetic nobody
+        // asked for.
+        //
+        // This lives here rather than in the function wrapper because the port
+        // routes `gamma` straight to `Number::gamma` (builtins.rs:338) and
+        // never gives `Number` the approximation mode. The bound is therefore
+        // applied unconditionally, which matches the reference in its default
+        // mode and is stricter than the reference under `approximation=EXACT`.
+        let exact_form_in_range =
+            matches!(&self.value, RealValue::Rational(r) if *r < BigRational::from_integer(BigInt::from(1000)));
         if let RealValue::Rational(r) = &self.value {
-            if r.denom().is_one() {
+            if r.denom().is_one() && exact_form_in_range {
                 if !r.is_positive() {
                     return false; // pole
                 }
@@ -817,7 +838,7 @@ impl Number {
                 self.take_keeping_flags(n);
                 return true;
             }
-            if *r.denom() == BigInt::from(2) {
+            if *r.denom() == BigInt::from(2) && exact_form_in_range {
                 if let Some(c) = half_integer_gamma_coeff(r) {
                     let mut sp = Number::new();
                     sp.pi();
@@ -1502,6 +1523,36 @@ mod tests {
         let mut n = num(-3, 10); // -0.3
         assert!(n.gamma());
         assert_eq!(s(&n), "-4.326851109");
+    }
+
+    /// Either side of the threshold on the exact closed forms
+    /// (`GammaFunction::calculate`, BuiltinFunctions-special.cc:155, which
+    /// only reaches them for an argument `isLessThan(1000)`).
+    ///
+    /// Without it `gamma(1000000)` builds 999999! — an 18-million-bit integer
+    /// — and took over 150s where the reference takes 0.35s. Every value here
+    /// is the reference binary's, on both sides, and so is the split between
+    /// an exact answer and an approximate one: 998! is exact, Γ(1000) is
+    /// MPFR's.
+    #[test]
+    fn the_exact_gamma_forms_stop_at_a_thousand() {
+        let g = |n: Number| {
+            let mut n = n;
+            assert!(n.gamma());
+            n
+        };
+        assert_eq!(s(&g(Number::from_i64(999))), "4.027900501E2561");
+        assert_eq!(s(&g(Number::from_i64(1000))), "4.023872601E2564");
+        assert!(!g(Number::from_i64(999)).is_approximate());
+        assert!(g(Number::from_i64(1000)).is_approximate());
+        // The half-integer form is gated by the same test: 999.5 takes it,
+        // 1000.5 does not.
+        assert_eq!(s(&g(num(1999, 2))), "1.272937665E2563");
+        assert_eq!(s(&g(num(2001, 2))), "1.272301196E2566");
+        // (Both half-integer answers are approximate either way — they are a
+        // rational times √π — so only the digits distinguish the two routes.)
+        // An argument the bound exists for.
+        assert_eq!(s(&g(Number::from_i64(10000))), "2.846259681E35655");
     }
 
     #[test]
