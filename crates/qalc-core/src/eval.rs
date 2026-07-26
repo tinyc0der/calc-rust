@@ -5,6 +5,7 @@
 use crate::parser::{self, ParseError};
 use crate::print;
 use crate::structure::MathStructure;
+use crate::options::EvaluationOptions;
 use qalc_num::{ParseOptions, PrintOptions};
 
 /// Print options matching `qalc +u8` — the mode `--test-file` runs in.
@@ -29,12 +30,11 @@ pub fn evaluate_to_string(expr: &str) -> Result<String, String> {
     Ok(print::print(&m, &batch_print_options()))
 }
 
-/// Evaluate a structure in place.
-///
-/// TODO(port): delegate to the `calculate` module's `calculatesub` once the
-/// merge engine lands; today this is a no-op so the pipeline is exercisable
-/// end to end.
-pub fn evaluate(_m: &mut MathStructure) {}
+/// Evaluate a structure in place using default evaluation options.
+pub fn evaluate(m: &mut MathStructure) {
+    let eo = EvaluationOptions::default();
+    m.calculatesub(&eo);
+}
 
 #[cfg(test)]
 mod tests {
