@@ -78,6 +78,12 @@ pub mod id {
     pub const INT: u32 = 1713;
     pub const BITWISE_NOT: u32 = 1714;
     pub const PERCENT: u32 = 1720;
+    /// IEEE-754 helpers. The 3100 block: every block below it is taken
+    /// (1000-2900), and an overlap silently dispatches to another module —
+    /// these first sat at 2700, where lambertW already lived, so `float(x)`
+    /// computed a Lambert W value instead.
+    pub const IEEE_FLOAT: u32 = 3100;
+    pub const IEEE_FLOAT_ERROR: u32 = 3101;
     /// Read a literal written in a given base: `hex(34)` is 52.
     pub const BASE_HEX: u32 = 1721;
     pub const BASE_BIN: u32 = 1722;
@@ -275,6 +281,17 @@ fn apply(id: u32, args: &[Number]) -> Option<Number> {
         (id::SHIFT_RIGHT, 2) => binary(args, |n, o| n.shift_right(o)),
         (id::GCD, 2) => binary(args, |n, o| n.gcd(o)),
         (id::LCM, 2) => binary(args, |n, o| n.lcm(o)),
+        // `float(0100...)` decodes an IEEE-754 bit string; `floatError(x)`
+        // is how far the single-precision encoding of x misses it.
+        (id::IEEE_FLOAT, 1) => {
+            // The bit string arrives as an integer, so take its exact
+            // digits — printing it would give scientific notation and lose
+            // them. `from_float` left-pads, restoring the leading zero that
+            // the integer conversion dropped.
+            let digits = args[0].to_bigint()?.magnitude().to_string();
+            qalc_num::ieee::from_float(&digits, 32, 0)
+        }
+        (id::IEEE_FLOAT_ERROR, 1) => qalc_num::ieee::float_error(&args[0], 32, 0),
         // `hex(34)` re-reads the digits of its argument in another base.
         (id::BASE_HEX, 1) => reinterpret_in_base(&args[0], 16),
         (id::BASE_BIN, 1) => reinterpret_in_base(&args[0], 2),
@@ -537,6 +554,8 @@ pub fn function_id_for_name(name: &str) -> Option<FunctionId> {
         "round" => id::ROUND,
         "frac" => id::FRAC,
         "int" => id::INT,
+        "float" => id::IEEE_FLOAT,
+        "floatError" | "floaterror" => id::IEEE_FLOAT_ERROR,
         "hex" => id::BASE_HEX,
         "bin" => id::BASE_BIN,
         "oct" => id::BASE_OCT,

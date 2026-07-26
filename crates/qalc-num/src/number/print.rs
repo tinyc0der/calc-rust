@@ -246,6 +246,14 @@ impl Number {
             n.resolve_variance_uncertainty();
             return n.print(po);
         }
+        // IEEE-754 bit-string bases print the encoding, in groups of four
+        // (`52.345 to float` is `0100 0010 0101 0001 0110 0001 0100 1000`).
+        if let Some(bits) = ieee_width(po.base) {
+            if let Some(s) = crate::number::ieee::to_float(self, bits, 0) {
+                return group_bits(&s);
+            }
+            return "(floating point error)".to_string();
+        }
         // Complex numbers: join real and imaginary parts.
         if self.has_imaginary_part() {
             return self.print_complex(po);
@@ -1217,6 +1225,32 @@ fn trim_trailing_zeroes(s: &mut String, point: &str) {
     if s.ends_with(point) {
         s.truncate(s.len() - point.len());
     }
+}
+
+
+/// Total width for the IEEE-754 bases, or `None` for an ordinary base.
+fn ieee_width(base: i32) -> Option<u32> {
+    use crate::options::base as b;
+    Some(match base {
+        b::FP16 => 16,
+        b::FP32 => 32,
+        b::FP64 => 64,
+        b::FP80 => 80,
+        b::FP128 => 128,
+        _ => return None,
+    })
+}
+
+/// Space-separated groups of four bits.
+fn group_bits(bits: &str) -> String {
+    let mut out = String::with_capacity(bits.len() + bits.len() / 4);
+    for (i, c) in bits.chars().enumerate() {
+        if i > 0 && i % 4 == 0 {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Round an integer quotient per PrintOptions rounding (used by the integer
