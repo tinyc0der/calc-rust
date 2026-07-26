@@ -27,9 +27,6 @@ thread_local! {
 /// `2i - 3` parses to the complex number it does in the reference.
 fn new_session() -> Session {
     let mut session = Session::new();
-    let mut i = qalc_core::Number::new();
-    i.set_imaginary_part(&qalc_core::Number::from_i64(1));
-    session.set_variable("i", qalc_core::structure::MathStructure::Number(i));
     session.eval_options.approximation = qalc_core::ApproximationMode::Approximate;
     qalc_num::context::set_interval_calculation(
         qalc_num::context::IntervalCalculation::VarianceFormula,

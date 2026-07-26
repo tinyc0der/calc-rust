@@ -34,12 +34,28 @@ impl Default for Session {
 
 impl Session {
     pub fn new() -> Self {
-        Session {
+        let mut s = Session {
             variables: HashMap::new(),
             parse_options: ParseOptions::default(),
             print_options: crate::eval::batch_print_options(),
             eval_options: EvaluationOptions::default(),
-        }
+        };
+        s.install_builtin_constants();
+        s
+    }
+
+    /// Constants that `Calculator::addBuiltinVariables` defines.
+    ///
+    /// Only the imaginary unit for now. `pi`, `e` and the rest are
+    /// `KnownVariable`s that stay symbolic under exact evaluation and only
+    /// collapse to a value under approximation; that needs the two-phase
+    /// exact-then-approximate pass `eval` does not implement yet, and
+    /// defining them here would break the symbolic output the limit
+    /// transcript depends on.
+    fn install_builtin_constants(&mut self) {
+        let mut i = qalc_num::Number::new();
+        i.set_imaginary_part(&qalc_num::Number::from_i64(1));
+        self.set_variable("i", MathStructure::Number(i));
     }
 
     /// Define or replace a variable.
