@@ -58,6 +58,16 @@ pub trait NameResolver {
     fn resolve(&self, name: &str) -> Option<MathStructure>;
     /// Resolve `name` to a function id, if it names a function.
     fn resolve_function(&self, name: &str) -> Option<FunctionId>;
+    /// Whether the C++ `ufv` name-matching loop would *claim* `name` — i.e.
+    /// it is a real unit, variable or function, rather than a symbol the
+    /// fallback invents for text nobody recognised.
+    ///
+    /// Only [`Parser::magnitude_suffix`] needs to tell the two apart. The
+    /// default is `true`, so a resolver that cannot make the distinction
+    /// never lets a trailing letter be eaten as a multiplier.
+    fn is_known_name(&self, _name: &str) -> bool {
+        true
+    }
 }
 
 /// Fallback resolver: every identifier becomes a symbol, every call becomes
@@ -741,6 +751,64 @@ impl<'a> Parser<'a> {
         Ok(m)
     }
 
+    /// The `k`/`M` magnitude suffix of `Calculator::parseNumber`
+    /// (Calculator-parse.cc:4120), returning the multiplier it stands for.
+    ///
+    /// This is *not* the SI prefix machinery — `M` here means "million", not
+    /// "mega", and `m` never means "milli". It is the last-resort branch of
+    /// the number parser: a token that is otherwise a decimal literal but
+    /// carries one stray trailing character normally raises "trailing
+    /// characters … were ignored" and drops it; when that single character is
+    /// `k`/`K` it instead scales by 10^3, and `m`/`M` by 10^6.
+    ///
+    /// Being a last resort is the whole rule. The name-matching loop runs
+    /// first and claims every known unit, variable and prefix+unit pair, so
+    /// the suffix only ever sees letters nothing else wanted:
+    ///
+    /// * `11k` -> 11000, `2M` -> 2000000 — nothing is named `k` or `M`.
+    /// * `2m` -> 2 m, `11K` -> 11 K — `m` is the metre and `K` the kelvin,
+    ///   and matched names win outright.
+    /// * `11km`, `2kg`, `11kB`, `11kK` — the prefix+unit name wins, which is
+    ///   why a prefix letter is never a bare multiplier in front of a unit.
+    /// * `k` alone is *not* 1000: with no digits before it the C++ reports
+    ///   "not a valid variable/function/unit" instead (Calculator-parse.cc:4112).
+    /// * `11kk`, `2f`, `2Z` — more than one leftover character, or a letter
+    ///   that is not `k`/`m`, still takes the "ignored" branch.
+    /// * Base 10 only, so `0x11k` keeps `k` as a separate (unknown) name.
+    fn magnitude_suffix(&self, number_text: &str) -> Option<i64> {
+        if self.po.base != 10 {
+            return None;
+        }
+        // `0x…`/`0b…` literals and time forms like `10:31` are not the plain
+        // decimal literals this branch of the C++ number parser handles.
+        if number_text.contains(':')
+            || (number_text.len() > 1
+                && number_text.starts_with('0')
+                && !number_text.as_bytes()[1].is_ascii_digit()
+                && number_text.as_bytes()[1] != b'.')
+        {
+            return None;
+        }
+        let Tok::Ident(name) = self.peek() else {
+            return None;
+        };
+        let factor = match name.as_str() {
+            "k" | "K" => 1_000,
+            "m" | "M" => 1_000_000,
+            _ => return None,
+        };
+        // The letter has to be the last character of the numeric token, so a
+        // digit glued straight onto it (`11k5`, `11k.5`) disqualifies it.
+        if matches!(self.toks.get(self.i + 1), Some(t) if !t.space_before && matches!(t.tok, Tok::Number(_)))
+        {
+            return None;
+        }
+        if self.resolver.is_known_name(name) {
+            return None;
+        }
+        Some(factor)
+    }
+
     fn parse_primary(&mut self) -> Result<MathStructure, ParseError> {
         let tok = self.peek_token().clone();
         match tok.tok {
@@ -758,7 +826,12 @@ impl<'a> Parser<'a> {
                         break;
                     }
                 }
-                Ok(MathStructure::Number(Number::parse(&text, &self.po)))
+                let mut n = Number::parse(&text, &self.po);
+                if let Some(factor) = self.magnitude_suffix(&text) {
+                    self.bump();
+                    n.multiply(&Number::from_i64(factor));
+                }
+                Ok(MathStructure::Number(n))
             }
             Tok::Ident(ref name) => {
                 self.bump();
@@ -1498,6 +1571,88 @@ mod tests {
     fn empty_parens_is_zero() {
         let m = p("()");
         assert!(m.is_number() && m.number().unwrap().is_zero());
+    }
+
+    /// The `k`/`M` magnitude suffix of `Calculator::parseNumber`. Every
+    /// expectation below is the reference binary's own answer.
+    mod magnitude_suffix {
+        use crate::Session;
+
+        fn ev(s: &str) -> String {
+            Session::new().evaluate_line(s).expect("evaluates")
+        }
+
+        #[test]
+        fn a_stray_k_or_m_after_a_number_scales_it() {
+            assert_eq!(ev("11k"), "11000");
+            assert_eq!(ev("1.5k"), "1500");
+            assert_eq!(ev("2M"), "2000000");
+            // Whitespace is removed before the number is parsed.
+            assert_eq!(ev("11 k"), "11000");
+            assert_eq!(ev("2 M"), "2000000");
+            // `M` is "million" here, not the SI prefix "mega" — proof this
+            // is the number parser and not the prefix machinery.
+            assert_eq!(ev("11 M"), "11000000");
+        }
+
+        #[test]
+        fn the_suffix_belongs_to_the_number_not_the_expression() {
+            assert_eq!(ev("11k + 1"), "11001");
+            assert_eq!(ev("x*11k"), "11000x");
+            // (2*1000)^2, not 2*(1000^2).
+            assert_eq!(ev("2k^2"), "4000000");
+            assert_eq!(ev("11k%"), "110");
+        }
+
+        #[test]
+        fn a_bare_letter_is_never_a_multiplier() {
+            // With no digits in front the C++ reports "k is not a valid
+            // variable/function/unit"; this port leaves it a symbol. What
+            // matters is that it is not 1000.
+            assert_eq!(ev("k"), "k");
+            assert_eq!(ev("k + 1"), "k + 1");
+            assert_eq!(ev("2*k"), "2k");
+        }
+
+        #[test]
+        fn a_matched_name_beats_the_suffix() {
+            // `m` is the metre and `K` the kelvin, so the name loop claims
+            // them and the number parser never sees a stray character.
+            assert_eq!(ev("2m"), "2 m");
+            assert_eq!(ev("11 m"), "11 m");
+            assert_eq!(ev("11K"), "11 K");
+            assert_eq!(ev("2d"), "172800 s");
+        }
+
+        #[test]
+        fn a_prefixed_unit_beats_the_suffix() {
+            // The reason a bare prefix must not multiply: `k` in front of a
+            // unit is part of that unit's name.
+            assert_eq!(ev("11km"), "11 km");
+            assert_eq!(ev("2kg"), "2 kg");
+            assert_eq!(ev("11kB"), "11 kB");
+            assert_eq!(ev("2kK"), "2 kK");
+        }
+
+        #[test]
+        fn only_a_single_trailing_letter_in_base_ten_qualifies() {
+            // More than one leftover character takes the C++'s "trailing
+            // characters ... were ignored" branch instead.
+            assert_eq!(ev("11kk"), "11 kk");
+            assert_eq!(ev("11kj"), "11 kj");
+            // Other prefix letters are not magnitude suffixes at all.
+            assert_eq!(ev("2f"), "2f");
+            assert_eq!(ev("2Z"), "2Z");
+            // Base 10 only.
+            assert_eq!(ev("0x11k"), "17");
+        }
+
+        #[test]
+        fn a_user_variable_shadows_the_suffix() {
+            let mut s = Session::new();
+            s.evaluate_line("k := 7").expect("assigns");
+            assert_eq!(s.evaluate_line("11k").expect("evaluates"), "77");
+        }
     }
 
     #[test]

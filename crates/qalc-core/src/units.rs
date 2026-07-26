@@ -370,38 +370,11 @@ impl UnitStore {
 
     /// A unit name, optionally with a prefix, but without the trailing-digit
     /// exponent shorthand.
-    /// The multiplier for a name that is *entirely* an SI prefix (`k`, `M`).
     ///
-    /// NOT currently wired into parsing. Applying it to a prefix trailing a
-    /// number does give `11k` = 11000, but `k`, `c` and `d` are also
-    /// ordinary symbols, and doing so cost three transcript cases and six
-    /// polynomial tests. The reference distinguishes these through the
-    /// variable/unit registry, which this port does not yet consult for
-    /// single letters.
-    ///
-    /// This is deliberately not part of ordinary name resolution: the
-    /// reference gives a standalone `k` the value 0, and only treats a
-    /// prefix as a multiplier when it trails a number. Anything that is
-    /// also a unit or variable keeps that meaning — `2G` is the
-    /// gravitational constant, not 2e9.
-    #[allow(dead_code)]
-    pub fn bare_prefix_multiplier(&self, name: &str) -> Option<Number> {
-        if self.lookup_unit(name).is_some() {
-            return None;
-        }
-        for (pname, pid, case_sensitive) in &self.prefix_names {
-            let hit = if *case_sensitive {
-                pname == name
-            } else {
-                pname.eq_ignore_ascii_case(name)
-            };
-            if hit {
-                return Some(self.reg.prefix(*pid).value.clone());
-            }
-        }
-        None
-    }
-
+    /// A bare SI prefix is never a name on its own: the reference gives a
+    /// standalone `k` no value at all, and `11k` = 11000 comes from the
+    /// number parser's magnitude suffix instead (see
+    /// [`crate::parser`]'s `magnitude_suffix`), not from this table.
     fn resolve_plain(&self, name: &str) -> Option<MathStructure> {
         if let Some(id) = self.lookup_unit(name) {
             return Some(MathStructure::unit(id));

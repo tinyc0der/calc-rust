@@ -41,10 +41,11 @@ impl Session {
             eval_options: EvaluationOptions::default(),
         };
         s.install_builtin_constants();
-        // Build the unit store up front. The parser consults it for bare SI
-        // prefixes (`11k`), and it can only do so through the non-blocking
-        // accessor — so the store has to already exist by the time any user
-        // expression is parsed.
+        // Build the unit store up front. The parser consults it to decide
+        // whether a name is already taken (which is what keeps `2m` metres
+        // rather than 2000000), and it can only do so through the
+        // non-blocking accessor — so the store has to already exist by the
+        // time any user expression is parsed.
         let _ = crate::units::store();
         s
     }
@@ -230,6 +231,13 @@ impl Session {
                     self.print_options.base = b;
                 }
             }
+            // `set precision N` (src/qalc.cc) — the working decimal precision
+            // every numeric result is rounded to.
+            "precision" | "prec" => {
+                if let Ok(digits) = value.parse::<i32>() {
+                    qalc_num::context::set_precision(digits);
+                }
+            }
             "unicode" => {
                 self.print_options.use_unicode_signs = value != "0" && value != "off";
             }
@@ -329,6 +337,23 @@ impl NameResolver for Session {
 
     fn resolve_function(&self, name: &str) -> Option<FunctionId> {
         builtins::function_id_for_name(name)
+    }
+
+    /// A name is "known" when something in the registries answers to it, as
+    /// opposed to becoming a symbol only because nothing did. The predefined
+    /// unknowns count: the C++ holds `x`, `y`, `z`, `n` and `c` as real
+    /// variable objects, so its name loop matches them like any other.
+    fn is_known_name(&self, name: &str) -> bool {
+        if self.variables.contains_key(name) || builtins::function_id_for_name(name).is_some() {
+            return true;
+        }
+        let mut chars = name.chars();
+        if let (Some(c), None) = (chars.next(), chars.next()) {
+            if Session::UNKNOWNS.contains(&c) {
+                return true;
+            }
+        }
+        crate::units::store().is_some_and(|store| store.resolve_name(name).is_some())
     }
 }
 
