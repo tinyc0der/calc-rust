@@ -12,6 +12,7 @@ description = "Pure-Rust port of libqalculate"
 [workspace.dependencies]
 qalc-num = { path = "crates/qalc-num" }
 qalc-core = { path = "crates/qalc-core" }
+qalc-datetime = { path = "crates/qalc-datetime" }
 
 [profile.release]
 lto = "thin"

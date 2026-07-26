@@ -681,7 +681,9 @@ impl<'a> Parser<'a> {
                     if let Some(fid) = self.resolver.resolve_function(name) {
                         // Functions with `TextArgument`s see their source
                         // text, not a parsed expression.
-                        if crate::strings::has_text_args(fid.0) {
+                        if crate::strings::has_text_args(fid.0)
+                            || crate::datetime::has_date_args(fid.0)
+                        {
                             return self.parse_text_call(fid);
                         }
                         let args = self.parse_call_args()?;
@@ -895,14 +897,28 @@ impl<'a> Parser<'a> {
             .unwrap_or(self.toks.len() - 1);
 
         let mut args = Vec::new();
-        if !content.trim().is_empty() || crate::strings::is_text_arg(fid.0, 0) {
+        if !content.trim().is_empty()
+            || crate::strings::is_text_arg(fid.0, 0)
+            || crate::datetime::is_date_arg(fid.0, 0)
+        {
             for (index, (s, e)) in split_top_level(content, |c| c == b',' || c == b';')
                 .into_iter()
                 .enumerate()
             {
                 let raw = &content[s..e];
                 let text = raw.trim();
-                if crate::strings::is_text_arg(fid.0, index) {
+                if crate::datetime::is_date_arg(fid.0, index) {
+                    // A date argument reads its source fragment as a date;
+                    // anything that is not date-shaped falls through to the
+                    // ordinary expression parse.
+                    match crate::datetime::parse_date(text) {
+                        Some(d) => args.push(crate::datetime::date_structure(d)),
+                        None => {
+                            let offset = s + raw.len() - raw.trim_start().len();
+                            args.push(self.parse_sub(text, offset)?);
+                        }
+                    }
+                } else if crate::strings::is_text_arg(fid.0, index) {
                     args.push(self.parse_text_arg(text, s)?);
                 } else {
                     let offset = s + raw.len() - raw.trim_start().len();

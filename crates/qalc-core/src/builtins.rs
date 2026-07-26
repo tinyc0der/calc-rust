@@ -109,6 +109,9 @@ pub fn calculate_function_exact(m: &mut MathStructure, exact: bool) -> bool {
     }
     // Text builtins take `MathStructure::Text` arguments (and give the
     // base-reading functions their text form), so they also go first.
+    if crate::datetime::calculate_function(m) {
+        return true;
+    }
     if crate::strings::calculate_function(m) {
         return true;
     }
@@ -508,6 +511,7 @@ pub fn function_id_for_name(name: &str) -> Option<FunctionId> {
                 .or_else(|| crate::geometry::function_id_for_name(name))
                 .or_else(|| crate::strings::function_id_for_name(name))
                 .or_else(|| crate::stats::function_id_for_name(name))
+                .or_else(|| crate::datetime::function_id_for_name(name))
         }
     };
     Some(FunctionId(id))

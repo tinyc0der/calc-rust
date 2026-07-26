@@ -45,8 +45,13 @@ pub fn evaluate_to_string(expr: &str) -> Result<String, String> {
 /// (`POST_CONVERSION_OPTIMAL_SI`, Calculator-calculate.cc:4043).
 pub fn apply_conversion(m: &mut MathStructure, po: &mut PrintOptions) -> Result<(), String> {
     let MathStructure::Conversion { value, target } = m else {
-        if let Some(store) = crate::units::store() {
-            crate::units::convert_to_optimal(store, m);
+        // A duration that came from subtracting two dates keeps its days;
+        // see `datetime::took_date_duration`.
+        let from_dates = crate::datetime::took_date_duration();
+        if !from_dates {
+            if let Some(store) = crate::units::store() {
+                crate::units::convert_to_optimal(store, m);
+            }
         }
         return Ok(());
     };
@@ -117,6 +122,14 @@ pub fn evaluate_calculated_with(m: &mut MathStructure, eo: &EvaluationOptions) {
             break;
         }
     }
+    // Dates: text that denotes a date becomes a date value, and date
+    // arithmetic folds. This runs after unit reduction, because a duration
+    // like `523d` only becomes a plain count of seconds once units resolve.
+    // This runs once, after unit reduction and with no re-evaluation
+    // afterwards: a duration like `523d` only becomes a plain count of
+    // seconds once units resolve, and the day count this produces for a
+    // date difference must not be reduced back to seconds.
+    crate::datetime::apply(m);
     // `eo.isolate_x` (default on for the CLI): an equation in one unknown is
     // solved rather than merely simplified.
     crate::solve::isolate_x_toplevel(m, eo);

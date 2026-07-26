@@ -136,7 +136,8 @@ fn print_sub(m: &MathStructure, po: &PrintOptions, depth: usize) -> String {
         MathStructure::Unit { id, prefix } => print_unit(*id, *prefix, po),
         MathStructure::Undefined => "undefined".to_string(),
         MathStructure::Aborted => "aborted".to_string(),
-        MathStructure::DateTime(dt) => format!("{dt:?}"),
+        // The reference prints a date as a quoted ISO string.
+        MathStructure::DateTime(dt) => format!("\"{}\"", dt.to_iso_string()),
         // A conversion that survived evaluation prints as its value; the
         // target has already been folded into the print options.
         MathStructure::Conversion { value, .. } => print_sub(value, po, depth),
@@ -775,6 +776,7 @@ fn function_name(id: crate::ids::FunctionId) -> &'static str {
             .or_else(|| crate::matrix::function_name(other))
             .or_else(|| crate::geometry::function_name(other))
             .or_else(|| crate::strings::function_name(other))
+            .or_else(|| crate::datetime::function_name(other))
             .or_else(|| crate::stats::function_name(other))
             .unwrap_or("f"),
     }

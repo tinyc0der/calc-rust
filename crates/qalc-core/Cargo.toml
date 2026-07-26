@@ -7,4 +7,5 @@ description = "Pure-Rust port of the libqalculate library (parser, MathStructure
 
 [dependencies]
 qalc-num.workspace = true
+qalc-datetime = { path = "../qalc-datetime" }
 roxmltree = { version = "0.21", default-features = false, features = ["std"] }

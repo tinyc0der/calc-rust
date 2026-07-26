@@ -39,6 +39,9 @@ pub enum ComparisonType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DateTime;
 
+/// A date/time value carried in the expression tree.
+pub type DateTimeValue = qalc_datetime::QalculateDateTime;
+
 /// A structure representing a mathematical value/expression/result.
 ///
 /// Variants mirror the C++ `StructureType` tags (`STRUCT_*`). The
@@ -110,7 +113,7 @@ pub enum MathStructure {
     /// `STRUCT_ABORTED`
     Aborted,
     /// `STRUCT_DATETIME`
-    DateTime(DateTime),
+    DateTime(Box<DateTimeValue>),
     /// An `expr to target` conversion.
     ///
     /// The C++ handles `to` outside the structure tree — the CLI splits it

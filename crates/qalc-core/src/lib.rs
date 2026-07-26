@@ -6,6 +6,7 @@
 
 pub mod builtins;
 pub mod calculate;
+pub mod datetime;
 pub mod defs;
 pub mod eval;
 pub mod geometry;
