@@ -33,30 +33,30 @@
 //! started passing fails it too. Fixing a divergence therefore requires
 //! deleting its line, so the list cannot rot.
 //!
-//! As written, the five files assert 674 results, of which 280 match and 394
-//! do not:
+//! The five files assert 674 results, of which 423 match and 251 do not:
 //!
 //! | file                 | assertions | matching |
 //! |----------------------|-----------:|---------:|
-//! | `special.batch`      |        234 |      138 |
-//! | `rounding.batch`     |        127 |       84 |
-//! | `numbertheory.batch` |        117 |       32 |
-//! | `bases.batch`        |        105 |       20 |
-//! | `bitops.batch`       |         91 |        6 |
+//! | `special.batch`      |        234 |      155 |
+//! | `rounding.batch`     |        127 |       92 |
+//! | `numbertheory.batch` |        117 |      116 |
+//! | `bases.batch`        |        105 |       31 |
+//! | `bitops.batch`       |         91 |       29 |
 //!
-//! The shape of the 394 matters more than the number. Only ~50 are a function
-//! declining to evaluate and echoing itself back — the visible, harmless kind.
-//! The large majority is one failure mode repeated: a function the port never
-//! registers, whose name therefore falls through to the unknown-symbol path
-//! and turns the call into implicit multiplication. `isprime(7)` does not
-//! raise; it answers `7 isprime`. `bitget(12, 3)` answers
-//! `[(12 bitget)  (3 bitget)]`. When a zero is involved the product collapses
-//! and the nonsense becomes indistinguishable from an answer: `airy(0)` gives
-//! `0` (the true value is 0.3550280539) and `nextprime(0)` gives `0`.
+//! The shape of the 251 matters more than the number, and it is now uniform:
+//! every one of them is a function the port does not implement *saying so*.
+//! 194 are calls to a name that is not a registered function and are rejected
+//! outright; the rest are registered functions declining a case they cannot
+//! evaluate and echoing themselves back. Both are visible to a user.
 //!
-//! The single worst case is `psi(4)`: `psi` is the reference's alias for
-//! digamma, but the port resolves it to the pressure unit, so a valid call
-//! returns `27579.02917 Pa` instead of `1.256117668`.
+//! It did not use to be. An unregistered name fell through to the
+//! unknown-symbol path and the call silently became a product — `isprime(7)`
+//! answered `7 isprime`, `bitget(12, 3)` answered `[(12 bitget)  (3 bitget)]`
+//! — and when an argument was zero the product collapsed and the nonsense
+//! became indistinguishable from an answer: `airy(0)` gave `0`, whose true
+//! value is 0.3550280539. `parse_primary` now refuses a parenthesised
+//! argument list after a name nothing answers to. Implicit multiplication of
+//! *identifiers* is untouched: `abc` is still `are*barn*c`.
 //!
 //! The reassuring half: every special function the port *does* implement
 //! agrees with MPFR to all ten printed digits over the arguments exercised
@@ -86,304 +86,161 @@ mod generated_coverage {
     /// hide it.
     const KNOWN_FAILURES: &[(&str, usize, &str)] = &[
         // ---------------- bases.batch ----------------
-        // bin: bin(x, 1) has the WRONG SEMANTICS: the reference reads x as a
-        //   two's-complement binary literal and returns a number, the port formats x
-        //   as a binary string. bin(x, 0, 1) (reverse conversion) returns 0.
-        ("bases.batch", 12, "WRONG SEMANTICS: bin(x, 1) formats a string instead of reading two's complement"),
-        ("bases.batch", 14, "WRONG SEMANTICS: bin(x, 1) formats a string instead of reading two's complement"),
-        ("bases.batch", 16, "WRONG SEMANTICS: bin(x, 1) formats a string instead of reading two's complement"),
-        ("bases.batch", 18, "WRONG SEMANTICS: bin(x, 1) formats a string instead of reading two's complement"),
-        ("bases.batch", 22, "WRONG SEMANTICS: bin(x, 1) formats a string instead of reading two's complement"),
-        // oct: oct(x, 1) (reverse conversion) returns a quoted string where the reference
-        //   returns the octal value as a number.
-        ("bases.batch", 34, "reverse conversion returns a quoted string, not a number"),
-        ("bases.batch", 36, "reverse conversion returns a quoted string, not a number"),
-        // base: the reverse conversion base(n, b, digits, 1) is not implemented and,
-        //   worse, prints under the name `f`; and lowercase digits above 9 are not
-        //   accepted (base("z", 36)).
-        ("bases.batch", 52, "reverse conversion unimplemented and misprinted as `f`; lowercase digits rejected"),
-        ("bases.batch", 56, "reverse conversion unimplemented and misprinted as `f`; lowercase digits rejected"),
-        ("bases.batch", 58, "reverse conversion unimplemented and misprinted as `f`; lowercase digits rejected"),
-        ("bases.batch", 60, "reverse conversion unimplemented and misprinted as `f`; lowercase digits rejected"),
-        ("bases.batch", 68, "reverse conversion unimplemented and misprinted as `f`; lowercase digits rejected"),
-        ("bases.batch", 70, "reverse conversion unimplemented and misprinted as `f`; lowercase digits rejected"),
+        // base: lowercase digits above 9 are not accepted (base("z", 36)); the number
+        //   parser only recognises the uppercase forms.
+        ("bases.batch", 52, "lowercase digits above 9 rejected by the base-n reader"),
+        ("bases.batch", 70, "lowercase digits above 9 rejected by the base-n reader"),
         // roman: Roman numerals are absent, in both directions
-        ("bases.batch", 74, "no roman: parses as a free symbol"),
-        ("bases.batch", 76, "no roman: parses as a free symbol"),
-        ("bases.batch", 78, "no roman: parses as a free symbol"),
-        ("bases.batch", 80, "no roman: parses as a free symbol"),
-        ("bases.batch", 82, "no roman: parses as a free symbol"),
-        ("bases.batch", 84, "no roman: parses as a free symbol"),
-        ("bases.batch", 86, "no roman: parses as a free symbol"),
-        ("bases.batch", 88, "no roman: parses as a free symbol"),
-        ("bases.batch", 90, "no roman: parses as a free symbol"),
-        ("bases.batch", 92, "no roman: parses as a free symbol"),
-        ("bases.batch", 94, "no roman: parses as a free symbol"),
+        ("bases.batch", 74, "no roman: rejected as an unknown function"),
+        ("bases.batch", 76, "no roman: rejected as an unknown function"),
+        ("bases.batch", 78, "no roman: rejected as an unknown function"),
+        ("bases.batch", 80, "no roman: rejected as an unknown function"),
+        ("bases.batch", 82, "no roman: rejected as an unknown function"),
+        ("bases.batch", 84, "no roman: rejected as an unknown function"),
+        ("bases.batch", 86, "no roman: rejected as an unknown function"),
+        ("bases.batch", 88, "no roman: rejected as an unknown function"),
+        ("bases.batch", 90, "no roman: rejected as an unknown function"),
+        ("bases.batch", 92, "no roman: rejected as an unknown function"),
+        ("bases.batch", 94, "no roman: rejected as an unknown function"),
         // bijective: bijective base-26 is absent, in both directions
-        ("bases.batch", 98, "no bijective: parses as a free symbol"),
-        ("bases.batch", 100, "no bijective: parses as a free symbol"),
-        ("bases.batch", 102, "no bijective: parses as a free symbol"),
-        ("bases.batch", 104, "no bijective: parses as a free symbol"),
-        ("bases.batch", 106, "no bijective: parses as a free symbol"),
-        ("bases.batch", 108, "no bijective: parses as a free symbol"),
-        ("bases.batch", 110, "no bijective: parses as a free symbol"),
-        ("bases.batch", 112, "no bijective: parses as a free symbol"),
-        ("bases.batch", 114, "no bijective: parses as a free symbol"),
-        ("bases.batch", 116, "no bijective: parses as a free symbol"),
-        // bcd: binary-coded decimal is absent; parses as b*c*d
-        ("bases.batch", 120, "no bcd: parses as b*c*d"),
-        ("bases.batch", 122, "no bcd: parses as b*c*d"),
-        ("bases.batch", 124, "no bcd: parses as b*c*d"),
-        ("bases.batch", 126, "no bcd: parses as b*c*d"),
-        ("bases.batch", 128, "no bcd: parses as b*c*d"),
-        ("bases.batch", 130, "no bcd: parses as b*c*d"),
-        ("bases.batch", 132, "no bcd: parses as b*c*d"),
-        ("bases.batch", 134, "no bcd: parses as b*c*d"),
+        ("bases.batch", 98, "no bijective: rejected as an unknown function"),
+        ("bases.batch", 100, "no bijective: rejected as an unknown function"),
+        ("bases.batch", 102, "no bijective: rejected as an unknown function"),
+        ("bases.batch", 104, "no bijective: rejected as an unknown function"),
+        ("bases.batch", 106, "no bijective: rejected as an unknown function"),
+        ("bases.batch", 108, "no bijective: rejected as an unknown function"),
+        ("bases.batch", 110, "no bijective: rejected as an unknown function"),
+        ("bases.batch", 112, "no bijective: rejected as an unknown function"),
+        ("bases.batch", 114, "no bijective: rejected as an unknown function"),
+        ("bases.batch", 116, "no bijective: rejected as an unknown function"),
+        // bcd: binary-coded decimal is absent
+        ("bases.batch", 120, "no bcd: rejected as an unknown function"),
+        ("bases.batch", 122, "no bcd: rejected as an unknown function"),
+        ("bases.batch", 124, "no bcd: rejected as an unknown function"),
+        ("bases.batch", 126, "no bcd: rejected as an unknown function"),
+        ("bases.batch", 128, "no bcd: rejected as an unknown function"),
+        ("bases.batch", 130, "no bcd: rejected as an unknown function"),
+        ("bases.batch", 132, "no bcd: rejected as an unknown function"),
+        ("bases.batch", 134, "no bcd: rejected as an unknown function"),
         // digitGet: positional digit read is absent
-        ("bases.batch", 138, "no digitGet: args become a vector of free symbols"),
-        ("bases.batch", 140, "no digitGet: args become a vector of free symbols"),
-        ("bases.batch", 142, "no digitGet: args become a vector of free symbols"),
-        ("bases.batch", 144, "no digitGet: args become a vector of free symbols"),
-        ("bases.batch", 146, "no digitGet: args become a vector of free symbols"),
-        ("bases.batch", 148, "no digitGet: args become a vector of free symbols"),
-        ("bases.batch", 150, "no digitGet: args become a vector of free symbols"),
-        ("bases.batch", 152, "no digitGet: args become a vector of free symbols"),
-        ("bases.batch", 154, "no digitGet: args become a vector of free symbols"),
-        ("bases.batch", 156, "no digitGet: args become a vector of free symbols"),
+        ("bases.batch", 138, "no digitGet: rejected as an unknown function"),
+        ("bases.batch", 140, "no digitGet: rejected as an unknown function"),
+        ("bases.batch", 142, "no digitGet: rejected as an unknown function"),
+        ("bases.batch", 144, "no digitGet: rejected as an unknown function"),
+        ("bases.batch", 146, "no digitGet: rejected as an unknown function"),
+        ("bases.batch", 148, "no digitGet: rejected as an unknown function"),
+        ("bases.batch", 150, "no digitGet: rejected as an unknown function"),
+        ("bases.batch", 152, "no digitGet: rejected as an unknown function"),
+        ("bases.batch", 154, "no digitGet: rejected as an unknown function"),
+        ("bases.batch", 156, "no digitGet: rejected as an unknown function"),
         // digitSet: positional digit write is absent
-        ("bases.batch", 158, "no digitSet: args become a vector of free symbols"),
-        ("bases.batch", 160, "no digitSet: args become a vector of free symbols"),
-        ("bases.batch", 162, "no digitSet: args become a vector of free symbols"),
-        ("bases.batch", 164, "no digitSet: args become a vector of free symbols"),
-        ("bases.batch", 166, "no digitSet: args become a vector of free symbols"),
-        ("bases.batch", 168, "no digitSet: args become a vector of free symbols"),
+        ("bases.batch", 158, "no digitSet: rejected as an unknown function"),
+        ("bases.batch", 160, "no digitSet: rejected as an unknown function"),
+        ("bases.batch", 162, "no digitSet: rejected as an unknown function"),
+        ("bases.batch", 164, "no digitSet: rejected as an unknown function"),
+        ("bases.batch", 166, "no digitSet: rejected as an unknown function"),
+        ("bases.batch", 168, "no digitSet: rejected as an unknown function"),
         // integerDigits: digit-vector expansion is absent
-        ("bases.batch", 172, "no integerDigits: parses as a free symbol"),
-        ("bases.batch", 174, "no integerDigits: parses as a free symbol"),
-        ("bases.batch", 176, "no integerDigits: parses as a free symbol"),
-        ("bases.batch", 178, "no integerDigits: parses as a free symbol"),
-        ("bases.batch", 180, "no integerDigits: parses as a free symbol"),
-        ("bases.batch", 182, "no integerDigits: parses as a free symbol"),
-        ("bases.batch", 184, "no integerDigits: parses as a free symbol"),
-        ("bases.batch", 186, "no integerDigits: parses as a free symbol"),
-        ("bases.batch", 188, "no integerDigits: parses as a free symbol"),
+        ("bases.batch", 172, "no integerDigits: rejected as an unknown function"),
+        ("bases.batch", 174, "no integerDigits: rejected as an unknown function"),
+        ("bases.batch", 176, "no integerDigits: rejected as an unknown function"),
+        ("bases.batch", 178, "no integerDigits: rejected as an unknown function"),
+        ("bases.batch", 180, "no integerDigits: rejected as an unknown function"),
+        ("bases.batch", 182, "no integerDigits: rejected as an unknown function"),
+        ("bases.batch", 184, "no integerDigits: rejected as an unknown function"),
+        ("bases.batch", 186, "no integerDigits: rejected as an unknown function"),
+        ("bases.batch", 188, "no integerDigits: rejected as an unknown function"),
         // floatBits: IEEE 754 bit-pattern encode is absent
-        ("bases.batch", 192, "no floatBits: args become a vector of free symbols"),
-        ("bases.batch", 194, "no floatBits: args become a vector of free symbols"),
-        ("bases.batch", 196, "no floatBits: args become a vector of free symbols"),
-        ("bases.batch", 198, "no floatBits: args become a vector of free symbols"),
-        ("bases.batch", 200, "no floatBits: args become a vector of free symbols"),
-        ("bases.batch", 202, "no floatBits: args become a vector of free symbols"),
-        ("bases.batch", 204, "no floatBits: args become a vector of free symbols"),
+        ("bases.batch", 192, "no floatBits: rejected as an unknown function"),
+        ("bases.batch", 194, "no floatBits: rejected as an unknown function"),
+        ("bases.batch", 196, "no floatBits: rejected as an unknown function"),
+        ("bases.batch", 198, "no floatBits: rejected as an unknown function"),
+        ("bases.batch", 200, "no floatBits: rejected as an unknown function"),
+        ("bases.batch", 202, "no floatBits: rejected as an unknown function"),
+        ("bases.batch", 204, "no floatBits: rejected as an unknown function"),
         // floatParts: IEEE 754 sign/exponent/mantissa split is absent
-        ("bases.batch", 206, "no floatParts: parses as a free symbol"),
-        ("bases.batch", 208, "no floatParts: parses as a free symbol"),
-        ("bases.batch", 210, "no floatParts: parses as a free symbol"),
-        ("bases.batch", 212, "no floatParts: parses as a free symbol, and the product collapses to a plausible-looking number"),
-        ("bases.batch", 214, "no floatParts: parses as a free symbol"),
-        ("bases.batch", 216, "no floatParts: parses as a free symbol"),
+        ("bases.batch", 206, "no floatParts: rejected as an unknown function"),
+        ("bases.batch", 208, "no floatParts: rejected as an unknown function"),
+        ("bases.batch", 210, "no floatParts: rejected as an unknown function"),
+        ("bases.batch", 212, "no floatParts: rejected as an unknown function"),
+        ("bases.batch", 214, "no floatParts: rejected as an unknown function"),
+        ("bases.batch", 216, "no floatParts: rejected as an unknown function"),
         // floatValue: IEEE 754 bit-pattern decode is absent
-        ("bases.batch", 218, "no floatValue: args become a vector of free symbols"),
-        ("bases.batch", 220, "no floatValue: args become a vector of free symbols"),
-        ("bases.batch", 222, "no floatValue: args become a vector of free symbols"),
-        ("bases.batch", 224, "no floatValue: args become a vector of free symbols"),
-        ("bases.batch", 226, "no floatValue: args become a vector of free symbols"),
+        ("bases.batch", 218, "no floatValue: rejected as an unknown function"),
+        ("bases.batch", 220, "no floatValue: rejected as an unknown function"),
+        ("bases.batch", 222, "no floatValue: rejected as an unknown function"),
+        ("bases.batch", 224, "no floatValue: rejected as an unknown function"),
+        ("bases.batch", 226, "no floatValue: rejected as an unknown function"),
         // ---------------- bitops.batch ----------------
         // bitget: single-bit and bit-range read are absent
-        ("bitops.batch", 2, "no bitget: args become a vector of free symbols"),
-        ("bitops.batch", 4, "no bitget: args become a vector of free symbols"),
-        ("bitops.batch", 6, "no bitget: args become a vector of free symbols"),
-        ("bitops.batch", 8, "no bitget: args become a vector of free symbols"),
-        ("bitops.batch", 10, "no bitget: args become a vector of free symbols"),
-        ("bitops.batch", 12, "no bitget: args become a vector of free symbols"),
-        ("bitops.batch", 14, "no bitget: args become a vector of free symbols"),
-        ("bitops.batch", 16, "no bitget: args become a vector of free symbols"),
-        ("bitops.batch", 18, "no bitget: args become a vector of free symbols"),
-        ("bitops.batch", 20, "no bitget: args become a vector of free symbols"),
-        ("bitops.batch", 22, "no bitget: args become a vector of free symbols"),
-        ("bitops.batch", 24, "no bitget: args become a vector of free symbols"),
+        ("bitops.batch", 2, "no bitget: rejected as an unknown function"),
+        ("bitops.batch", 4, "no bitget: rejected as an unknown function"),
+        ("bitops.batch", 6, "no bitget: rejected as an unknown function"),
+        ("bitops.batch", 8, "no bitget: rejected as an unknown function"),
+        ("bitops.batch", 10, "no bitget: rejected as an unknown function"),
+        ("bitops.batch", 12, "no bitget: rejected as an unknown function"),
+        ("bitops.batch", 14, "no bitget: rejected as an unknown function"),
+        ("bitops.batch", 16, "no bitget: rejected as an unknown function"),
+        ("bitops.batch", 18, "no bitget: rejected as an unknown function"),
+        ("bitops.batch", 20, "no bitget: rejected as an unknown function"),
+        ("bitops.batch", 22, "no bitget: rejected as an unknown function"),
+        ("bitops.batch", 24, "no bitget: rejected as an unknown function"),
         // bitset: single-bit write is absent
-        ("bitops.batch", 28, "no bitset: args become a vector of free symbols"),
-        ("bitops.batch", 30, "no bitset: args become a vector of free symbols"),
-        ("bitops.batch", 32, "no bitset: args become a vector of free symbols"),
-        ("bitops.batch", 34, "no bitset: args become a vector of free symbols"),
-        ("bitops.batch", 36, "no bitset: args become a vector of free symbols"),
-        ("bitops.batch", 38, "no bitset: args become a vector of free symbols"),
-        ("bitops.batch", 40, "no bitset: args become a vector of free symbols"),
-        ("bitops.batch", 42, "no bitset: args become a vector of free symbols"),
-        ("bitops.batch", 44, "no bitset: args become a vector of free symbols"),
-        ("bitops.batch", 46, "no bitset: args become a vector of free symbols"),
-        ("bitops.batch", 48, "no bitset: args become a vector of free symbols"),
+        ("bitops.batch", 28, "no bitset: rejected as an unknown function"),
+        ("bitops.batch", 30, "no bitset: rejected as an unknown function"),
+        ("bitops.batch", 32, "no bitset: rejected as an unknown function"),
+        ("bitops.batch", 34, "no bitset: rejected as an unknown function"),
+        ("bitops.batch", 36, "no bitset: rejected as an unknown function"),
+        ("bitops.batch", 38, "no bitset: rejected as an unknown function"),
+        ("bitops.batch", 40, "no bitset: rejected as an unknown function"),
+        ("bitops.batch", 42, "no bitset: rejected as an unknown function"),
+        ("bitops.batch", 44, "no bitset: rejected as an unknown function"),
+        ("bitops.batch", 46, "no bitset: rejected as an unknown function"),
+        ("bitops.batch", 48, "no bitset: rejected as an unknown function"),
         // bitcmp: width-limited one's complement is absent
-        ("bitops.batch", 52, "no bitcmp: args become a vector of free symbols"),
-        ("bitops.batch", 54, "no bitcmp: args become a vector of free symbols"),
-        ("bitops.batch", 56, "no bitcmp: args become a vector of free symbols"),
-        ("bitops.batch", 58, "no bitcmp: args become a vector of free symbols"),
-        ("bitops.batch", 60, "no bitcmp: args become a vector of free symbols"),
-        ("bitops.batch", 62, "no bitcmp: args become a vector of free symbols"),
-        ("bitops.batch", 64, "no bitcmp: args become a vector of free symbols"),
-        ("bitops.batch", 66, "no bitcmp: args become a vector of free symbols"),
-        ("bitops.batch", 68, "no bitcmp: args become a vector of free symbols"),
-        ("bitops.batch", 70, "no bitcmp: args become a vector of free symbols"),
+        ("bitops.batch", 52, "no bitcmp: rejected as an unknown function"),
+        ("bitops.batch", 54, "no bitcmp: rejected as an unknown function"),
+        ("bitops.batch", 56, "no bitcmp: rejected as an unknown function"),
+        ("bitops.batch", 58, "no bitcmp: rejected as an unknown function"),
+        ("bitops.batch", 60, "no bitcmp: rejected as an unknown function"),
+        ("bitops.batch", 62, "no bitcmp: rejected as an unknown function"),
+        ("bitops.batch", 64, "no bitcmp: rejected as an unknown function"),
+        ("bitops.batch", 66, "no bitcmp: rejected as an unknown function"),
+        ("bitops.batch", 68, "no bitcmp: rejected as an unknown function"),
+        ("bitops.batch", 70, "no bitcmp: rejected as an unknown function"),
         // bitrot: circular bit rotation is absent
-        ("bitops.batch", 74, "no bitrot: args become a vector of free symbols"),
-        ("bitops.batch", 76, "no bitrot: args become a vector of free symbols"),
-        ("bitops.batch", 78, "no bitrot: args become a vector of free symbols"),
-        ("bitops.batch", 80, "no bitrot: args become a vector of free symbols"),
-        ("bitops.batch", 82, "no bitrot: args become a vector of free symbols"),
-        ("bitops.batch", 84, "no bitrot: args become a vector of free symbols"),
-        ("bitops.batch", 86, "no bitrot: args become a vector of free symbols"),
-        ("bitops.batch", 88, "no bitrot: args become a vector of free symbols"),
-        ("bitops.batch", 90, "no bitrot: args become a vector of free symbols"),
-        ("bitops.batch", 92, "no bitrot: args become a vector of free symbols"),
-        // popCount: population count is absent
-        ("bitops.batch", 96, "no popCount: parses as a free symbol"),
-        ("bitops.batch", 100, "no popCount: parses as a free symbol"),
-        ("bitops.batch", 102, "no popCount: parses as a free symbol"),
-        ("bitops.batch", 104, "no popCount: parses as a free symbol"),
-        ("bitops.batch", 106, "no popCount: parses as a free symbol"),
-        ("bitops.batch", 108, "no popCount: parses as a free symbol"),
-        ("bitops.batch", 110, "no popCount: parses as a free symbol"),
-        ("bitops.batch", 112, "no popCount: parses as a free symbol"),
-        ("bitops.batch", 114, "no popCount: parses as a free symbol"),
+        ("bitops.batch", 74, "no bitrot: rejected as an unknown function"),
+        ("bitops.batch", 76, "no bitrot: rejected as an unknown function"),
+        ("bitops.batch", 78, "no bitrot: rejected as an unknown function"),
+        ("bitops.batch", 80, "no bitrot: rejected as an unknown function"),
+        ("bitops.batch", 82, "no bitrot: rejected as an unknown function"),
+        ("bitops.batch", 84, "no bitrot: rejected as an unknown function"),
+        ("bitops.batch", 86, "no bitrot: rejected as an unknown function"),
+        ("bitops.batch", 88, "no bitrot: rejected as an unknown function"),
+        ("bitops.batch", 90, "no bitrot: rejected as an unknown function"),
+        ("bitops.batch", 92, "no bitrot: rejected as an unknown function"),
         // setbits: bit-range write is absent
-        ("bitops.batch", 118, "no setbits: args become a vector of free symbols"),
-        ("bitops.batch", 120, "no setbits: args become a vector of free symbols"),
-        ("bitops.batch", 122, "no setbits: args become a vector of free symbols"),
-        ("bitops.batch", 124, "no setbits: args become a vector of free symbols"),
-        ("bitops.batch", 126, "no setbits: args become a vector of free symbols"),
-        ("bitops.batch", 128, "no setbits: args become a vector of free symbols"),
-        ("bitops.batch", 130, "no setbits: args become a vector of free symbols"),
-        ("bitops.batch", 132, "no setbits: args become a vector of free symbols"),
+        ("bitops.batch", 118, "no setbits: rejected as an unknown function"),
+        ("bitops.batch", 120, "no setbits: rejected as an unknown function"),
+        ("bitops.batch", 122, "no setbits: rejected as an unknown function"),
+        ("bitops.batch", 124, "no setbits: rejected as an unknown function"),
+        ("bitops.batch", 126, "no setbits: rejected as an unknown function"),
+        ("bitops.batch", 128, "no setbits: rejected as an unknown function"),
+        ("bitops.batch", 130, "no setbits: rejected as an unknown function"),
+        ("bitops.batch", 132, "no setbits: rejected as an unknown function"),
         // shift: the shift() function form is absent (the << and >> operators are not)
-        ("bitops.batch", 136, "no shift(): args become a vector of free symbols"),
-        ("bitops.batch", 138, "no shift(): args become a vector of free symbols"),
-        ("bitops.batch", 140, "no shift(): args become a vector of free symbols"),
-        ("bitops.batch", 142, "no shift(): args become a vector of free symbols"),
-        ("bitops.batch", 144, "no shift(): args become a vector of free symbols"),
-        ("bitops.batch", 146, "no shift(): args become a vector of free symbols"),
-        ("bitops.batch", 148, "no shift(): args become a vector of free symbols"),
-        ("bitops.batch", 150, "no shift(): args become a vector of free symbols"),
-        ("bitops.batch", 152, "no shift(): args become a vector of free symbols"),
-        ("bitops.batch", 154, "no shift(): args become a vector of free symbols"),
-        ("bitops.batch", 156, "no shift(): args become a vector of free symbols"),
-        // xor: `xor` lexes only as an infix operator, so the function-call form xor(a, b)
-        //   is a parse error - the reference accepts both
-        ("bitops.batch", 160, "xor(a, b) is a parse error; only infix xor lexes"),
-        ("bitops.batch", 162, "xor(a, b) is a parse error; only infix xor lexes"),
-        ("bitops.batch", 164, "xor(a, b) is a parse error; only infix xor lexes"),
-        ("bitops.batch", 166, "xor(a, b) is a parse error; only infix xor lexes"),
-        ("bitops.batch", 168, "xor(a, b) is a parse error; only infix xor lexes"),
-        ("bitops.batch", 170, "xor(a, b) is a parse error; only infix xor lexes"),
-        ("bitops.batch", 172, "xor(a, b) is a parse error; only infix xor lexes"),
-        ("bitops.batch", 174, "xor(a, b) is a parse error; only infix xor lexes"),
-        // lxor: logical xor is absent as a function
-        ("bitops.batch", 176, "no lxor: args become a vector of free symbols"),
-        ("bitops.batch", 178, "no lxor: args become a vector of free symbols"),
-        ("bitops.batch", 180, "no lxor: args become a vector of free symbols"),
-        ("bitops.batch", 182, "no lxor: args become a vector of free symbols"),
-        ("bitops.batch", 184, "no lxor: args become a vector of free symbols"),
-        ("bitops.batch", 186, "no lxor: args become a vector of free symbols"),
+        ("bitops.batch", 136, "no shift(): rejected as an unknown function"),
+        ("bitops.batch", 138, "no shift(): rejected as an unknown function"),
+        ("bitops.batch", 140, "no shift(): rejected as an unknown function"),
+        ("bitops.batch", 142, "no shift(): rejected as an unknown function"),
+        ("bitops.batch", 144, "no shift(): rejected as an unknown function"),
+        ("bitops.batch", 146, "no shift(): rejected as an unknown function"),
+        ("bitops.batch", 148, "no shift(): rejected as an unknown function"),
+        ("bitops.batch", 150, "no shift(): rejected as an unknown function"),
+        ("bitops.batch", 152, "no shift(): rejected as an unknown function"),
+        ("bitops.batch", 154, "no shift(): rejected as an unknown function"),
+        ("bitops.batch", 156, "no shift(): rejected as an unknown function"),
         // ---------------- numbertheory.batch ----------------
-        // isprime: no primality test is registered
-        ("numbertheory.batch", 2, "no isprime: parses as a free symbol"),
-        ("numbertheory.batch", 4, "no isprime: parses as a free symbol"),
-        ("numbertheory.batch", 6, "no isprime: parses as a free symbol"),
-        ("numbertheory.batch", 8, "no isprime: parses as a free symbol"),
-        ("numbertheory.batch", 12, "no isprime: parses as a free symbol"),
-        ("numbertheory.batch", 14, "no isprime: parses as a free symbol"),
-        ("numbertheory.batch", 16, "no isprime: parses as a free symbol"),
-        ("numbertheory.batch", 18, "no isprime: parses as a free symbol"),
-        ("numbertheory.batch", 20, "no isprime: parses as a free symbol"),
-        ("numbertheory.batch", 22, "no isprime: parses as a free symbol"),
-        ("numbertheory.batch", 24, "no isprime: parses as a free symbol"),
-        ("numbertheory.batch", 26, "no isprime: parses as a free symbol"),
-        ("numbertheory.batch", 28, "no isprime: parses as a free symbol"),
-        ("numbertheory.batch", 30, "no isprime: parses as a free symbol"),
-        // nextprime: no prime successor is registered
-        ("numbertheory.batch", 34, "no nextprime: parses as a free symbol"),
-        ("numbertheory.batch", 36, "no nextprime: parses as a free symbol"),
-        ("numbertheory.batch", 38, "no nextprime: parses as a free symbol"),
-        ("numbertheory.batch", 40, "no nextprime: parses as a free symbol"),
-        ("numbertheory.batch", 42, "no nextprime: parses as a free symbol, and the product collapses to a plausible-looking number"),
-        ("numbertheory.batch", 44, "no nextprime: parses as a free symbol"),
-        ("numbertheory.batch", 46, "no nextprime: parses as a free symbol"),
-        ("numbertheory.batch", 48, "no nextprime: parses as a free symbol"),
-        // prevprime: no prime predecessor is registered
-        ("numbertheory.batch", 50, "no prevprime: parses as a free symbol"),
-        ("numbertheory.batch", 52, "no prevprime: parses as a free symbol"),
-        ("numbertheory.batch", 54, "no prevprime: parses as a free symbol"),
-        ("numbertheory.batch", 56, "no prevprime: parses as a free symbol"),
-        ("numbertheory.batch", 58, "no prevprime: parses as a free symbol"),
-        ("numbertheory.batch", 60, "no prevprime: parses as a free symbol"),
-        // nthprime: no nth-prime is registered
-        ("numbertheory.batch", 64, "no nthprime: parses as a free symbol"),
-        ("numbertheory.batch", 66, "no nthprime: parses as a free symbol"),
-        ("numbertheory.batch", 68, "no nthprime: parses as a free symbol"),
-        ("numbertheory.batch", 70, "no nthprime: parses as a free symbol"),
-        ("numbertheory.batch", 72, "no nthprime: parses as a free symbol"),
-        ("numbertheory.batch", 74, "no nthprime: parses as a free symbol, and the product collapses to a plausible-looking number"),
-        ("numbertheory.batch", 76, "no nthprime: parses as a free symbol"),
-        ("numbertheory.batch", 78, "no nthprime: parses as a free symbol"),
-        // prime_pi: no prime-counting function is registered
-        ("numbertheory.batch", 82, "no prime_pi: parses as a free symbol"),
-        ("numbertheory.batch", 84, "no prime_pi: parses as a free symbol"),
-        ("numbertheory.batch", 86, "no prime_pi: parses as a free symbol"),
-        ("numbertheory.batch", 88, "no prime_pi: parses as a free symbol"),
-        ("numbertheory.batch", 92, "no prime_pi: parses as a free symbol"),
-        ("numbertheory.batch", 94, "no prime_pi: parses as a free symbol"),
-        ("numbertheory.batch", 96, "no prime_pi: parses as a free symbol"),
-        ("numbertheory.batch", 98, "no prime_pi: parses as a free symbol"),
-        // primes: no prime-sieve function is registered
-        ("numbertheory.batch", 102, "no primes: parses as a free symbol"),
-        ("numbertheory.batch", 104, "no primes: parses as a free symbol"),
-        ("numbertheory.batch", 106, "no primes: parses as a free symbol"),
-        ("numbertheory.batch", 108, "no primes: parses as a free symbol"),
-        ("numbertheory.batch", 110, "no primes: parses as a free symbol, and the product collapses to a plausible-looking number"),
-        ("numbertheory.batch", 112, "no primes: parses as a free symbol"),
-        ("numbertheory.batch", 114, "no primes: parses as a free symbol"),
-        // divisors: no divisor list is registered; Number::factorize (integer.rs:484) is
-        //   reachable from nothing
-        ("numbertheory.batch", 118, "no divisors: parses as a free symbol"),
-        ("numbertheory.batch", 120, "no divisors: parses as a free symbol"),
-        ("numbertheory.batch", 122, "no divisors: parses as a free symbol"),
-        ("numbertheory.batch", 124, "no divisors: parses as a free symbol"),
-        ("numbertheory.batch", 126, "no divisors: parses as a free symbol"),
-        ("numbertheory.batch", 128, "no divisors: parses as a free symbol"),
-        ("numbertheory.batch", 130, "no divisors: parses as a free symbol, and the product collapses to a plausible-looking number"),
-        ("numbertheory.batch", 132, "no divisors: parses as a free symbol"),
-        ("numbertheory.batch", 134, "no divisors: parses as a free symbol"),
-        // lcm: lcm takes exactly 2 integer arguments: 3 arguments and rational arguments
-        //   are unimplemented, and lcm(0, 5) WRONGLY returns 0 where the reference
-        //   declines to evaluate.
-        ("numbertheory.batch", 142, "3-argument / rational lcm unimplemented; lcm(0, 5) returns a WRONG 0"),
-        ("numbertheory.batch", 146, "3-argument / rational lcm unimplemented; lcm(0, 5) returns a WRONG 0"),
-        ("numbertheory.batch", 148, "3-argument / rational lcm unimplemented; lcm(0, 5) returns a WRONG 0"),
-        // HCF: gcd exists under `gcd`, but the `HCF` alias is missing, so it parses as
-        //   H*C*F
-        ("numbertheory.batch", 152, "HCF alias missing: parses as H*C*F"),
-        ("numbertheory.batch", 154, "HCF alias missing: parses as H*C*F"),
-        ("numbertheory.batch", 156, "HCF alias missing: parses as H*C*F"),
-        ("numbertheory.batch", 158, "HCF alias missing: parses as H*C*F"),
-        ("numbertheory.batch", 160, "HCF alias missing: parses as H*C*F"),
-        ("numbertheory.batch", 162, "HCF alias missing: parses as H*C*F"),
-        ("numbertheory.batch", 164, "HCF alias missing: parses as H*C*F"),
-        // powmod: modular exponentiation is absent
-        ("numbertheory.batch", 168, "no powmod: args become a vector of free symbols"),
-        ("numbertheory.batch", 170, "no powmod: args become a vector of free symbols"),
-        ("numbertheory.batch", 172, "no powmod: args become a vector of free symbols"),
-        ("numbertheory.batch", 174, "no powmod: args become a vector of free symbols"),
-        ("numbertheory.batch", 176, "no powmod: args become a vector of free symbols"),
-        ("numbertheory.batch", 178, "no powmod: args become a vector of free symbols"),
-        ("numbertheory.batch", 180, "no powmod: args become a vector of free symbols"),
-        ("numbertheory.batch", 182, "no powmod: args become a vector of free symbols"),
-        ("numbertheory.batch", 184, "no powmod: args become a vector of free symbols"),
-        // multifactorial: n-th order factorial is absent (factorial and factorial2 are present)
-        ("numbertheory.batch", 220, "no multifactorial: args become a vector of free symbols"),
-        ("numbertheory.batch", 222, "no multifactorial: args become a vector of free symbols"),
-        ("numbertheory.batch", 224, "no multifactorial: args become a vector of free symbols"),
-        ("numbertheory.batch", 226, "no multifactorial: args become a vector of free symbols"),
-        ("numbertheory.batch", 228, "no multifactorial: args become a vector of free symbols"),
         // binomial: binomial with a non-integer first argument (the generalized binomial) is
         //   unimplemented.
         ("numbertheory.batch", 252, "generalized (non-integer n) binomial unimplemented"),
@@ -431,88 +288,80 @@ mod generated_coverage {
         ("rounding.batch", 176, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
         ("rounding.batch", 178, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
         ("rounding.batch", 180, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        // sq: sq(x) = x^2 is absent; parses as s*q
-        ("rounding.batch", 230, "no sq: parses as s*q"),
-        ("rounding.batch", 232, "no sq: parses as s*q"),
-        ("rounding.batch", 236, "no sq: parses as s*q"),
-        ("rounding.batch", 238, "no sq: parses as s*q"),
-        ("rounding.batch", 240, "no sq: parses as s*q"),
-        ("rounding.batch", 242, "no sq: parses as s*q"),
-        ("rounding.batch", 244, "no sq: parses as s*q"),
-        ("rounding.batch", 246, "no sq: parses as s*q"),
         // exp: exp does not recognise Euler's identity: exp(i*pi) is returned
         //   unevaluated.
         ("rounding.batch", 268, "exp(i*pi) not recognised; returned unevaluated"),
         // ---------------- special.batch ----------------
-        // psi: `psi` is the digamma alias in the reference; the port resolves it to the
-        //   pressure unit instead
-        ("special.batch", 66, "name collision: psi resolves to the pressure unit"),
         // beta: Euler beta is absent entirely - no Number method and no function id
-        ("special.batch", 70, "no beta: args become a vector of free symbols"),
-        ("special.batch", 72, "no beta: args become a vector of free symbols"),
-        ("special.batch", 74, "no beta: args become a vector of free symbols"),
-        ("special.batch", 76, "no beta: args become a vector of free symbols"),
-        ("special.batch", 78, "no beta: args become a vector of free symbols"),
-        ("special.batch", 80, "no beta: args become a vector of free symbols"),
-        ("special.batch", 82, "no beta: args become a vector of free symbols"),
-        ("special.batch", 84, "no beta: args become a vector of free symbols"),
-        ("special.batch", 86, "no beta: args become a vector of free symbols"),
-        ("special.batch", 88, "no beta: args become a vector of free symbols"),
-        ("special.batch", 498, "no beta: args become a vector of free symbols"),
+        ("special.batch", 70, "no beta: rejected as an unknown function"),
+        ("special.batch", 72, "no beta: rejected as an unknown function"),
+        ("special.batch", 74, "no beta: rejected as an unknown function"),
+        ("special.batch", 76, "no beta: rejected as an unknown function"),
+        ("special.batch", 78, "no beta: rejected as an unknown function"),
+        ("special.batch", 80, "no beta: rejected as an unknown function"),
+        ("special.batch", 82, "no beta: rejected as an unknown function"),
+        ("special.batch", 84, "no beta: rejected as an unknown function"),
+        ("special.batch", 86, "no beta: rejected as an unknown function"),
+        ("special.batch", 88, "no beta: rejected as an unknown function"),
+        ("special.batch", 498, "no beta: rejected as an unknown function"),
         // igamma: igamma is undefined for a negative first argument, and igamma(5, 0) loses
         //   exactness (24.00000000 rather than the exact 24 the reference keeps).
         ("special.batch", 104, "negative order unported; igamma(5, 0) also loses exactness"),
         ("special.batch", 106, "negative order unported; igamma(5, 0) also loses exactness"),
         // betaincinv: inverse regularized incomplete beta is absent (betainc itself is present)
-        ("special.batch", 122, "no betaincinv: args become a vector of free symbols"),
-        ("special.batch", 124, "no betaincinv: args become a vector of free symbols"),
-        ("special.batch", 126, "no betaincinv: args become a vector of free symbols"),
-        ("special.batch", 128, "no betaincinv: args become a vector of free symbols"),
-        ("special.batch", 130, "no betaincinv: args become a vector of free symbols"),
-        ("special.batch", 132, "no betaincinv: args become a vector of free symbols"),
-        // erfinv: erfinv_f64 exists in qalc-core/src/stats.rs but no function id maps to it
-        ("special.batch", 182, "no erfinv: parses as a free symbol"),
-        ("special.batch", 184, "no erfinv: parses as a free symbol"),
-        ("special.batch", 186, "no erfinv: parses as a free symbol"),
-        ("special.batch", 188, "no erfinv: parses as a free symbol"),
-        ("special.batch", 190, "no erfinv: parses as a free symbol"),
-        ("special.batch", 192, "no erfinv: parses as a free symbol"),
-        ("special.batch", 194, "no erfinv: parses as a free symbol"),
+        ("special.batch", 122, "no betaincinv: rejected as an unknown function"),
+        ("special.batch", 124, "no betaincinv: rejected as an unknown function"),
+        ("special.batch", 126, "no betaincinv: rejected as an unknown function"),
+        ("special.batch", 128, "no betaincinv: rejected as an unknown function"),
+        ("special.batch", 130, "no betaincinv: rejected as an unknown function"),
+        ("special.batch", 132, "no betaincinv: rejected as an unknown function"),
+        // erfinv: erfinv_f64 exists in qalc-core/src/stats.rs but no function id maps to it.
+        //   `erfinv(0)` used to "pass" only because the unknown name collapsed the
+        //   product to zero, which happened to be the right answer; the call is now
+        //   rejected outright, so it is a visible failure like the rest of the group.
+        ("special.batch", 180, "no erfinv: rejected as an unknown function"),
+        ("special.batch", 182, "no erfinv: rejected as an unknown function"),
+        ("special.batch", 184, "no erfinv: rejected as an unknown function"),
+        ("special.batch", 186, "no erfinv: rejected as an unknown function"),
+        ("special.batch", 188, "no erfinv: rejected as an unknown function"),
+        ("special.batch", 190, "no erfinv: rejected as an unknown function"),
+        ("special.batch", 192, "no erfinv: rejected as an unknown function"),
+        ("special.batch", 194, "no erfinv: rejected as an unknown function"),
         // zeta: only the 1-argument Riemann zeta evaluates; the 2-argument Hurwitz form is
         //   unimplemented.
         ("special.batch", 226, "2-argument Hurwitz form unimplemented; returned unevaluated"),
         ("special.batch", 228, "2-argument Hurwitz form unimplemented; returned unevaluated"),
         ("special.batch", 230, "2-argument Hurwitz form unimplemented; returned unevaluated"),
         // besselj: unregistered; qalc-num Number::besselj is a `false` stub (special.rs:1240)
-        ("special.batch", 260, "no besselj: args become a vector of free symbols"),
-        ("special.batch", 262, "no besselj: args become a vector of free symbols"),
-        ("special.batch", 264, "no besselj: args become a vector of free symbols"),
-        ("special.batch", 266, "no besselj: args become a vector of free symbols"),
-        ("special.batch", 268, "no besselj: args become a vector of free symbols"),
-        ("special.batch", 270, "no besselj: args become a vector of free symbols"),
-        ("special.batch", 272, "no besselj: args become a vector of free symbols"),
-        ("special.batch", 274, "no besselj: args become a vector of free symbols"),
-        ("special.batch", 276, "no besselj: args become a vector of free symbols"),
-        ("special.batch", 278, "no besselj: args become a vector of free symbols"),
-        ("special.batch", 490, "no besselj: args become a vector of free symbols"),
+        ("special.batch", 260, "no besselj: rejected as an unknown function"),
+        ("special.batch", 262, "no besselj: rejected as an unknown function"),
+        ("special.batch", 264, "no besselj: rejected as an unknown function"),
+        ("special.batch", 266, "no besselj: rejected as an unknown function"),
+        ("special.batch", 268, "no besselj: rejected as an unknown function"),
+        ("special.batch", 270, "no besselj: rejected as an unknown function"),
+        ("special.batch", 272, "no besselj: rejected as an unknown function"),
+        ("special.batch", 274, "no besselj: rejected as an unknown function"),
+        ("special.batch", 276, "no besselj: rejected as an unknown function"),
+        ("special.batch", 278, "no besselj: rejected as an unknown function"),
+        ("special.batch", 490, "no besselj: rejected as an unknown function"),
         // bessely: unregistered; qalc-num Number::bessely is a `false` stub (special.rs:1245)
-        ("special.batch", 280, "no bessely: args become a vector of free symbols"),
-        ("special.batch", 282, "no bessely: args become a vector of free symbols"),
-        ("special.batch", 284, "no bessely: args become a vector of free symbols"),
-        ("special.batch", 286, "no bessely: args become a vector of free symbols"),
-        ("special.batch", 288, "no bessely: args become a vector of free symbols"),
-        ("special.batch", 290, "no bessely: args become a vector of free symbols"),
-        ("special.batch", 292, "no bessely: args become a vector of free symbols"),
+        ("special.batch", 280, "no bessely: rejected as an unknown function"),
+        ("special.batch", 282, "no bessely: rejected as an unknown function"),
+        ("special.batch", 284, "no bessely: rejected as an unknown function"),
+        ("special.batch", 286, "no bessely: rejected as an unknown function"),
+        ("special.batch", 288, "no bessely: rejected as an unknown function"),
+        ("special.batch", 290, "no bessely: rejected as an unknown function"),
+        ("special.batch", 292, "no bessely: rejected as an unknown function"),
         // airy: unregistered; qalc-num Number::airy is a `false` stub (special.rs:1250)
-        ("special.batch", 296, "no airy: name parses as a free symbol, and the product collapses to a plausible-looking number"),
-        ("special.batch", 298, "no airy: name parses as a free symbol"),
-        ("special.batch", 300, "no airy: name parses as a free symbol"),
-        ("special.batch", 302, "no airy: name parses as a free symbol"),
-        ("special.batch", 304, "no airy: name parses as a free symbol"),
-        ("special.batch", 306, "no airy: name parses as a free symbol"),
-        ("special.batch", 308, "no airy: name parses as a free symbol"),
-        ("special.batch", 310, "no airy: name parses as a free symbol"),
-        ("special.batch", 312, "no airy: name parses as a free symbol"),
+        ("special.batch", 296, "no airy: rejected as an unknown function"),
+        ("special.batch", 298, "no airy: rejected as an unknown function"),
+        ("special.batch", 300, "no airy: rejected as an unknown function"),
+        ("special.batch", 302, "no airy: rejected as an unknown function"),
+        ("special.batch", 304, "no airy: rejected as an unknown function"),
+        ("special.batch", 306, "no airy: rejected as an unknown function"),
+        ("special.batch", 308, "no airy: rejected as an unknown function"),
+        ("special.batch", 310, "no airy: rejected as an unknown function"),
+        ("special.batch", 312, "no airy: rejected as an unknown function"),
         // Si: a symbolic constant argument is not approximated first, and complex
         //   arguments are unported.
         ("special.batch", 324, "symbolic-constant or complex argument; returned unevaluated"),
@@ -525,42 +374,24 @@ mod generated_coverage {
         //   both come back unevaluated.
         ("special.batch", 348, "complex / -infinity branch unported; returned unevaluated"),
         ("special.batch", 350, "complex / -infinity branch unported; returned unevaluated"),
-        // Li: unregistered; qalc-num Number::polylog is a `false` stub (special.rs:1255)
-        ("special.batch", 370, "no Li/polylog: parses as L*i"),
-        ("special.batch", 372, "no Li/polylog: parses as L*i"),
-        ("special.batch", 374, "no Li/polylog: parses as L*i"),
-        ("special.batch", 376, "no Li/polylog: parses as L*i"),
-        ("special.batch", 378, "no Li/polylog: parses as L*i"),
-        ("special.batch", 380, "no Li/polylog: parses as L*i"),
-        ("special.batch", 382, "no Li/polylog: parses as L*i"),
-        ("special.batch", 492, "no Li/polylog: parses as L*i"),
-        // sinc: cardinal sine is absent; parses as s*i*n*c
-        ("special.batch", 408, "no sinc: parses as s*i*n*c"),
-        ("special.batch", 410, "no sinc: parses as s*i*n*c"),
-        ("special.batch", 412, "no sinc: parses as s*i*n*c"),
-        ("special.batch", 414, "no sinc: parses as s*i*n*c"),
-        ("special.batch", 416, "no sinc: parses as s*i*n*c"),
-        ("special.batch", 418, "no sinc: parses as s*i*n*c"),
-        // arg: `arg` is aliased onto ATAN2 (builtins.rs:554) but ATAN2 has no 1-argument
-        //   form, so the complex argument is never taken and the result even prints
-        //   under the wrong name
-        ("special.batch", 422, "arg aliased to atan2, which has no unary form"),
-        ("special.batch", 424, "arg aliased to atan2, which has no unary form"),
-        ("special.batch", 426, "arg aliased to atan2, which has no unary form"),
-        ("special.batch", 428, "arg aliased to atan2, which has no unary form"),
-        ("special.batch", 430, "arg aliased to atan2, which has no unary form"),
-        ("special.batch", 432, "arg aliased to atan2, which has no unary form"),
-        ("special.batch", 434, "arg aliased to atan2, which has no unary form"),
-        ("special.batch", 436, "arg aliased to atan2, which has no unary form"),
-        ("special.batch", 438, "arg aliased to atan2, which has no unary form"),
-        ("special.batch", 440, "arg aliased to atan2, which has no unary form"),
-        // cis: cis(x) = cos x + i sin x is absent; parses as c*i*s
-        ("special.batch", 442, "no cis: parses as c*i*s"),
-        ("special.batch", 444, "no cis: parses as c*i*s"),
-        ("special.batch", 446, "no cis: parses as c*i*s"),
-        ("special.batch", 448, "no cis: parses as c*i*s"),
-        ("special.batch", 450, "no cis: parses as c*i*s"),
-        ("special.batch", 452, "no cis: parses as c*i*s"),
+        // Li: unregistered; qalc-num Number::polylog is a `false` stub (special.rs:1255).
+        //   `Li` is not a known name, so the call is rejected rather than read as L*i.
+        ("special.batch", 370, "no Li/polylog: rejected as an unknown function"),
+        ("special.batch", 372, "no Li/polylog: rejected as an unknown function"),
+        ("special.batch", 374, "no Li/polylog: rejected as an unknown function"),
+        ("special.batch", 376, "no Li/polylog: rejected as an unknown function"),
+        ("special.batch", 378, "no Li/polylog: rejected as an unknown function"),
+        ("special.batch", 380, "no Li/polylog: rejected as an unknown function"),
+        ("special.batch", 382, "no Li/polylog: rejected as an unknown function"),
+        ("special.batch", 492, "no Li/polylog: rejected as an unknown function"),
+        // sinc / cis: both evaluate now, but only for an argument that reduces to a
+        //   number. `pi` stays symbolic in this port, so every case whose argument is
+        //   written in terms of pi is still returned unevaluated.
+        ("special.batch", 412, "sinc(pi): pi is not approximated; returned unevaluated"),
+        ("special.batch", 444, "cis(pi): pi is not approximated; returned unevaluated"),
+        ("special.batch", 446, "cis(pi/2): pi is not approximated; returned unevaluated"),
+        ("special.batch", 448, "cis(pi/4): pi is not approximated; returned unevaluated"),
+        ("special.batch", 452, "cis(-pi/2): pi is not approximated; returned unevaluated"),
         // erf: erf/erfc/erfi are real-only; the reference evaluates them over the whole
         //   complex plane.
         ("special.batch", 482, "complex argument unported; returned unevaluated"),

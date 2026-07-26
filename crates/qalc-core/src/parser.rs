@@ -912,6 +912,16 @@ impl<'a> Parser<'a> {
                 self.bump();
                 // Function call: identifier immediately followed by `(`.
                 if *self.peek() == Tok::LParen && !self.peek_token().space_before {
+                    // `lxor` is a node type here rather than a function id,
+                    // but the reference exposes it under both a call form and
+                    // an infix operator, so both have to parse.
+                    if name == "lxor" {
+                        let args = self.parse_call_args()?;
+                        if args.len() == 2 {
+                            return Ok(MathStructure::LogicalXor(args));
+                        }
+                        return self.err("lxor takes two arguments");
+                    }
                     if let Some(fid) = self.resolver.resolve_function(name) {
                         // Functions with `TextArgument`s see their source
                         // text, not a parsed expression.
@@ -922,6 +932,26 @@ impl<'a> Parser<'a> {
                         }
                         let args = self.parse_call_args()?;
                         return Ok(MathStructure::Function { id: fid, args });
+                    }
+                    // `name(…)` where nothing at all answers to `name` is a
+                    // call to a function that does not exist, not a product.
+                    //
+                    // The distinction matters because the fallthrough is
+                    // silent *and* lossy: `airy(0)` became `airy * 0` = `0`,
+                    // a plausible-looking number with no relation to the
+                    // 0.3550280539 the reference computes. Implicit
+                    // multiplication of *identifiers* stays untouched —
+                    // `abc` really is `are*barn*c` and `3yx^2` really is
+                    // `3*y*x^2`; the line is drawn at a name glued to a
+                    // parenthesised argument list. A name the registries do
+                    // know (`x(2)`, `m(2)`) still multiplies, as in the C++,
+                    // and so does any *single* letter: the C++ name table
+                    // spells out every one of them as a unit, a prefix or a
+                    // predefined unknown, so `f(2)` and `a(b+c)` are products
+                    // there and a one-letter unknown function does not exist.
+                    if name.chars().count() > 1 && !self.resolver.is_known_name(name) {
+                        let name = name.clone();
+                        return self.err(format!("unknown function `{name}`"));
                     }
                 }
                 match self.resolver.resolve(name) {
@@ -960,6 +990,18 @@ impl<'a> Parser<'a> {
                 let m = m?;
                 self.eat(&Tok::BitOr);
                 Ok(builtin_call(BuiltinOp::Abs, vec![m]))
+            }
+            // `xor` lexes as an infix operator, but the reference also
+            // defines `XorFunction`, so `xor(12, 10)` must parse as the same
+            // bitwise node `12 xor 10` builds.
+            Tok::BitXor if self.toks.get(self.i + 1).map(|t| &t.tok) == Some(&Tok::LParen) => {
+                self.bump();
+                let args = self.parse_call_args()?;
+                if args.len() == 2 {
+                    Ok(MathStructure::BitwiseXor(args))
+                } else {
+                    self.err("xor takes two arguments")
+                }
             }
             // Word operators double as function names when called:
             // `mod(x, 2)` alongside `x mod 2`.

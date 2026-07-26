@@ -4,7 +4,7 @@
 use super::{Number, RealValue};
 use crate::context;
 use crate::float::bigfloat_from_ratio;
-use astro_float::RoundingMode;
+use astro_float::{BigFloat, RoundingMode};
 use num_bigint::BigInt;
 use num_rational::BigRational;
 use num_traits::{One, Signed, ToPrimitive, Zero};
@@ -256,14 +256,14 @@ impl Number {
             }
         }
         let (lower, upper) = if context::create_interval() {
-            let c1 = context::with_consts(|cc| al.pow(&bl, p, RoundingMode::Down, cc));
-            let c2 = context::with_consts(|cc| al.pow(&bu, p, RoundingMode::Down, cc));
-            let c3 = context::with_consts(|cc| au.pow(&bl, p, RoundingMode::Down, cc));
-            let c4 = context::with_consts(|cc| au.pow(&bu, p, RoundingMode::Down, cc));
-            let d1 = context::with_consts(|cc| al.pow(&bl, p, RoundingMode::Up, cc));
-            let d2 = context::with_consts(|cc| al.pow(&bu, p, RoundingMode::Up, cc));
-            let d3 = context::with_consts(|cc| au.pow(&bl, p, RoundingMode::Up, cc));
-            let d4 = context::with_consts(|cc| au.pow(&bu, p, RoundingMode::Up, cc));
+            let c1 = pow_bound(&al, &bl, p, RoundingMode::Down);
+            let c2 = pow_bound(&al, &bu, p, RoundingMode::Down);
+            let c3 = pow_bound(&au, &bl, p, RoundingMode::Down);
+            let c4 = pow_bound(&au, &bu, p, RoundingMode::Down);
+            let d1 = pow_bound(&al, &bl, p, RoundingMode::Up);
+            let d2 = pow_bound(&al, &bu, p, RoundingMode::Up);
+            let d3 = pow_bound(&au, &bl, p, RoundingMode::Up);
+            let d4 = pow_bound(&au, &bu, p, RoundingMode::Up);
             let mut lo = c1.clone();
             for c in [&c2, &c3, &c4] {
                 if matches!(c.cmp(&lo), Some(c) if c < 0) || lo.is_nan() {
@@ -283,16 +283,30 @@ impl Number {
             // result (`4^(1/2)`, `16^(1/4)`, `4^(3/2)`) never settles the
             // to-even tie, so the loop never ends. The interval branch above
             // already only uses Down/Up for the same reason.
-            let f = context::with_consts(|cc| al.pow(&bl, p, RoundingMode::Down, cc));
+            let f = pow_bound(&al, &bl, p, RoundingMode::Down);
             (f.clone(), f)
         };
         if lower.is_nan() || upper.is_nan() {
             return false;
         }
+        let bak = self.clone();
         self.value = RealValue::Float { lower, upper };
         self.approx = true;
         self.set_precision_and_approximate_from(o);
-        self.test_float_result(true)
+        // An infinity the operands did not contain is a pole, not an answer.
+        // `0^(-0.5)` and `[0:0.5]^(-0.5)` both run off to +infinity at zero,
+        // and the reference refuses both: its float path ends with
+        // `includesInfinity() && !nr_bak.includesInfinity() &&
+        // !o.includesInfinity() -> return false` (Number.cc:4394). Without it
+        // `[-0.5:0]^(-2)` reports `[-4:+infinity]`, an "enclosure" of a
+        // function that is unbounded on the interval.
+        if !self.test_float_result(true)
+            || (self.includes_infinity() && !bak.includes_infinity() && !o.includes_infinity())
+        {
+            *self = bak;
+            return false;
+        }
+        true
     }
 
     /// `x^o` for a real interval `x` that contains zero and a non-integer
@@ -635,7 +649,24 @@ impl Number {
         if n == 1 {
             return true;
         }
-        if self.real_part_is_negative() && n % 2 == 0 {
+        // An even root needs the *whole* interval non-negative, not merely a
+        // non-negative upper bound — `root([-1:1], 2)` has no real value at
+        // -1. The reference tests exactly this (`o.isEven() && !isNonNegative()`,
+        // Number.cc:4485). A finite straddling interval used to be caught
+        // further down by `pow` returning NaN on the negative bound; an
+        // infinite one is not, since `(-infinity)^0.5` is `+infinity` rather
+        // than NaN, and `root([-infinity:1], 2)` came back as `[1:+infinity]`.
+        if n % 2 == 0 && !self.is_non_negative() {
+            return false;
+        }
+        // An odd root of an interval that *straddles* zero is a real interval
+        // the code below cannot produce: it takes the absolute value of the
+        // whole interval, which only means anything when the interval sits on
+        // one side of zero. For a finite straddling interval the float path
+        // used to fail by way of `pow` returning NaN on the negative bound; an
+        // infinite one produced `root([-infinity:1], 3) = [1:+infinity]`, which
+        // is not even an enclosure. Refuse it explicitly instead.
+        if !self.is_non_negative() && !self.real_part_is_negative() {
             return false;
         }
         if self.is_plus_infinity() {
@@ -728,6 +759,70 @@ fn exact_power_in_range(base: &BigRational, i_pow: i64, i_root: u64, try_exact: 
         && i_pow > -limit
         && length1 < limit as u64
         && (i_pow.unsigned_abs()).saturating_mul(length1) < limit as u64
+}
+
+/// `a^b` for two float bounds, rounded in direction `rm`.
+///
+/// astro-float's `pow` refines until it can decide which way to round, and an
+/// exactly representable result never settles that decision — `0.5^(-2)` is
+/// exactly 4, so no amount of extra precision tells `pow` whether the true
+/// value is above or below 4, and the refinement runs forever. `raise_impl`
+/// keeps *point* operands away from it by taking integer exponents through
+/// repeated squaring and `n/2^k` exponents through repeated `sqrt`, but the
+/// interval branch evaluates its four corners on the raw bounds, where neither
+/// applies: `[-2:2]` is not an integer and not `n/2^k`, only its end points
+/// are. This is the same treatment one level down — an exactly representable
+/// corner is computed *as a rational*, exactly, and only the irrational ones
+/// reach `pow`.
+///
+/// A corner is exactly representable only when the exponent is dyadic (`n/2^k`
+/// — every finite `BigFloat` exponent is) and the base is an exact `2^k`-th
+/// power of a dyadic rational. That is precisely the condition
+/// [`Number::exact_root`] decides, so the test *is* the computation: when it
+/// succeeds the exact value replaces `pow`'s answer, and when it fails the
+/// result is irrational, `pow`'s Ziv loop terminates, and nothing changes.
+fn pow_bound(a: &BigFloat, b: &BigFloat, p: usize, rm: RoundingMode) -> BigFloat {
+    if let Some(f) = exact_dyadic_power(a, b, p, rm) {
+        return f;
+    }
+    context::with_consts(|cc| a.pow(b, p, rm, cc))
+}
+
+/// `a^b` when it is exactly a rational, rounded to `p` bits in direction `rm`.
+/// `None` when the result is irrational, when either operand is not finite, or
+/// when the exact form would be too large to be worth building — all cases
+/// astro-float's `pow` handles by itself.
+fn exact_dyadic_power(a: &BigFloat, b: &BigFloat, p: usize, rm: RoundingMode) -> Option<BigFloat> {
+    // Positive bases only. Zero and infinity are astro-float's to answer, and
+    // a *negative* base must stay its answer too: `pow` returns NaN there, and
+    // the NaN is load-bearing — it is what makes `[-0.5:0]^[-2:-1]` fail
+    // rather than quietly report the enclosure of the even-exponent corners.
+    if !matches!(a.sign(), Some(astro_float::Sign::Pos)) || a.is_zero() || a.is_inf() {
+        return None;
+    }
+    let (bn, bd) = crate::float::bigfloat_to_ratio(b)?;
+    let e = BigRational::new(bn, bd);
+    // The denominator is a power of two, so the root is exact or impossible;
+    // the numerator is the integer power that follows it.
+    let root = e.denom().to_u32().filter(|r| *r <= (1 << 20))?;
+    let i_pow = e.numer().to_i64()?;
+    let (an, ad) = crate::float::bigfloat_to_ratio(a)?;
+    let base = BigRational::new(an, ad);
+    if !exact_power_in_range(&base, i_pow, u64::from(root), true) {
+        return None;
+    }
+    let mut rooted = Number::from_rational(base);
+    if !rooted.exact_root(root) {
+        return None;
+    }
+    let RealValue::Rational(r) = &rooted.value else {
+        return None;
+    };
+    if i_pow < 0 && r.is_zero() {
+        return None;
+    }
+    let r = r.pow(i_pow.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
+    Some(bigfloat_from_ratio(r.numer(), r.denom(), p, rm))
 }
 
 /// The interval hull of a set of real numbers/intervals:

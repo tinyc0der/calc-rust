@@ -57,6 +57,18 @@ impl Number {
             }
             return true;
         }
+        // `∞ + (−∞)` is undefined however the two infinities arrive: as
+        // infinities themselves, or as the open end of a half-infinite
+        // interval. `[1:+infinity] + (-infinity)` has no enclosure — the
+        // reference refuses it (Number.cc:3129) and so must the interval
+        // arithmetic below, which would otherwise hand `+inf + -inf` to
+        // astro-float and get a NaN bound.
+        if self.includes_minus_infinity() && o.includes_plus_infinity() {
+            return false;
+        }
+        if self.includes_plus_infinity() && o.includes_minus_infinity() {
+            return false;
+        }
         match (&self.value, &o.value) {
             (RealValue::PlusInfinity, RealValue::MinusInfinity)
             | (RealValue::MinusInfinity, RealValue::PlusInfinity) => false,
@@ -172,6 +184,18 @@ impl Number {
             }
             return true;
         }
+        // `0 × ∞` is undefined, and so is `[-0.5:0.5] × [1:+infinity]`: an
+        // interval that is not *known* non-zero against one that reaches
+        // infinity spans the whole line. The reference tests exactly this
+        // (Number.cc:3379), and it is the half-infinite interval that makes it
+        // matter — the arms below only recognise an infinity that is the whole
+        // value.
+        if o.includes_infinity() && !self.is_nonzero() {
+            return false;
+        }
+        if self.includes_infinity() && !o.is_nonzero() {
+            return false;
+        }
         match (&self.value, &o.value) {
             (RealValue::PlusInfinity | RealValue::MinusInfinity, _)
             | (_, RealValue::PlusInfinity | RealValue::MinusInfinity) => {
@@ -256,49 +280,48 @@ impl Number {
     }
 
     fn divide_impl(&mut self, o: &Number) -> bool {
-        if o.has_imaginary_part() || self.has_imaginary_part() {
-            // z/w = z * conj(w) / |w|^2
-            let mut recip = o.clone();
-            if !recip.recip() {
+        // Everything that is not rational-by-rational goes through `1/o` and
+        // `multiply`, exactly as the reference dispatches it (Number.cc:3595).
+        // That is not a simplification for its own sake: it is what puts
+        // `multiply`'s infinity guards in the way of `[-infinity:-1] / infinity`
+        // (`1/infinity` is zero, and an operand that includes infinity times a
+        // possibly-zero one is undefined) and of `-infinity / [-infinity:-1]`,
+        // whose reciprocal `[-1:0]` contains zero. Deciding those here instead
+        // would mean a second copy of the same case analysis.
+        if self.is_infinite(false)
+            || o.is_infinite(false)
+            || o.has_imaginary_part()
+            || o.is_floating_point()
+            || self.is_floating_point()
+        {
+            let mut inv = o.clone();
+            if !inv.recip() {
                 return false;
             }
-            return self.multiply(&recip);
+            return self.multiply(&inv);
         }
-        if o.is_zero() {
+        if !o.is_nonzero() {
             return false;
         }
-        if !o.is_nonzero() && o.is_floating_point() {
-            return false; // interval containing zero
+        if self.is_zero() {
+            self.set_precision_and_approximate_from(o);
+            return true;
+        }
+        if self.has_imaginary_part() {
+            let mut im = self.imaginary_part();
+            if !im.divide(o) {
+                return false;
+            }
+            self.set_imaginary_part(&im);
         }
         match (&self.value, &o.value) {
-            (RealValue::PlusInfinity | RealValue::MinusInfinity,
-             RealValue::PlusInfinity | RealValue::MinusInfinity) => false,
-            (RealValue::PlusInfinity | RealValue::MinusInfinity, _) => {
-                let flip = o.real_part_is_negative();
-                if flip {
-                    self.negate();
-                }
-                self.set_precision_and_approximate_from(o);
-                true
-            }
-            (_, RealValue::PlusInfinity | RealValue::MinusInfinity) => {
-                // finite / ∞ = 0
-                self.clear(true);
-                self.set_precision_and_approximate_from(o);
-                true
-            }
             (RealValue::Rational(a), RealValue::Rational(b)) => {
                 self.value = RealValue::Rational(a / b);
                 self.set_precision_and_approximate_from(o);
                 true
             }
-            _ => {
-                let mut recip = o.clone();
-                if !recip.recip() {
-                    return false;
-                }
-                self.multiply(&recip)
-            }
+            // Unreachable: the dispatch above leaves only rationals here.
+            _ => false,
         }
     }
 

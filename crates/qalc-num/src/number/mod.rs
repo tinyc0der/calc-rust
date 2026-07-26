@@ -201,8 +201,20 @@ impl Number {
     }
 
     /// `setInterval(lower, upper)` — set to an interval spanning both numbers.
+    ///
+    /// An infinite end point is accepted, as it is in the reference: its
+    /// `setToFloatingPoint` (Number.cc:1502) turns `NUMBER_TYPE_PLUS_INFINITY`
+    /// into an MPFR infinity rather than failing, so `setInterval(-infinity,
+    /// -1)` builds `[-infinity:-1]`. `[-infinity:+infinity]` is a genuine
+    /// interval too — the unbounded real line, not an infinity — and only
+    /// `[+infinity:+infinity]` collapses back to a plain infinity, which
+    /// `test_float_result` does below.
+    ///
+    /// A complex end point is still refused. The reference intervalises the
+    /// imaginary parts separately (Number.cc:1304); nothing in this port asks
+    /// it to, and `false` is the honest answer until something does.
     pub fn set_interval(&mut self, lo: &Number, hi: &Number, keep_precision: bool) -> bool {
-        if !lo.is_real() || !hi.is_real() {
+        if lo.has_imaginary_part() || hi.has_imaginary_part() {
             return false;
         }
         let p = context::bit_precision();
@@ -716,7 +728,12 @@ impl Number {
                 let mut n = Number::new();
                 n.value = RealValue::Float { lower: lower.clone(), upper: lower.clone() };
                 n.approx = true;
-                n.test_integer();
+                // `test_float_result`, not `test_integer`: the end point of a
+                // half-infinite interval is an *infinity*, not a float whose
+                // bounds happen to be infinite. The reference collapses it in
+                // `setInternal` (Number.cc:1364), which is what
+                // `lowerEndPoint` builds the result with.
+                n.test_float_result(true);
                 n
             }
             _ => self.clone(),
@@ -729,7 +746,7 @@ impl Number {
                 let mut n = Number::new();
                 n.value = RealValue::Float { lower: upper.clone(), upper: upper.clone() };
                 n.approx = true;
-                n.test_integer();
+                n.test_float_result(true);
                 n
             }
             _ => self.clone(),

@@ -121,6 +121,20 @@ impl Number {
 
     /// `log(base)`.
     pub fn log(&mut self, base: &Number) -> bool {
+        // `log_b(1) = 0` for every base that is definitely not 1 — including
+        // one that is infinite, unbounded or complex, none of which the
+        // `ln(x)/ln(b)` route below survives. The reference opens with the
+        // same test (Number.cc:7656).
+        let one = Number::from_i64(1);
+        if self.is_one()
+            && (base.is_greater_than(&one)
+                || base.is_less_than(&one)
+                || base.imaginary_part().is_nonzero())
+        {
+            self.clear(true);
+            self.set_precision_and_approximate_from(base);
+            return true;
+        }
         if base.is_zero() || base.is_one() || !base.is_real() {
             return false;
         }
@@ -470,6 +484,14 @@ impl Number {
     }
 
     fn asin_impl(&mut self) -> bool {
+        // `Number::asin` opens with this test (Number.cc:6650), and it is not
+        // redundant with the range check below: an *unbounded* argument — a
+        // half-infinite interval, or one whose imaginary part is — has no
+        // enclosure, and the complex composition below would invent one out of
+        // whatever `ln` and `sqrt` make of an infinite bound.
+        if self.includes_infinity() {
+            return false;
+        }
         if self.has_imaginary_part() {
             return self.asin_complex();
         }
@@ -501,6 +523,10 @@ impl Number {
     }
 
     fn acos_impl(&mut self) -> bool {
+        // As in `asin_impl`; `Number::acos` guards the same way (:6984).
+        if self.includes_infinity() {
+            return false;
+        }
         if self.has_imaginary_part() {
             return self.acos_complex();
         }

@@ -269,21 +269,38 @@ fn boolean_of(m: Option<&MathStructure>, default: bool) -> bool {
 
 /// Parse `text` in `base` and evaluate it — the body shared by `dec`, `hex`,
 /// `bin`, `oct` and `base` (BuiltinFunctions-number.cc:1540).
-fn read_in_base(text: &str, base: i32) -> Option<MathStructure> {
+fn read_in_base(text: &str, base: i32, twos_complement: bool) -> Option<MathStructure> {
     let mut po = ParseOptions::default();
     po.base = base;
+    po.twos_complement = twos_complement && base == 2;
+    po.hexadecimal_twos_complement = twos_complement && base == 16;
     let mut m = crate::parser::parse(text, &po).ok()?;
     crate::eval::evaluate(&mut m);
     Some(m)
 }
 
-/// `dec(x, 1)` and friends: evaluate normally, then print in `base` as text.
-fn print_in_base(text: &str, base: i32) -> Option<MathStructure> {
+/// `dec(x, 1)` and friends: evaluate normally, then print in `base`.
+///
+/// The C++ finishes with `mstruct.set(mstruct.print(po), true, true)`, which
+/// is the **symbolic** setter — so `bin(255, 0, 1)` prints the bare digits
+/// `11111111`, not the quoted text `"11111111"`.
+///
+/// It also prints under a *fresh* `PrintOptions`, not the CLI's. The only
+/// field that matters is `base_display`, whose library default is
+/// `BASE_DISPLAY_NONE` while qalc sets `BASE_DISPLAY_NORMAL` — and
+/// `format_number_string` (Number.cc:242) hangs the zero-padding, the
+/// four-digit grouping *and* the `0x`/`0` prefixes off exactly that test. So
+/// `255 to bin` is `0000 0000 1111 1111` while `bin(255, 0, 1)` is
+/// `11111111`, and `8 to oct` is `010` while `oct(8, 1)` is `10`.
+fn print_in_base(text: &str, base: i32, twos_complement: bool) -> Option<MathStructure> {
     let mut m = crate::parser::parse(text, &ParseOptions::default()).ok()?;
     crate::eval::evaluate(&mut m);
-    let mut po = crate::eval::batch_print_options();
+    let mut po = PrintOptions::default();
     po.base = base;
-    Some(MathStructure::Text(crate::print::print(&m, &po)))
+    po.base_display = qalc_num::options::BaseDisplay::None;
+    po.twos_complement = twos_complement;
+    po.hexadecimal_twos_complement = twos_complement && base == 16;
+    Some(MathStructure::Symbolic(crate::print::print(&m, &po)))
 }
 
 /// The text of an argument that the parser turned into a text value.
@@ -371,6 +388,20 @@ fn apply(fid: u32, args: &[MathStructure]) -> Option<MathStructure> {
             code_of(&t, enc, as_vector)
         }
         // The base-reading functions take their digits as text.
+        //
+        // Argument layout, from the C++ constructors
+        // (BuiltinFunctions-number.cc:1500-1590):
+        //
+        // | call                        | 2nd arg          | 3rd arg |
+        // |-----------------------------|------------------|---------|
+        // | `bin(x, twos, reverse)`     | two's complement | reverse |
+        // | `hex(x, twos, reverse)`     | two's complement | reverse |
+        // | `oct(x, reverse)`           | reverse          | —       |
+        // | `dec(x, reverse)`           | reverse          | —       |
+        //
+        // Getting `bin`'s two flags the wrong way round is not a cosmetic
+        // slip: `bin(11111111, 1)` is the two's-complement literal −1, and
+        // the port used to answer with a formatted binary *string* instead.
         b::BASE_DEC | b::BASE_HEX | b::BASE_BIN | b::BASE_OCT => {
             let t = arg_text(args.first()?)?;
             let base = match fid {
@@ -379,25 +410,30 @@ fn apply(fid: u32, args: &[MathStructure]) -> Option<MathStructure> {
                 b::BASE_BIN => 2,
                 _ => 8,
             };
-            // `hex(x, twos_complement, as_text)` puts the flag last.
-            let as_text = if fid == b::BASE_HEX {
-                args.len() > 2 && boolean_of(args.get(2), false)
+            let has_twos_flag = fid == b::BASE_HEX || fid == b::BASE_BIN;
+            let (twos, reverse) = if has_twos_flag {
+                (boolean_of(args.get(1), false), boolean_of(args.get(2), false))
             } else {
-                args.len() > 1 && boolean_of(args.get(1), false)
+                (false, boolean_of(args.get(1), false))
             };
-            if as_text {
-                print_in_base(&t, base)
+            if reverse {
+                print_in_base(&t, base, twos)
             } else {
-                read_in_base(&t, base)
+                read_in_base(&t, base, twos)
             }
         }
-        b::BASE_N if args.len() == 2 => {
+        // `base(x, radix, digits, reverse)`.
+        b::BASE_N if (2..=4).contains(&args.len()) => {
             let t = arg_text(&args[0])?;
             let base = args[1].number()?.to_i64()?;
             if !(2..=36).contains(&base) {
                 return None;
             }
-            read_in_base(&t, base as i32)
+            if boolean_of(args.get(3), false) {
+                print_in_base(&t, base as i32, false)
+            } else {
+                read_in_base(&t, base as i32, false)
+            }
         }
         _ => None,
     }
