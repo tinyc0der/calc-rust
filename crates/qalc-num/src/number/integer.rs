@@ -490,8 +490,14 @@ impl Number {
         true
     }
 
-    /// `factorize(factors)` — prime factorization by trial division +
-    /// deterministic Miller-Rabin for the remainder.
+    /// `factorize(factors)` — prime factorization by trial division.
+    ///
+    /// TODO(port): the cofactor left after trial division is pushed as-is,
+    /// with no primality test. For a semiprime whose factors both exceed the
+    /// bound below, the "factor" list therefore contains a *composite*, and
+    /// nothing signals it. Closing this needs a primality test (deterministic
+    /// Miller-Rabin over the usual base set) and a splitter (Pollard rho) for
+    /// the composite case.
     pub fn factorize(&self, factors: &mut Vec<Number>) -> bool {
         let Some(z) = self.to_bigint() else {
             return false;
@@ -510,7 +516,8 @@ impl Number {
             return true;
         }
         let mut d = num_bigint::BigUint::from(2u32);
-        // Trial division up to a bound; large remainders bail out unless prime.
+        // Trial division up to a bound. Past it the loop gives up and the
+        // remainder is pushed unfactored — see the TODO above.
         let bound = num_bigint::BigUint::from(1_000_000u64);
         while &(&d * &d) <= &n {
             if d > bound {

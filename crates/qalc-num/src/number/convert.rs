@@ -25,15 +25,29 @@ impl Number {
         }
     }
 
-    /// `floatValue()` — approximate f64 of the real part (midpoint for intervals).
+    /// `floatValue()` — approximate f64 of the real part, the midpoint of an
+    /// interval.
+    ///
+    /// The midpoint matters: callers use `float_value().abs()` to size the
+    /// guard bits of a series whose largest term grows like e^|x|
+    /// (`special.rs`, `integral_guard`). Returning the *lower* bound of an
+    /// interval like [0.001, 900] would size the guard from 0.001, the series
+    /// would lose every digit to cancellation, and the range rejection would
+    /// never fire.
     pub fn float_value(&self) -> f64 {
         match &self.value {
             RealValue::Rational(r) => {
                 r.numer().to_f64().unwrap_or(f64::NAN) / r.denom().to_f64().unwrap_or(f64::NAN)
             }
-            RealValue::Float { lower, .. } => {
-                // Point value or lower bound; adequate for display heuristics.
-                bigfloat_to_f64(lower)
+            RealValue::Float { lower, upper } => {
+                let (l, u) = (bigfloat_to_f64(lower), bigfloat_to_f64(upper));
+                if l == u {
+                    l
+                } else {
+                    // Halve first: the endpoints of a wide interval can sum to
+                    // infinity even when the midpoint is finite.
+                    l / 2.0 + u / 2.0
+                }
             }
             RealValue::PlusInfinity => f64::INFINITY,
             RealValue::MinusInfinity => f64::NEG_INFINITY,

@@ -433,12 +433,28 @@ fn erfc_asymptotic(x: &BigFloat, wp: usize, cc: &mut Consts) -> BigFloat {
         .mul(&sum, wp, RM)
 }
 
+/// Is `x` below the crossover where the asymptotic expansion takes over?
+///
+/// astro-float's `BigFloat::cmp` returns a *signed magnitude*, not −1/0/1:
+/// when two values share an exponent it hands back the difference of their
+/// mantissa words, so `8.cmp(14.53)` is a large negative number, not −1.
+/// Testing `!= Some(-1)` therefore reads "not less than" as true for values
+/// that genuinely are less, and erf/erfc take the asymptotic branch below the
+/// crossover — which is where it does not converge. Only the *sign* of the
+/// result is meaningful.
+fn below_crossover(x: &BigFloat, wp: usize) -> bool {
+    matches!(
+        x.cmp(&BigFloat::from_f64(erf_crossover(wp), wp)),
+        Some(c) if c < 0
+    )
+}
+
 fn erf_float(x: &BigFloat, wp: usize, cc: &mut Consts) -> BigFloat {
     if x.is_nan() {
         return BigFloat::nan(None);
     }
     let ax = x.abs();
-    if ax.cmp(&BigFloat::from_f64(erf_crossover(wp), wp)) != Some(-1) {
+    if !below_crossover(&ax, wp) {
         // erfc is negligible next to 1 here — no cancellation.
         let r = f_i(1, wp).sub(&erfc_asymptotic(&ax, wp, cc), wp, RM);
         return if x.is_negative() { r.neg() } else { r };
@@ -450,7 +466,7 @@ fn erfc_float(x: &BigFloat, wp: usize, cc: &mut Consts) -> BigFloat {
     if x.is_nan() {
         return BigFloat::nan(None);
     }
-    if !x.is_negative() && x.cmp(&BigFloat::from_f64(erf_crossover(wp), wp)) != Some(-1) {
+    if !x.is_negative() && !below_crossover(x, wp) {
         return erfc_asymptotic(x, wp, cc);
     }
     // 1 − erf(x) cancels to ≈ e^{−x²} for positive x; x is below the
@@ -1527,6 +1543,43 @@ mod tests {
     }
 
     // ---------------- integrals ----------------
+
+    #[test]
+    fn erf_picks_its_branch_by_the_sign_of_the_comparison() {
+        // At precision 30 the crossover is ~12.77, and 8 shares a binade with
+        // it — so astro-float's signed-magnitude `cmp` returns a large
+        // negative mantissa difference rather than -1. Testing `!= Some(-1)`
+        // sent erfc(8) down the asymptotic branch, below the crossover where
+        // it does not converge. Values are the reference binary's at
+        // `set precision 30`.
+        let saved = crate::context::precision();
+        crate::context::set_precision(30);
+        let po = PrintOptions::default();
+        let parse = crate::options::ParseOptions::default();
+
+        let mut n = Number::from_i64(8);
+        assert!(n.erfc());
+        assert_eq!(
+            n.print(&po),
+            "0.0000000000000000000000000000112242971729829270799678884432"
+        );
+
+        let mut n = Number::from_i64(8);
+        assert!(n.erf());
+        assert_eq!(n.print(&po), "0.999999999999999999999999999989");
+
+        // Just above the crossover, where the asymptotic branch is right.
+        let mut n = Number::parse("14.5", &parse);
+        assert!(n.erfc());
+        assert_eq!(n.print(&po), "1.89939594197950304957420002393E-93");
+
+        // Well below it, where the series is right.
+        let mut n = Number::from_i64(3);
+        assert!(n.erfc());
+        assert_eq!(n.print(&po), "0.0000220904969985854413727761295823");
+
+        crate::context::set_precision(saved);
+    }
 
     #[test]
     fn expint_values() {
