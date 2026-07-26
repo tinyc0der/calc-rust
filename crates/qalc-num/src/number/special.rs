@@ -984,6 +984,106 @@ impl Number {
         Some((m * 1.4427).ceil() as usize + 16)
     }
 
+    /// `Ei(z)` for complex `z` (Number.cc:8868).
+    ///
+    /// `Ei(z) = γ + (ln(z) − ln(1/z))/2 + Σ_{k≥1} z^k / (k·k!)`. MPFR's
+    /// `mpfr_eint` is real-only, so the C++ falls back to this series too.
+    ///
+    /// The halved difference of the two logarithms is not a roundabout way of
+    /// writing `ln(z)`: it is what puts the branch cut where `Ei` needs it, on
+    /// the negative real axis approached from *both* sides, so that
+    /// `Ei(x + 0i)` and `Ei(x − 0i)` differ by the expected `2πi`.
+    ///
+    /// The series alternates in sign for a negative real part and loses
+    /// digits to cancellation, so it is summed at double the working
+    /// precision, exactly as the C++ does.
+    fn expint_complex(&mut self) -> bool {
+        if self.is_infinite(false) || self.imaginary_part().is_infinite(false) {
+            return false;
+        }
+        if !self.is_nonzero() {
+            return false;
+        }
+        let saved_precision = context::precision();
+        let saved_interval = context::create_interval();
+        context::set_precision(saved_precision * 2 + 20);
+        context::set_create_interval(false);
+        let result = self.expint_complex_series();
+        context::set_precision(saved_precision);
+        context::set_create_interval(saved_interval);
+        match result {
+            Some(v) => {
+                *self = v;
+                self.approx = true;
+                self.test_float_result(true);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn expint_complex_series(&self) -> Option<Number> {
+        let z = self.clone();
+
+        // (ln(z) − ln(1/z))/2
+        let mut log_term = z.clone();
+        if !log_term.ln() {
+            return None;
+        }
+        let mut reciprocal_log = z.clone();
+        if !reciprocal_log.recip() || !reciprocal_log.ln() {
+            return None;
+        }
+        if !log_term.subtract(&reciprocal_log) || !log_term.divide(&Number::from_i64(2)) {
+            return None;
+        }
+
+        // Σ_{k≥1} z^k/(k·k!), starting from the k=1 term, which is z itself.
+        let mut sum = z.clone();
+        let mut power = z.clone();
+        let mut factorial = Number::from_i64(1);
+        // A relative change below this ends the sum; the bound is in terms of
+        // the *caller's* precision, not the doubled working precision.
+        let mut tolerance = Number::from_i64(10);
+        if !tolerance.raise(
+            &Number::from_i64(-(context::precision() as i64 / 2 + 10)),
+            false,
+        ) {
+            return None;
+        }
+        for k in 2..MAX_EXPINT_TERMS {
+            if !power.multiply(&z) || !factorial.multiply_i64(k) {
+                return None;
+            }
+            let mut term = power.clone();
+            if !term.divide(&factorial) || !term.divide_i64(k) {
+                return None;
+            }
+            if !sum.add(&term) {
+                return None;
+            }
+            if sum.is_infinite(false) {
+                return None;
+            }
+            // Converged once the term is negligible against the running sum
+            // in both components.
+            let mut relative = term.clone();
+            if sum.is_nonzero() && !relative.divide(&sum) {
+                return None;
+            }
+            let real_small = magnitude_below(&relative.real_part(), &tolerance);
+            let imaginary_small = magnitude_below(&relative.imaginary_part(), &tolerance);
+            if real_small && imaginary_small {
+                let gamma = euler_gamma_number();
+                if !sum.add(&gamma) || !sum.add(&log_term) {
+                    return None;
+                }
+                return Some(sum);
+            }
+        }
+        None
+    }
+
     /// `expint()` — the exponential integral `Ei(x)` (MPFR's `mpfr_eint`).
     pub fn expint(&mut self) -> bool {
         // d(Ei x)/dx = e^x / x.
@@ -1001,7 +1101,7 @@ impl Number {
 
     fn expint_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
-            return false; // TODO(port): complex Ei
+            return self.expint_complex();
         }
         if self.is_zero() {
             self.set_minus_infinity(true, false);
@@ -1517,4 +1617,23 @@ mod tests {
         assert!(!n.polylog(&Number::from_i64(2)));
         assert!(!n.igamma(&Number::from_i64(1)));
     }
+}
+
+
+/// Largest number of series terms before `Ei` gives up.
+const MAX_EXPINT_TERMS: i64 = 100_000;
+
+/// The Euler-Mascheroni constant as a `Number` at the working precision.
+fn euler_gamma_number() -> Number {
+    let wp = context::bit_precision();
+    let g = context::with_consts(|cc| euler_gamma(wp, cc));
+    Number::from_interval(g.clone(), g)
+}
+
+/// Is `|value|` below `tolerance`? Used to decide that a series term no
+/// longer moves the sum.
+fn magnitude_below(value: &Number, tolerance: &Number) -> bool {
+    let mut magnitude = value.clone();
+    magnitude.abs();
+    magnitude.is_less_than(tolerance)
 }
