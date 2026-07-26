@@ -6,12 +6,14 @@
 
 pub mod builtins;
 pub mod calculate;
+pub mod defs;
 pub mod eval;
 pub mod ids;
 pub mod lexer;
 pub mod names;
 pub mod options;
 pub mod parser;
+pub mod percent;
 pub mod print;
 pub mod structure;
 

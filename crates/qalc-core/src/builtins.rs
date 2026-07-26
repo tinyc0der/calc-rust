@@ -65,6 +65,7 @@ pub mod id {
     pub const FRAC: u32 = 1712;
     pub const INT: u32 = 1713;
     pub const BITWISE_NOT: u32 = 1714;
+    pub const PERCENT: u32 = 1720;
 }
 
 /// Evaluate a function call in place. Returns true if it was replaced by a
@@ -120,6 +121,7 @@ fn apply(id: u32, args: &[Number]) -> Option<Number> {
         (id::FRAC, 1) => unary(args, |n| n.frac()),
         (id::ROUND, 1) => unary(args, |n| n.round(RoundingMode::HalfAwayFromZero)),
         (id::BITWISE_NOT, 1) => unary(args, |n| n.bit_not()),
+        (id::PERCENT, 1) => binary_with(args, &Number::from_i64(100), |n, d| n.divide(d)),
 
         // --- logarithms ---
         (id::LOG2, 1) => binary_with(args, &Number::from_i64(2), |n, b| n.log(b)),

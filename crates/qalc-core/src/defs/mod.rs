@@ -24,8 +24,9 @@ use crate::names::NameSet;
 use qalc_num::Number;
 
 pub use xml::{
-    load_definitions_file, load_definitions_str, load_global_definitions, definitions_dir,
-    LoadError, DEFINITIONS_DIR_ENV,
+    add_builtin_units, definitions_dir, load_definitions_file, load_definitions_str,
+    load_global_definitions, user_function_arity, FormulaArity, LoadError, DEFINITIONS_DIR_ENV,
+    GLOBAL_DEFINITION_FILES,
 };
 
 /// Identifies a [`Prefix`] in a [`Registry`].
@@ -548,10 +549,19 @@ impl FunctionDef {
 /// case-sensitive name is only found by an exact match; every other name is
 /// additionally reachable through its lowercased form, which is how
 /// `Calculator::getActiveUnit` and friends behave.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct NameIndex<T> {
     exact: HashMap<String, T>,
     lowercase: HashMap<String, T>,
+}
+
+impl<T> Default for NameIndex<T> {
+    fn default() -> Self {
+        NameIndex {
+            exact: HashMap::new(),
+            lowercase: HashMap::new(),
+        }
+    }
 }
 
 impl<T: Copy> NameIndex<T> {
@@ -658,6 +668,12 @@ impl Registry {
     pub fn unit_mut(&mut self, id: UnitId) -> &mut Unit {
         &mut self.units[id.0 as usize]
     }
+    /// Replace a unit's names and re-index them. Used when a
+    /// `<builtin_unit>` element renames a unit created in code.
+    pub fn set_unit_names(&mut self, id: UnitId, names: NameSet) {
+        self.unit_names.insert(&names, id);
+        self.units[id.0 as usize].names = names;
+    }
     /// `Calculator::getUnit` — resolves any of a unit's names.
     pub fn find_unit(&self, name: &str) -> Option<&Unit> {
         self.unit_names.get(name).map(|id| self.unit(id))
@@ -699,6 +715,9 @@ impl Registry {
     pub fn variable(&self, id: VariableId) -> &Variable {
         &self.variables[id.0 as usize]
     }
+    pub fn variable_mut(&mut self, id: VariableId) -> &mut Variable {
+        &mut self.variables[id.0 as usize]
+    }
     pub fn find_variable(&self, name: &str) -> Option<&Variable> {
         self.variable_names.get(name).map(|id| self.variable(id))
     }
@@ -721,6 +740,9 @@ impl Registry {
     }
     pub fn function(&self, id: FunctionId) -> &FunctionDef {
         &self.functions[id.0 as usize]
+    }
+    pub fn function_mut(&mut self, id: FunctionId) -> &mut FunctionDef {
+        &mut self.functions[id.0 as usize]
     }
     pub fn find_function(&self, name: &str) -> Option<&FunctionDef> {
         self.function_names.get(name).map(|id| self.function(id))
@@ -790,10 +812,12 @@ mod tests {
     fn exact_prefix_lookup_by_exponent() {
         let r = reg_with_prefixes();
         let id = r.exact_decimal_prefix(3).unwrap();
-        assert_eq!(r.prefix(id).reference_name(), "kilo");
+        // `ar:k` is flagged as the reference name, so that is what
+        // `reference_name` reports — not the long form.
+        assert_eq!(r.prefix(id).reference_name(), "k");
         assert!(r.exact_decimal_prefix(10).is_none());
         let id = r.exact_binary_prefix(10).unwrap();
-        assert_eq!(r.prefix(id).reference_name(), "kibi");
+        assert_eq!(r.prefix(id).reference_name(), "Ki");
     }
 
     #[test]

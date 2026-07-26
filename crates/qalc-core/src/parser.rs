@@ -401,7 +401,7 @@ impl<'a> Parser<'a> {
     fn percent_is_binary(&self) -> bool {
         matches!(
             self.toks.get(self.i + 1).map(|t| &t.tok),
-            Some(Tok::Number(_) | Tok::Ident(_) | Tok::LParen | Tok::Minus)
+            Some(Tok::Number(_) | Tok::Ident(_) | Tok::LParen)
         )
     }
 
@@ -479,9 +479,10 @@ impl<'a> Parser<'a> {
                 // this `%` is binary modulo and belongs to the caller.
                 Tok::Percent if !self.percent_is_binary() => {
                     self.bump();
-                    // `x%` = x/100; represented as multiplication by 1/100.
-                    let hundredth = MathStructure::Number(Number::from_ints(1, 100, 0));
-                    m = MathStructure::Multiplication(vec![m, hundredth]);
+                    // Kept as a marker call rather than an immediate
+                    // multiplication by 1/100, because a percent term in a
+                    // sum means "of the running total" (`100 + 10%` = 110).
+                    m = builtin_call(BuiltinOp::Percent, vec![m]);
                 }
                 _ => break,
             }
@@ -649,6 +650,7 @@ pub enum BuiltinOp {
     ShiftLeft,
     ShiftRight,
     Uncertainty,
+    Percent,
 }
 
 impl BuiltinOp {
@@ -664,6 +666,7 @@ impl BuiltinOp {
             BuiltinOp::ShiftLeft => 1703,
             BuiltinOp::ShiftRight => 1704,
             BuiltinOp::Uncertainty => 1705,
+            BuiltinOp::Percent => 1720,
         })
     }
 }
@@ -824,10 +827,16 @@ mod tests {
     }
 
     #[test]
-    fn percent_is_hundredth() {
+    fn percent_parses_as_a_marker() {
+        // The division by 100 is deferred: inside a sum a percent means
+        // "of the running total" (see the `percent` module), so the parser
+        // records the intent rather than the arithmetic.
         let m = p("50%");
-        assert!(m.is_multiplication());
-        assert!(m.get(1).unwrap().is_number());
+        assert!(matches!(m, MathStructure::Function { .. }), "got {m}");
+        if let MathStructure::Function { id, args } = &m {
+            assert_eq!(*id, BuiltinOp::Percent.function_id());
+            assert_eq!(args.len(), 1);
+        }
     }
 
     #[test]

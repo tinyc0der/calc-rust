@@ -73,6 +73,9 @@ fn apply_conversion(m: &mut MathStructure, po: &mut PrintOptions) -> Result<(), 
 /// function's arguments).
 pub fn evaluate(m: &mut MathStructure) {
     let eo = EvaluationOptions::default();
+    // Percent markers become concrete arithmetic before any merging, since
+    // a percent inside a sum depends on the sum's term order.
+    crate::percent::apply(m);
     for _ in 0..MAX_EVAL_PASSES {
         let functions_changed = builtins::calculate_functions(m);
         let merged = m.calculatesub(&eo);

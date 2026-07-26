@@ -48,7 +48,7 @@ use super::{
     UnitKind, Variable, VariableValue,
 };
 use crate::ids::{FunctionId, UnitId, VariableId};
-use crate::names::NameSet;
+use crate::names::{parse_names, NameSet};
 use qalc_num::{Number, ParseOptions};
 
 /// Environment variable naming the directory holding the definition files,
@@ -156,7 +156,12 @@ pub fn add_builtin_units(reg: &mut Registry) {
         pending_exchange_rate: false,
         active: true,
     });
-    let mut currency_alias = |reg: &mut Registry, spec: &str, title: &str, base, relation: &str| {
+    let currency_alias = |reg: &mut Registry,
+                          builtin: &str,
+                          spec: &str,
+                          title: &str,
+                          base,
+                          relation: &str| {
         reg.add_unit(Unit {
             id: UnitId(0),
             names: NameSet::from_spec(spec),
@@ -179,15 +184,23 @@ pub fn add_builtin_units(reg: &mut Registry) {
             approximate: true,
             precision: -2,
             use_with_prefixes: None,
-            builtin: Some(spec.rsplit(':').next().unwrap_or(spec).to_string()),
+            builtin: Some(builtin.to_string()),
             pending_exchange_rate: true,
             active: true,
         })
     };
-    currency_alias(reg, "a-cr:BTC,bitcoin,p:bitcoins", "Bitcoins", eur, "55955.6");
-    let byn = currency_alias(reg, "a-cr:BYN", "Belarusian Ruble", eur, "1/3.3078");
     currency_alias(
         reg,
+        "BTC",
+        "a-cr:BTC,bitcoin,p:bitcoins",
+        "Bitcoins",
+        eur,
+        "55955.6",
+    );
+    let byn = currency_alias(reg, "BYN", "a-cr:BYN", "Belarusian Ruble", eur, "1/3.3078");
+    currency_alias(
+        reg,
+        "BYR",
         "a-cr:BYR",
         "Belarusian Ruble p. (obsolete)",
         byn,
@@ -372,7 +385,7 @@ fn read_meta(node: Node) -> ItemMeta {
         }
         match child.tag_name().name() {
             "names" if m.names.is_empty() => {
-                m.names = NameSet::from_spec(&node_text(child));
+                m.names = names_from_spec(&node_text(child));
             }
             "title" if m.title.is_empty() => m.title = strip_context(&node_text(child)),
             "description" if m.description.is_empty() => m.description = node_text(child),
@@ -381,6 +394,64 @@ fn read_meta(node: Node) -> ItemMeta {
         }
     }
     m
+}
+
+/// Parse a `<names>` spec, working around a gap in [`crate::names`].
+///
+/// `ExpressionItem.h` defines nine name flags; `names::parse_names` currently
+/// implements eight of them and does not know `o` (`completion_only`). Because
+/// an unrecognised flag character makes the whole prefix be treated as part of
+/// the name, real entries such as `aor:US_ft` and `ro:ata_point` in units.xml
+/// come back as literal names and the units that reference them cannot be
+/// resolved — fourteen alias units and two composites are lost.
+///
+/// Rather than reimplement the flag syntax here, strip an `o` out of the flag
+/// prefix, hand the rest to `parse_names`, and set `completion_only`
+/// afterwards. Delete this once `names.rs` grows an `'o'` match arm.
+fn names_from_spec(spec: &str) -> NameSet {
+    let mut set = NameSet::default();
+    for entry in spec.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let (normalized, completion_only) = strip_completion_only_flag(entry);
+        for mut n in parse_names(&normalized) {
+            n.completion_only |= completion_only;
+            set.names.push(n);
+        }
+    }
+    set
+}
+
+fn strip_completion_only_flag(entry: &str) -> (String, bool) {
+    let Some(colon) = entry.find(':') else {
+        return (entry.to_string(), false);
+    };
+    let (flags, rest) = entry.split_at(colon);
+    let rest = &rest[1..];
+    let is_flags = !flags.is_empty()
+        && flags
+            .chars()
+            .all(|c| matches!(c, 'a' | 'r' | 'p' | 'u' | 's' | 'c' | 'i' | 'o' | 'b' | '-'));
+    if !is_flags || !flags.contains('o') {
+        return (entry.to_string(), false);
+    }
+    let mut completion_only = false;
+    let mut value = true;
+    for c in flags.chars() {
+        match c {
+            '-' => value = false,
+            'o' => completion_only = value,
+            _ => {}
+        }
+    }
+    let stripped: String = flags.chars().filter(|c| *c != 'o').collect();
+    if stripped.is_empty() || stripped.chars().all(|c| c == '-') {
+        (rest.to_string(), completion_only)
+    } else {
+        (format!("{stripped}:{rest}"), completion_only)
+    }
 }
 
 fn node_text(node: Node) -> String {
@@ -720,19 +791,16 @@ fn load_builtin_unit(node: Node, category: &str, reg: &mut Registry) {
         u.hidden = meta.hidden;
         u.builtin = Some(name);
         if !meta.names.is_empty() {
-            // `ITEM_SET_BUILTIN_NAMES`: the XML names win, but the builtin
-            // reference name must survive so that C++ code can still find it.
+            // `ITEM_SET_BUILTIN_NAMES`: the XML names win, but any builtin
+            // name the file does not restate must survive so that code
+            // holding the old spelling can still find the unit.
             let mut names = meta.names;
-            if !names.matches(&existing_names.reference_name().unwrap_or("").to_string()) {
-                for n in existing_names.all() {
-                    if n.reference {
-                        names.names.push(n.clone());
-                    }
+            for n in existing_names.all() {
+                if !names.matches(&n.name) {
+                    names.names.push(n.clone());
                 }
             }
-            let names_clone = names.clone();
-            reg.unit_mut(id).names = names;
-            reg.reindex_unit(id, &names_clone);
+            reg.set_unit_names(id, names);
         }
         return;
     }
@@ -870,7 +938,7 @@ fn load_builtin_variable(node: Node, category: &str, reg: &mut Registry) {
     let name = node.attribute("name").unwrap_or("").to_string();
     let meta = read_meta(node);
     if let Some(id) = reg.find_variable_id(&name) {
-        let v = &mut reg.variables_mut()[id.0 as usize];
+        let v = reg.variable_mut(id);
         v.category = category.to_string();
         if !meta.title.is_empty() {
             v.title = meta.title;
@@ -1019,7 +1087,7 @@ fn load_builtin_function(node: Node, category: &str, reg: &mut Registry) {
     let declared = arguments.iter().map(|a| a.index).max().unwrap_or(0) as i32;
 
     if let Some(id) = reg.find_function_id(&name) {
-        let f = &mut reg.functions_mut()[id.0 as usize];
+        let f = reg.function_mut(id);
         f.category = category.to_string();
         if !meta.title.is_empty() {
             f.title = meta.title;
