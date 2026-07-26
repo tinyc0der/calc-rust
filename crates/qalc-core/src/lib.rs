@@ -7,6 +7,7 @@
 pub mod ids;
 pub mod lexer;
 pub mod parser;
+pub mod print;
 pub mod structure;
 
 pub use ids::{FunctionId, UnitId, VariableId};
