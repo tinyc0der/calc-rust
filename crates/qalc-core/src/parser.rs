@@ -28,7 +28,7 @@
 //! denominator (`1/2x` → `1/(2x)`), but a space breaks it (`1/2 x` → `0.5x`).
 
 use crate::ids::FunctionId;
-use crate::lexer::{tokenize, Tok, Token};
+use crate::lexer::{Tok, Token};
 use crate::structure::{ComparisonType, ConversionTarget, MathStructure};
 use qalc_num::{Number, ParseOptions};
 
@@ -79,7 +79,7 @@ pub fn parse_with(
     po: &ParseOptions,
     resolver: &dyn NameResolver,
 ) -> Result<MathStructure, ParseError> {
-    let tokens = tokenize(expr);
+    let tokens = crate::lexer::tokenize_with_base(expr, po.base);
     let mut p = Parser {
         src: expr,
         toks: tokens,
@@ -566,13 +566,13 @@ impl<'a> Parser<'a> {
         &mut self,
         stop_at_space: bool,
     ) -> Result<MathStructure, ParseError> {
-        let first = self.parse_power()?;
+        let first = self.parse_binary_exponent()?;
         let mut factors = vec![first];
         while self.starts_implicit_factor() {
             if stop_at_space && self.peek_token().space_before {
                 break;
             }
-            factors.push(self.parse_power()?);
+            factors.push(self.parse_binary_exponent()?);
         }
         if factors.len() == 1 {
             return Ok(factors.pop().unwrap());
@@ -598,8 +598,54 @@ impl<'a> Parser<'a> {
     fn starts_implicit_factor(&self) -> bool {
         matches!(
             self.peek(),
-            Tok::Number(_) | Tok::Ident(_) | Tok::LParen | Tok::LBracket | Tok::LBrace
+            Tok::Number(_)
+                | Tok::Ident(_)
+                | Tok::LParen
+                | Tok::LBracket
+                | Tok::LBrace
+                | Tok::BinExp
         )
+    }
+
+    /// `p` in base 16 — the binary exponent of `Calculator::parseOperators`
+    /// (Calculator-parse.cc:6322). `AEp-2` is 174*2^-2; the exponent is always
+    /// read in base 10, and a `p` with nothing before it takes a mantissa of
+    /// one, so a bare `p23` is 2^23.
+    fn parse_binary_exponent(&mut self) -> Result<MathStructure, ParseError> {
+        let mut m = if *self.peek() == Tok::BinExp {
+            MathStructure::from(1)
+        } else {
+            self.parse_power()?
+        };
+        while *self.peek() == Tok::BinExp {
+            self.bump();
+            let mut negative = false;
+            loop {
+                match self.peek() {
+                    Tok::Minus => {
+                        negative = !negative;
+                        self.bump();
+                    }
+                    Tok::Plus => {
+                        self.bump();
+                    }
+                    _ => break,
+                }
+            }
+            let Tok::Number(text) = self.peek().clone() else {
+                return self.err("a binary exponent needs a number");
+            };
+            self.bump();
+            let mut exponent =
+                qalc_num::Number::parse(&text, &ParseOptions::default());
+            if negative {
+                exponent.negate();
+            }
+            let mut power = MathStructure::from(2);
+            power.raise(MathStructure::Number(exponent));
+            m = MathStructure::Multiplication(vec![m, power]);
+        }
+        Ok(m)
     }
 
     /// `^` — right-associative, binds tighter than implicit multiplication.

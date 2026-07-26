@@ -84,6 +84,10 @@ impl Session {
         if let Some(rest) = line.strip_prefix('/') {
             return Ok(self.set_option(rest));
         }
+        // The CLI accepts the same commands without the slash.
+        if line.starts_with("set ") {
+            return Ok(self.set_option(line));
+        }
         // The CLI command words that apply an operation to the rest of the
         // line (`factor x^2-1`, `expand (x+1)^2`) — src/qalc.cc.
         for (word, fid) in [
@@ -186,8 +190,39 @@ impl Session {
         let Some(option) = words.next() else {
             return String::new();
         };
-        let value = words.next().unwrap_or("1");
+        // `set input base 16` and `set base 16` — a two-word option name, so
+        // the value is one word further along (src/qalc.cc:5863).
+        let (option, value) = match option {
+            "input" | "output" => (
+                match (option, words.next()) {
+                    ("input", Some("base")) => "inbase",
+                    ("output", Some("base")) => "outbase",
+                    _ => return String::new(),
+                },
+                words.next().unwrap_or("1"),
+            ),
+            _ => (option, words.next().unwrap_or("1")),
+        };
         match option {
+            // The input base decides whether A-F are digits and whether `p`
+            // is a binary exponent, so it belongs to the parse options.
+            "inbase" | "in" => {
+                if let Some(b) = parse_base(value) {
+                    self.parse_options.base = b;
+                }
+            }
+            "outbase" | "out" => {
+                if let Some(b) = parse_base(value) {
+                    self.print_options.base = b;
+                }
+            }
+            // Plain `base` sets both, as the reference CLI does.
+            "base" => {
+                if let Some(b) = parse_base(value) {
+                    self.parse_options.base = b;
+                    self.print_options.base = b;
+                }
+            }
             "unicode" => {
                 self.print_options.use_unicode_signs = value != "0" && value != "off";
             }
@@ -356,4 +391,24 @@ mod tests {
         let mut s = Session::new();
         assert_eq!(s.evaluate_line("52 to hex").unwrap(), "0x34");
     }
+}
+
+/// The value of a `set base` command: a plain number, or one of the named
+/// bases the reference CLI accepts.
+fn parse_base(value: &str) -> Option<i32> {
+    use qalc_num::options::base;
+    if let Ok(n) = value.parse::<i32>() {
+        return Some(n);
+    }
+    Some(match value.to_ascii_lowercase().as_str() {
+        "bin" | "binary" => 2,
+        "oct" | "octal" => 8,
+        "dec" | "decimal" => 10,
+        "hex" | "hexadecimal" => 16,
+        "duo" | "duodecimal" => 12,
+        "roman" => base::ROMAN_NUMERALS,
+        "sexa" | "sexagesimal" => base::SEXAGESIMAL,
+        "time" => base::TIME,
+        _ => return None,
+    })
 }

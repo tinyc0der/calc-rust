@@ -45,6 +45,8 @@ pub enum Tok {
     Comma,
     Semicolon,
     Colon,
+    /// `p` in base 16: a binary exponent (`AEp-2` is 174*2^-2).
+    BinExp,
     Equals,
     NotEquals,
     Less,
@@ -87,6 +89,16 @@ pub struct Token {
 /// Tokenize `src`. Unknown characters become part of identifiers so that
 /// unit/variable names with unusual characters survive to name resolution.
 pub fn tokenize(src: &str) -> Vec<Token> {
+    tokenize_with_base(src, 10)
+}
+
+/// [`tokenize`] with an explicit input base.
+///
+/// Only base 16 changes anything: there `A`-`F` are digits rather than the
+/// start of a name, `e` is a digit rather than a scientific exponent, and `p`
+/// is the binary-exponent operator of `Calculator::parseOperators`
+/// (Calculator-parse.cc:6322) — `AEp-2` is 174*2^-2 and a bare `p23` is 2^23.
+pub fn tokenize_with_base(src: &str, base: i32) -> Vec<Token> {
     let mut out = Vec::new();
     let chars: Vec<char> = src.chars().collect();
     // Byte offsets for each char index, so `pos` refers to the source string.
@@ -118,7 +130,13 @@ pub fn tokenize(src: &str) -> Vec<Token> {
         let pos = offsets[i];
         let start = i;
         let join_digit_groups = paren_stack.is_empty() || parens > 0;
-        let tok = if c.is_ascii_digit() || (c == '.' && dot_starts_number(&chars, i)) {
+        let tok = if base == 16 && hex_number_ahead(&chars, i) {
+            let s = lex_hex_number(&chars, &mut i);
+            Tok::Number(s)
+        } else if base == 16 && c == 'p' && bin_exponent_ahead(&chars, i) {
+            i += 1;
+            Tok::BinExp
+        } else if c.is_ascii_digit() || (c == '.' && dot_starts_number(&chars, i)) {
             let s = lex_number(&chars, &mut i, join_digit_groups);
             Tok::Number(s)
         } else if c == '"' || c == '\'' {
@@ -188,6 +206,55 @@ pub fn tokenize(src: &str) -> Vec<Token> {
         space_before,
     });
     out
+}
+
+/// The maximal run of name characters starting at `i`.
+fn ident_run(chars: &[char], i: usize) -> usize {
+    let mut j = i;
+    while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '.') {
+        j += 1;
+    }
+    j
+}
+
+/// In base 16, does a hexadecimal literal start here?
+///
+/// A run is only read as a number when *every* character of it is a hex digit,
+/// so `abs` stays a function name even though `a` and `b` are digits. A
+/// trailing `p` is allowed because it ends the mantissa.
+fn hex_number_ahead(chars: &[char], i: usize) -> bool {
+    let end = ident_run(chars, i);
+    if end == i {
+        return false;
+    }
+    let mut body = &chars[i..end];
+    if body.last() == Some(&'p') && body.len() > 1 {
+        body = &body[..body.len() - 1];
+    }
+    body
+        .iter()
+        .all(|c| c.is_ascii_hexdigit() || *c == '.')
+        && body.iter().any(|c| c.is_ascii_hexdigit())
+}
+
+/// In base 16, is the `p` at `i` a binary exponent rather than a name?
+fn bin_exponent_ahead(chars: &[char], i: usize) -> bool {
+    let mut j = i + 1;
+    if j < chars.len() && (chars[j] == '+' || chars[j] == '-') {
+        j += 1;
+    }
+    j < chars.len() && chars[j].is_ascii_digit()
+}
+
+/// The mantissa of a base-16 literal: hex digits and a decimal point, ending
+/// before any `p`.
+fn lex_hex_number(chars: &[char], i: &mut usize) -> String {
+    let mut s = String::new();
+    while *i < chars.len() && (chars[*i].is_ascii_hexdigit() || chars[*i] == '.') {
+        s.push(chars[*i]);
+        *i += 1;
+    }
+    s
 }
 
 /// Lex a numeric literal: digits, a decimal point, base prefixes, and
@@ -626,5 +693,42 @@ mod tests {
         assert_eq!(t[0].pos, 0);
         assert_eq!(t[1].tok, Tok::Plus);
         assert_eq!(t[1].pos, 'π'.len_utf8());
+    }
+}
+
+#[cfg(test)]
+mod hex_input_tests {
+    use super::*;
+
+    fn toks16(s: &str) -> Vec<Tok> {
+        tokenize_with_base(s, 16).into_iter().map(|t| t.tok).collect()
+    }
+
+    fn toks10(s: &str) -> Vec<Tok> {
+        tokenize(s).into_iter().map(|t| t.tok).collect()
+    }
+
+    #[test]
+    fn hex_digits_and_binary_exponents() {
+        assert_eq!(
+            toks16("AEp-2"),
+            vec![
+                Tok::Number("AE".into()),
+                Tok::BinExp,
+                Tok::Minus,
+                Tok::Number("2".into()),
+                Tok::Eof
+            ]
+        );
+        // A bare `p23` is 2^23, so the exponent marker leads.
+        assert_eq!(
+            toks16("p23"),
+            vec![Tok::BinExp, Tok::Number("23".into()), Tok::Eof]
+        );
+        // A name whose characters are not *all* hex digits stays a name, so
+        // functions keep working while the input base is 16.
+        assert_eq!(toks16("abs"), vec![Tok::Ident("abs".into()), Tok::Eof]);
+        // ...and in base 10 none of this applies.
+        assert_eq!(toks10("p23"), vec![Tok::Ident("p23".into()), Tok::Eof]);
     }
 }
