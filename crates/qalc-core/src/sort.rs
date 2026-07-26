@@ -187,6 +187,17 @@ fn addition_type_rank(m: &MathStructure) -> u8 {
 /// placed before `b`.
 fn addition_compare(a: &MathStructure, b: &MathStructure, minus_last: bool) -> std::cmp::Ordering {
     use std::cmp::Ordering;
+    // "always place constant of definite integral last" (sortCompare,
+    // MathStructure-print.cc): the `C` an indefinite integral appends is an
+    // unknown variable, so the degree rules would otherwise pull it forward
+    // past `ln(|x|)`.
+    let is_c = |m: &MathStructure| matches!(m, MathStructure::Symbolic(s) if s == "C");
+    if is_c(a) && !is_c(b) {
+        return Ordering::Greater;
+    }
+    if is_c(b) && !is_c(a) {
+        return Ordering::Less;
+    }
     if minus_last {
         let (m1, m2) = (has_negative_sign(a), has_negative_sign(b));
         if m1 && !m2 {

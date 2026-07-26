@@ -120,6 +120,9 @@ pub fn calculate_function_exact(m: &mut MathStructure, exact: bool) -> bool {
     if crate::limit::calculate_function(m) {
         return true;
     }
+    if crate::integrate::calculate_function(m) {
+        return true;
+    }
     if crate::solve::calculate_function(m) {
         return true;
     }
@@ -567,6 +570,7 @@ pub fn function_id_for_name(name: &str) -> Option<FunctionId> {
             return crate::matrix::function_id_for_name(name)
                 .or_else(|| crate::differentiate::function_id_for_name(name))
                 .or_else(|| crate::limit::function_id_for_name(name))
+                .or_else(|| crate::integrate::function_id_for_name(name))
                 .or_else(|| crate::polynomial::function_id_for_name(name))
                 .or_else(|| crate::solve::function_id_for_name(name))
                 .or_else(|| crate::explog::function_id_for_name(name))

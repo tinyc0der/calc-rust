@@ -13,6 +13,7 @@ pub mod eval;
 pub mod explog;
 pub mod geometry;
 pub mod ids;
+pub mod integrate;
 pub mod lexer;
 pub mod limit;
 pub mod matrix;
