@@ -47,8 +47,14 @@ impl Number {
             }
         }
         // Rational exponent num/den: try exact root then integer power.
-        if let (RealValue::Rational(_), RealValue::Rational(oe)) = (&self.value, &o.value) {
-            if try_exact && !oe.denom().is_one() {
+        //
+        // Only for a non-negative base. `^` takes the PRINCIPAL root, which
+        // for a negative base is complex — the reference gives
+        // `(-8)^(1/3)` = 1 + 1.732…i — whereas `cbrt(-8)` and `root(-8, 3)`
+        // give the real root -2. Taking the exact real root here would
+        // silently answer the wrong question.
+        if let (RealValue::Rational(base_r), RealValue::Rational(oe)) = (&self.value, &o.value) {
+            if try_exact && !oe.denom().is_one() && !base_r.is_negative() {
                 if let Some(den) = oe.denom().to_u32() {
                     let mut base = self.clone();
                     if base.exact_root(den) {
@@ -209,9 +215,30 @@ impl Number {
                 return true;
             }
         }
-        // General complex power — needs ln/exp; wired up once the
-        // transcendental module lands.
-        false
+        // General complex power: z^w = exp(w * ln z), with ln and exp
+        // handling their own complex cases. The principal branch is used,
+        // matching the reference.
+        if self.is_zero() {
+            // 0^w is zero for a positive real exponent, undefined otherwise.
+            if o.has_imaginary_part() || !o.real_part_is_positive() {
+                return false;
+            }
+            self.clear(true);
+            return true;
+        }
+        let mut l = self.clone();
+        if !l.ln() {
+            return false;
+        }
+        if !l.multiply(o) {
+            return false;
+        }
+        if !l.exp() {
+            return false;
+        }
+        *self = l;
+        self.set_precision_and_approximate_from(o);
+        true
     }
 
     /// Try to take an exact `n`-th root of a rational; self unchanged on
@@ -464,6 +491,32 @@ mod tests {
         // 1.414... between 1.4 and 1.5
         assert!(n.is_greater_than(&Number::from_ints(14, 10, 0)));
         assert!(n.is_less_than(&Number::from_ints(15, 10, 0)));
+    }
+
+    #[test]
+    fn general_complex_power() {
+        // i^i = e^(-pi/2) = 0.2078795764, a real value.
+        let mut z = Number::new();
+        z.set_imaginary_part(&Number::from_i64(1));
+        let w = z.clone();
+        assert!(z.raise(&w, true));
+        assert!(z.is_greater_than(&Number::from_ints(2078, 10000, 0)));
+        assert!(z.is_less_than(&Number::from_ints(2079, 10000, 0)));
+
+        // A real base with a complex exponent stays finite.
+        let mut b = Number::from_i64(2);
+        let mut e = Number::from_i64(1);
+        e.set_imaginary_part(&Number::from_i64(1));
+        assert!(b.raise(&e, true));
+        assert!(b.is_complex());
+    }
+
+    #[test]
+    fn negative_base_fractional_exponent_is_complex() {
+        // (-8)^(1/3) takes the principal root, which is complex.
+        let mut n = Number::from_i64(-8);
+        assert!(n.raise(&Number::from_ints(1, 3, 0), true));
+        assert!(n.is_complex(), "principal cube root of -8 is complex");
     }
 
     #[test]
