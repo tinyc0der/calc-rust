@@ -72,10 +72,15 @@ fn apply_conversion(m: &mut MathStructure, po: &mut PrintOptions) -> Result<(), 
 /// resolved function can expose a new merge, and a merge can complete a
 /// function's arguments).
 pub fn evaluate(m: &mut MathStructure) {
-    let eo = EvaluationOptions::default();
     // Percent markers become concrete arithmetic before any merging, since
     // a percent inside a sum depends on the sum's term order.
     crate::percent::apply(m);
+    evaluate_calculated(m);
+}
+
+/// The evaluation loop proper, with percent rewriting already done.
+pub fn evaluate_calculated(m: &mut MathStructure) {
+    let eo = EvaluationOptions::default();
     for _ in 0..MAX_EVAL_PASSES {
         let functions_changed = builtins::calculate_functions(m);
         let merged = m.calculatesub(&eo);
@@ -83,6 +88,8 @@ pub fn evaluate(m: &mut MathStructure) {
             break;
         }
     }
+    // Canonical ordering, as the C++ does in evalSort before printing.
+    crate::sort::sort(m);
 }
 
 /// Guard against a pathological rewrite cycle.

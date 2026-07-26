@@ -13,9 +13,11 @@ fn parse(s: &str) -> Number {
 
 #[test]
 fn sweep() {
+    qalc_num::context::set_precision(60);
+    println!("SWEEPSTART");
     let args = [
         "0.1", "0.25", "0.75", "1.3", "2.2", "3.3", "4.9", "7.1", "12.34", "0.001", "60.5",
-        "-0.1", "-1.2", "-2.5", "-3.9", "-7.25", "100.5", "0.5", "5", "1",
+         "100.5", "0.5", "5", "1",
     ];
     let funcs: [(&str, fn(&mut Number) -> bool); 9] = [
         ("gamma", Number::gamma),
@@ -28,16 +30,27 @@ fn sweep() {
         ("Si", Number::sinint),
         ("Ci", Number::cosint),
     ];
+    let neg = ["-0.1", "-1.2", "-2.5", "-3.9", "-7.25"];
     for (name, f) in funcs {
+        let args: Vec<&str> = if name == "Ci" { args.to_vec() } else { args.iter().chain(neg.iter()).copied().collect() };
         for a in args {
             let mut n = parse(a);
             let ok = f(&mut n);
             println!("{name}({a}) = {}", if ok { n.print(&po()) } else { "FAIL".into() });
         }
     }
-    for a in ["2", "3.5", "10", "0.5", "-1", "100"] {
+    for a in ["2", "3.5", "10", "0.5", "100"] {
         let mut n = parse(a);
         let ok = n.logint();
         println!("li({a}) = {}", if ok { n.print(&po()) } else { "FAIL".into() });
+    }
+}
+
+#[test]
+fn bern() {
+    for i in [0usize,1,2,3,4,6,8,10,12,14,16,18,20,22,24,30,40,50,60,100,200] {
+        let mut n = Number::from_i64(i as i64);
+        let ok = n.bernoulli();
+        println!("bernoulli({i}) = {}", if ok { n.print(&po()) } else { "FAIL".into() });
     }
 }

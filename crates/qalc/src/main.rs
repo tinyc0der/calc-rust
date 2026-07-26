@@ -9,7 +9,7 @@ mod batch;
 use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
 
-use qalc_core::evaluate_to_string;
+use qalc_core::Session;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -41,7 +41,8 @@ fn main() -> ExitCode {
 
     if !expression.is_empty() {
         let expr = expression.join(" ");
-        match evaluate_to_string(&expr) {
+        let mut session = Session::new();
+        match session.evaluate_line(&expr) {
             Ok(s) => {
                 println!("{s}");
                 return ExitCode::SUCCESS;
@@ -67,6 +68,7 @@ fn print_usage() {
 
 /// Read-eval-print loop over stdin.
 fn repl() -> ExitCode {
+    let mut session = Session::new();
     let stdin = io::stdin();
     let mut out = io::stdout();
     let interactive = std::io::IsTerminal::is_terminal(&stdin);
@@ -79,7 +81,7 @@ fn repl() -> ExitCode {
         if line == "quit" || line == "exit" {
             break;
         }
-        match evaluate_to_string(line) {
+        match session.evaluate_line(line) {
             Ok(s) => {
                 let _ = writeln!(out, "{s}");
             }
@@ -109,7 +111,10 @@ fn run_test_file(path: &str) -> ExitCode {
         println!("WARNING: 0 tests were run (indentation needs to be tab-based)");
         return ExitCode::FAILURE;
     }
-    let report = batch::run_transcript(path, &transcript, |expr| evaluate_to_string(expr));
+    // One session per file: transcripts carry state across lines (`alpha := 5`
+    // then `alpha`), which is why variables.batch works at all.
+    let mut session = Session::new();
+    let report = batch::run_transcript(path, &transcript, |expr| session.evaluate_line(expr));
 
     for (case, outcome) in report.failures() {
         match outcome {
