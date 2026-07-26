@@ -219,6 +219,7 @@ fn lex_number(chars: &[char], i: &mut usize, join_digit_groups: bool) -> String 
     // Whitespace inside a run of number characters is a separator and is
     // discarded, so `1 . 5` is 1.5, `2 3` is 23 and `1 2 + 3` is 15 — all
     // verified against the reference binary.
+    let mut seen_colon = false;
     loop {
         while *i < chars.len() && (chars[*i].is_ascii_digit() || chars[*i] == '.') {
             s.push(chars[*i]);
@@ -236,10 +237,25 @@ fn lex_number(chars: &[char], i: &mut usize, join_digit_groups: bool) -> String 
                 || (chars[j] == '.'
                     && !is_element_wise_op(chars, j)
                     && !dot_is_operator(chars, j)));
-        if !continues {
-            break;
+        if continues {
+            *i = j;
+            continue;
         }
-        *i = j;
+        // A colon between digits is the sexagesimal separator (`10:31` is
+        // 10+31/60). `Number::set` rejects one that follows a decimal point,
+        // so the run ends at the first `.` unless a colon already opened a
+        // sexagesimal number, where later sections may carry decimals.
+        if *i < chars.len()
+            && chars[*i] == ':'
+            && chars.get(*i + 1).is_some_and(|c| c.is_ascii_digit())
+            && (seen_colon || !s.contains('.'))
+        {
+            seen_colon = true;
+            s.push(':');
+            *i += 1;
+            continue;
+        }
+        break;
     }
     // Scientific exponent: E/e followed by optional sign and digits.
     if *i < chars.len() && matches!(chars[*i], 'e' | 'E') {
@@ -502,6 +518,24 @@ mod tests {
                 Tok::Eof
             ]
         );
+    }
+
+    #[test]
+    fn sexagesimal_colons_stay_inside_the_number() {
+        assert_eq!(toks("10:31"), vec![Tok::Number("10:31".into()), Tok::Eof]);
+        assert_eq!(toks("1:2:3:4"), vec![Tok::Number("1:2:3:4".into()), Tok::Eof]);
+        // A colon after a decimal point is not a sexagesimal separator.
+        assert_eq!(
+            toks("1.5:30"),
+            vec![
+                Tok::Number("1.5".into()),
+                Tok::Colon,
+                Tok::Number("30".into()),
+                Tok::Eof
+            ]
+        );
+        // `:=` must survive as an assignment operator.
+        assert!(matches!(toks("a := 5")[1], Tok::Assign | Tok::Colon));
     }
 
     #[test]

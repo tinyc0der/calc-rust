@@ -295,8 +295,27 @@ impl Number {
                     in_decimals = true;
                 }
             } else if c == b':' {
-                // TODO(port): sexagesimal ':' notation (recursive parse with
-                // successive division by 60) — Number.cc:1076. Ignored for now.
+                // Sexagesimal notation (Number.cc:1076): each colon-separated
+                // section after the first is worth a further sixtieth, so
+                // `10:31` is 10 + 31/60 and `1:2:3:4` is
+                // 1 + 2/60 + 3/3600 + 4/216000. A colon after a decimal point
+                // is not sexagesimal — the C++ reports an error and drops it —
+                // so this only fires while `in_decimals` is false, and it
+                // consumes the whole string rather than continuing the scan.
+                if !in_decimals {
+                    self.clear(false);
+                    self.precision = -1;
+                    let mut divisor = Number::from_i64(1);
+                    for section in number.split(':') {
+                        let mut part = Number::parse(section, po);
+                        if !part.is_zero() {
+                            part.divide(&divisor);
+                            self.add(&part);
+                        }
+                        divisor.multiply_i64(60);
+                    }
+                    return;
+                }
             } else if !numbers_started && c == b'-' {
                 minus = !minus;
             } else if c == b'i' {
