@@ -719,6 +719,18 @@ fn join_factors(factors: &[MathStructure], po: &PrintOptions, depth: usize) -> S
     out
 }
 
+
+/// Would this factor's printed form begin with a digit? Juxtaposing it after
+/// a number would merge the two into one unreadable literal.
+fn starts_with_digit(m: &MathStructure) -> bool {
+    match m {
+        MathStructure::Number(_) => true,
+        MathStructure::Power { base, .. } => starts_with_digit(base),
+        MathStructure::Multiplication(v) => v.first().is_some_and(starts_with_digit),
+        _ => false,
+    }
+}
+
 /// Port of `neededMultiplicationSign` for the node types this pass supports.
 fn multiplication_sign(
     prev: &MathStructure,
@@ -761,8 +773,11 @@ fn multiplication_sign(
         | MathStructure::LogicalXor(_)
         | MathStructure::LogicalNot(_)
         | MathStructure::Function { .. } => MulSign::Operator,
-        // A number followed by another number would run together.
-        MathStructure::Number(_) if matches!(this, MathStructure::Number(_)) => MulSign::Operator,
+        // A number followed by anything that starts with a digit would run
+        // together: `0.5 * 2^x`, not `0.52^x`. The reference uses an
+        // explicit operator for both a bare number and a power over a
+        // numeric base.
+        MathStructure::Number(_) if starts_with_digit(this) => MulSign::Operator,
         _ => MulSign::None,
     }
 }

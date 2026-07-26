@@ -432,7 +432,7 @@ fn together(m: &MathStructure, depth: usize) -> (MathStructure, MathStructure) {
             }
             (add(sum), den)
         }
-        MathStructure::Multiplication(v) if true => {
+        MathStructure::Multiplication(v) => {
             let parts: Vec<(MathStructure, MathStructure)> =
                 v.iter().map(|t| together(t, depth + 1)).collect();
             if parts.iter().all(|(_, d)| is_one(d)) {
@@ -1164,6 +1164,11 @@ fn lim_power(
         // A non-zero finite base needs no sign information about the
         // exponent: `(x+1)^(1/z)` at 0 is simply `1`.
         if let Lim::Val(v) = &lb {
+            if v.is_one() {
+                // `1^k = 1`; the merge engine leaves a symbolic exponent
+                // (`1^(1/y)`) alone.
+                return Some(Lim::Val(num(1)));
+            }
             if !is_zero_expr(v) {
                 return Some(Lim::Val(evd(pow(v.clone(), k))));
             }
@@ -1187,8 +1192,8 @@ fn lim_power(
                     Some(Lim::inf_with(if flip { -1 } else { 1 }))
                 }
             }
+            // A non-zero finite base was already returned above.
             Lim::Val(v) => Some(Lim::Val(evd(pow(v, k)))),
-            #[allow(unreachable_patterns)]
             Lim::Pos => Some(if ks > 0 {
                 Lim::Pos
             } else if ks == 0 {
@@ -2130,10 +2135,52 @@ mod tests {
     }
 
     #[test]
-    fn one_sided_and_undefined_forms_do_not_hang() {
-        // A sign-flipping pole has no two-sided limit; the call is left
-        // unevaluated rather than guessed.
-        let s = lm("limit(1/x,0)");
-        assert!(s.contains("limit") || s.contains("infinity"), "got {s}");
+    fn one_sided_limits_follow_the_approach_argument() {
+        // `limit(expr, value, x, approach)` — argument 4 is -1/0/1.
+        assert_eq!(lm("limit(1/x,0,x,1)"), "+infinity");
+        assert_eq!(lm("limit(1/x,0,x,-1)"), "-infinity");
+        assert_eq!(lm("limit(ln(x),0,x,1)"), "-infinity");
+        // A one-sided argument does not disturb an ordinary limit.
+        assert_eq!(lm("limit((x^2-4)/(x-2),2,x,1)"), "4");
+    }
+
+    #[test]
+    fn a_sign_flipping_pole_has_no_two_sided_limit() {
+        // The reference leaves the call unevaluated rather than guessing.
+        assert_eq!(lm("limit(1/x,0)"), "limit(1 / x, 0)");
+    }
+
+    #[test]
+    fn nested_indeterminate_powers() {
+        assert_eq!(lm("limit((1-sin(x)/x)^(1/ln(x)),0)"), "e^2");
+        assert_eq!(lm("limit((e^x+x)^(1/x),0)"), "e^2");
+    }
+
+    #[test]
+    fn logarithm_differences_combine() {
+        assert_eq!(lm("limit(x*(ln(x+3)-ln(x)),infinity)"), "3");
+        assert_eq!(lm("limit((x+1)*(ln(x+1)-ln(x)),infinity)"), "1");
+    }
+
+    #[test]
+    fn a_long_exact_fraction_prints_as_a_decimal() {
+        // 3^30/2^30 has 15 digits over 10; the reference switches to the
+        // decimal form at precision + 3 digits.
+        assert_eq!(
+            lm("limit(((2x-3)^20*(3x+2)^30)/(2x+1)^50,-infinity)"),
+            "191751.0592"
+        );
+    }
+
+    #[test]
+    fn symbolic_exponents_survive() {
+        assert_eq!(lm("limit((1-x^(1/z))/(1-x^(1/y)),1)"), "y / z");
+    }
+
+    #[test]
+    fn inverse_trigonometric_limits() {
+        assert_eq!(lm("limit(asin(5x)/(3x),0)"), "5/3");
+        assert_eq!(lm("limit(acot(x)/(x^2-x),infinity)"), "0");
+        assert_eq!(lm("limit(sqrt(pi/2-atan(1/(x-1)^2)),1)"), "0");
     }
 }
