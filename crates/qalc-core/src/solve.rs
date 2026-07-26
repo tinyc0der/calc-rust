@@ -2031,8 +2031,9 @@ pub fn secant_solve(
     let mut fa = eval_at(expr, xvar, &a)?;
     let mut fb = eval_at(expr, xvar, &b)?;
     // Every arithmetic failure ends the iteration rather than the whole
-    // solve: once the secant has converged, `f(b) - f(a)` underflows and the
-    // step can no longer be formed, but `b` is already the root.
+    // solve: once the secant has converged, `f(b) - f(a)` can underflow and
+    // the step can no longer be formed, but `b` is already the root. The
+    // iteration otherwise stops on the relative step size (`converged`).
     for _ in 0..200 {
         let mut denom = fb.clone();
         if !denom.subtract(&fa) || denom.is_zero() {
@@ -2060,13 +2061,40 @@ pub fn secant_solve(
         if fb.is_zero() {
             break;
         }
-        let mut mag = step.clone();
-        mag.abs();
-        if mag.is_less_than(&Number::from_ints(1, 1, -40)) {
+        if converged(&step, &b) {
             break;
         }
     }
     Some(b)
+}
+
+/// The convergence test of `NewtonRaphsonFunction::calculate`
+/// (`BuiltinFunctions-algebra.cc:1544`): the step is divided by the iterate
+/// and the *relative* size compared against
+/// `nr_prec = 10^-(PRECISION - arg4)`, with the default fourth argument
+/// `-10`. A zero iterate falls back to the absolute size, as it does there.
+///
+/// The test has to be relative. An absolute floor cannot be reached: once the
+/// iteration has converged the step is pure rounding noise, whose size is set
+/// by the working precision (about `1e-30` for a root of order one), and
+/// every further step then *widens* the result — `newtonsolve(Ei(x) = 3i, 1)`
+/// converges by the thirteenth iteration and drifts back out to `-1.7 + 0.5i`
+/// by the two hundredth. The real cases hid this: there `f(b) - f(a)`
+/// underflows to zero at convergence, which ends the loop by itself, but a
+/// complex `f` keeps producing a nonzero difference indefinitely.
+fn converged(step: &Number, x: &Number) -> bool {
+    let mut mag = step.clone();
+    if !mag.abs() {
+        return false;
+    }
+    let mut tol = Number::from_ints(1, 1, -(qalc_num::context::precision() as i64 + 10));
+    if !x.is_zero() {
+        let mut scale = x.clone();
+        if !scale.abs() || !tol.multiply(&scale) {
+            return false;
+        }
+    }
+    mag.is_less_than(&tol)
 }
 
 /// Newton iteration using a numeric derivative (the C++ uses the symbolic
@@ -2438,5 +2466,21 @@ mod tests {
     fn secant_and_newton_converge_on_a_special_function() {
         assert_eq!(ap("newtonsolve(Ei(x) = 3, 1)"), "1.397510842");
         assert_eq!(ap("secantsolve(Ei(x) = 3, 1, 4)"), "1.397510842");
+    }
+
+    #[test]
+    fn newton_stops_when_the_relative_step_is_negligible() {
+        // A complex right-hand side takes the iterates off the real line, and
+        // `f(b) - f(a)` then never underflows the way it does for a real root
+        // — without the relative convergence test the iteration converges by
+        // the thirteenth step and drifts back out over the next hundred.
+        assert_eq!(
+            ap("newtonsolve(Ei(x) = 3i, 1)"),
+            "\u{2212}1.160849461 + 1.034283360i"
+        );
+        assert_eq!(
+            ap("secantsolve(Ei(x) = 3i, 1, 2)"),
+            "\u{2212}1.160849461 + 1.034283360i"
+        );
     }
 }
