@@ -10,6 +10,7 @@
 
 mod arith;
 mod compare;
+mod complexfn;
 mod convert;
 mod parse;
 mod pow;

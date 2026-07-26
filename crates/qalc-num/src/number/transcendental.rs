@@ -254,7 +254,7 @@ impl Number {
     /// `sinh()` — monotone increasing.
     pub fn sinh(&mut self) -> bool {
         if self.has_imaginary_part() {
-            return false; // TODO(port): complex sinh
+            return self.sinh_complex();
         }
         if self.is_infinite(true) {
             return true;
@@ -268,7 +268,7 @@ impl Number {
     /// `cosh()` — decreasing on (−∞,0], increasing on [0,∞).
     pub fn cosh(&mut self) -> bool {
         if self.has_imaginary_part() {
-            return false; // TODO(port): complex cosh
+            return self.cosh_complex();
         }
         if self.is_infinite(true) {
             self.value = RealValue::PlusInfinity;
@@ -312,7 +312,7 @@ impl Number {
     /// `tanh()` — monotone increasing.
     pub fn tanh(&mut self) -> bool {
         if self.has_imaginary_part() {
-            return false; // TODO(port): complex tanh
+            return self.tanh_complex();
         }
         if self.is_plus_infinity() {
             *self = Number::from_i64(1);
@@ -333,7 +333,7 @@ impl Number {
     /// `asin()` — monotone increasing on [−1,1].
     pub fn asin(&mut self) -> bool {
         if self.has_imaginary_part() {
-            return false; // TODO(port): complex asin
+            return self.asin_complex();
         }
         if self.is_zero() {
             return true;
@@ -341,7 +341,8 @@ impl Number {
         let one = Number::from_i64(1);
         let mone = Number::from_i64(-1);
         if self.is_greater_than(&one) || self.is_less_than(&mone) {
-            return false; // TODO(port): complex result
+            // Outside [-1, 1] the result is complex.
+            return self.asin_complex();
         }
         self.apply_monotone(|x, p, rm, cc| x.asin(p, rm, cc))
     }
@@ -349,7 +350,7 @@ impl Number {
     /// `acos()` — monotone decreasing on [−1,1].
     pub fn acos(&mut self) -> bool {
         if self.has_imaginary_part() {
-            return false; // TODO(port): complex acos
+            return self.acos_complex();
         }
         let one = Number::from_i64(1);
         let mone = Number::from_i64(-1);
@@ -381,7 +382,7 @@ impl Number {
     /// `atan()` — monotone increasing.
     pub fn atan(&mut self) -> bool {
         if self.has_imaginary_part() {
-            return false; // TODO(port): complex atan
+            return self.atan_complex();
         }
         if self.is_zero() {
             return true;
@@ -405,7 +406,7 @@ impl Number {
     /// `asinh()` — monotone increasing.
     pub fn asinh(&mut self) -> bool {
         if self.has_imaginary_part() {
-            return false; // TODO(port): complex asinh
+            return self.asinh_complex();
         }
         if self.is_zero() || self.is_infinite(true) {
             return true;
@@ -416,14 +417,15 @@ impl Number {
     /// `acosh()` — monotone increasing on [1,∞).
     pub fn acosh(&mut self) -> bool {
         if self.has_imaginary_part() {
-            return false; // TODO(port): complex acosh
+            return self.acosh_complex();
         }
         if self.is_plus_infinity() {
             return true;
         }
         let one = Number::from_i64(1);
         if self.is_less_than(&one) {
-            return false; // TODO(port): complex result
+            // Below 1, acosh leaves the reals.
+            return self.acosh_complex();
         }
         if self.is_one() {
             self.clear(true);
@@ -435,7 +437,7 @@ impl Number {
     /// `atanh()` — monotone increasing on (−1,1).
     pub fn atanh(&mut self) -> bool {
         if self.has_imaginary_part() {
-            return false; // TODO(port): complex atanh
+            return self.atanh_complex();
         }
         if self.is_zero() {
             return true;
@@ -443,7 +445,8 @@ impl Number {
         let one = Number::from_i64(1);
         let mone = Number::from_i64(-1);
         if self.is_greater_than(&one) || self.is_less_than(&mone) {
-            return false; // TODO(port): complex result
+            // Outside (-1, 1) the result is complex.
+            return self.atanh_complex();
         }
         self.apply_monotone(|x, p, rm, cc| x.atanh(p, rm, cc))
     }
@@ -729,8 +732,10 @@ mod tests {
         let mut c = Number::from_ints(1, 2, 0);
         assert!(c.acos());
         assert_eq!(c.print(&po_ez()), "1.047197551");
-        let mut bad = Number::from_i64(2);
-        assert!(!bad.asin(), "asin(2) real fails (complex TODO)");
+        // asin(2) now leaves the real domain instead of failing.
+        let mut out = Number::from_i64(2);
+        assert!(out.asin());
+        assert!(out.is_complex());
     }
 
     #[test]
