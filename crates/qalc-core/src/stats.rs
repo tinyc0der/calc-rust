@@ -363,7 +363,15 @@ fn percentile(v: &[Number], p: &Number, variant: i64) -> Option<Number> {
         2 => {
             let ufr = mul(&pfr, &n(len))?;
             if ufr.is_integer() {
-                let lo = ufr.to_i64()? as usize;
+                // The C++ indexes with `uintValue()` and no bounds test; a
+                // percentage outside 0–100 is rejected by the argument
+                // definition long before it gets here, so anything out of
+                // range is left unevaluated rather than indexed.
+                let lo = ufr.to_i64()?;
+                if lo < 1 || lo > len {
+                    return None;
+                }
+                let lo = lo as usize;
                 let mut r = s[lo - 1].clone();
                 if lo + 1 > s.len() {
                     return Some(r);
@@ -419,6 +427,22 @@ fn percentile(v: &[Number], p: &Number, variant: i64) -> Option<Number> {
     add(lo, &mul(&sub(hi, lo)?, &frac)?)
 }
 
+/// An `IntegerArgument` with an inclusive range: a non-integer, a
+/// non-number or an out-of-range value leaves the call unevaluated.
+fn integer_in(m: Option<&M>, min: i64, max: i64) -> Option<i64> {
+    let i = m?.number().filter(|x| x.is_integer())?.to_i64()?;
+    (min..=max).contains(&i).then_some(i)
+}
+
+/// The quantile-method argument shared by `percentile`, `quartile`,
+/// `decile` and `iqr`: an integer in 1–9, defaulting to 7.
+fn quantile_variant(m: Option<&M>) -> Option<i64> {
+    match m {
+        None | Some(M::Undefined) => Some(7),
+        Some(_) => integer_in(m, 1, 9),
+    }
+}
+
 fn index_clamped(q: &Number, len: usize) -> Option<usize> {
     let mut i = q.to_i64()?;
     if i > len as i64 {
@@ -466,6 +490,15 @@ fn max_of(v: &[Number]) -> Option<Number> {
     v.iter()
         .cloned()
         .reduce(|a, b| if b.is_greater_than(&a) { b } else { a })
+}
+
+/// `element(v, i)` — the 1-based lookup the XML formulas use, `None` when
+/// the index falls outside the vector.
+fn nth(v: &[Number], i: i64) -> Option<&Number> {
+    if i < 1 {
+        return None;
+    }
+    v.get(i as usize - 1)
 }
 
 /// `limits(v, from, to)` — the 1-based inclusive slice the XML formulas use.
@@ -961,7 +994,13 @@ fn apply(fid: u32, args: &[M]) -> Option<M> {
         id::PERCENTILE if args.len() >= 2 => {
             let v = number_vector(&args[0])?;
             let p = num(&args[1])?;
-            let variant = args.get(2).and_then(|m| m.number()?.to_i64()).unwrap_or(7);
+            // `NumberArgument` with min 0 and max 100, both inclusive
+            // (BuiltinFunctions-statistics.cc:61); outside that the function
+            // is left unevaluated.
+            if p.is_less_than(&n(0)) || p.is_greater_than(&n(100)) {
+                return None;
+            }
+            let variant = quantile_variant(args.get(2))?;
             percentile(&v, &p, variant).map(M::Number)
         }
         // <expression>percentile(\x,50)</expression>
@@ -972,15 +1011,18 @@ fn apply(fid: u32, args: &[M]) -> Option<M> {
         // <expression>percentile(\x,25*\y,\Z{7})</expression>
         id::QUARTILE | id::DECILE if args.len() >= 2 => {
             let v = number_vector(&args[0])?;
-            let step = if fid == id::QUARTILE { 25 } else { 10 };
-            let p = mul(&n(step), &num(&args[1])?)?;
-            let variant = args.get(2).and_then(|m| m.number()?.to_i64()).unwrap_or(7);
+            // `<argument type="integer">` with min 0 and max 4 (quartile) or
+            // 10 (decile), so the percentage handed on stays within 0–100.
+            let (step, max_k) = if fid == id::QUARTILE { (25, 4) } else { (10, 10) };
+            let k = integer_in(args.get(1), 0, max_k)?;
+            let p = mul(&n(step), &n(k))?;
+            let variant = quantile_variant(args.get(2))?;
             percentile(&v, &p, variant).map(M::Number)
         }
         // <expression>quartile(\x,3,\Y{7})-quartile(\x,1,\Y{7})</expression>
         id::IQR => {
             let v = number_vector(args.first()?)?;
-            let variant = args.get(1).and_then(|m| m.number()?.to_i64()).unwrap_or(7);
+            let variant = quantile_variant(args.get(1))?;
             let hi = percentile(&v, &n(75), variant)?;
             let lo = percentile(&v, &n(25), variant)?;
             sub(&hi, &lo).map(M::Number)
@@ -1042,7 +1084,7 @@ fn apply(fid: u32, args: &[M]) -> Option<M> {
             let s = sorted(&v);
             let dim = n(v.len() as i64);
             let per = div(&dim, &n(100))?;
-            let lo = rounded(&mul(&per, &p)?)? + 1;
+            let lo = rounded(&mul(&per, &p)?)?.checked_add(1)?;
             let hi = rounded(&mul(&per, &sub(&n(100), &p)?)?)?;
             mean(&slice(&s, lo, hi)).map(M::Number)
         }
@@ -1053,8 +1095,11 @@ fn apply(fid: u32, args: &[M]) -> Option<M> {
             let s = sorted(&v);
             let dim = v.len() as i64;
             let k = rounded(&mul(&div(&n(dim), &n(100))?, &p)?)?;
-            let hi_el = s.get((dim - k) as usize - 1)?;
-            let lo_el = s.get(k as usize)?;
+            // `element(\1,\2-\3)` and `element(\1,\3+1)`: a winsorized share
+            // that trims the whole vector puts these indices outside it, so
+            // the call stays unevaluated instead of wrapping around.
+            let hi_el = nth(&s, dim.checked_sub(k)?)?;
+            let lo_el = nth(&s, k.checked_add(1)?)?;
             let kn = n(k);
             let inner = total(&slice(&s, k + 1, dim - k))?;
             let sum = add(&add(&mul(hi_el, &kn)?, &mul(lo_el, &kn)?)?, &inner)?;
@@ -1317,6 +1362,54 @@ mod tests {
         // var divides by n-1, varp by n.
         assert_eq!(ev("var(5; 6; 4; 2; 3; 7)"), "3.5");
         assert_eq!(ev("varp(5; 6; 4; 2; 3; 7)"), "2.916666667");
+    }
+
+    /// A percentage outside 0–100 fails `percentile`'s `NumberArgument`
+    /// range, so the reference leaves the call unevaluated instead of
+    /// indexing past the end of the sorted vector.
+    #[test]
+    fn percentile_rejects_percentages_outside_zero_to_hundred() {
+        assert_eq!(ev("percentile([1,2,3], 200, 2)"), "percentile([1  2  3], 200, 2)");
+        assert_eq!(ev("percentile([1,2,3], -100, 2)"), "percentile([1  2  3], -100, 2)");
+        assert_eq!(ev("percentile([1,2,3], 100.5, 2)"), "percentile([1  2  3], 100.5, 2)");
+        assert_eq!(ev("percentile([1,2,3], 1e20, 2)"), "percentile([1  2  3], 1E20, 2)");
+        // The endpoints themselves are inside the range.
+        assert_eq!(ev("percentile([1,2,3], 0, 2)"), "1");
+        assert_eq!(ev("percentile([1,2,3], 100, 2)"), "3");
+    }
+
+    /// `quartile`'s second argument is an integer 0–4 and `decile`'s an
+    /// integer 0–10; anything else would scale to a percentage out of range.
+    #[test]
+    fn quartile_and_decile_reject_out_of_range_indices() {
+        assert_eq!(ev("quartile([1,2,3], 8, 2)"), "quartile([1  2  3], 8, 2)");
+        assert_eq!(ev("quartile([1,2,3], -1, 2)"), "quartile([1  2  3], -1, 2)");
+        assert_eq!(ev("quartile([1,2,3], 2.5, 2)"), "quartile([1  2  3], 2.5, 2)");
+        assert_eq!(ev("decile([1,2,3], 30, 2)"), "decile([1  2  3], 30, 2)");
+        assert_eq!(ev("decile([1,2,3], 11)"), "decile([1  2  3], 11)");
+        assert_eq!(ev("quartile([1,2,3], 4, 2)"), "3");
+        assert_eq!(ev("decile([1,2,3], 10, 2)"), "3");
+    }
+
+    /// The quantile method is an integer 1–9 wherever it is accepted.
+    #[test]
+    fn quantile_method_must_be_an_integer_one_to_nine() {
+        assert_eq!(ev("percentile([1,2,3], 50, 20)"), "percentile([1  2  3], 50, 20)");
+        assert_eq!(ev("percentile([1,2,3], 50, 0)"), "percentile([1  2  3], 50, 0)");
+        assert_eq!(ev("percentile([1,2,3], 50, 2.5)"), "percentile([1  2  3], 50, 2.5)");
+        assert_eq!(ev("iqr([1,2,3], 0)"), "iqr([1  2  3], 0)");
+        assert_eq!(ev("iqr([1,2,3], 2.5)"), "iqr([1  2  3], 2.5)");
+        assert_eq!(ev("iqr([1,2,3,4,5], 1)"), "2");
+    }
+
+    /// A winsorized share that trims the whole vector puts
+    /// `element(\1, \2-\3)` outside it; the index must not wrap around.
+    #[test]
+    fn winsormean_with_a_full_trim_stays_unevaluated() {
+        assert_eq!(ev("winsormean([1,2], 100)"), "winsormean([1  2], 100)");
+        assert_eq!(ev("winsormean([1], 100)"), "winsormean(1, 100)");
+        assert_eq!(ev("winsormean([], 10)"), "winsormean([], 10)");
+        assert_eq!(ev("winsormean([1,2,3,4,5,6,7,8,9,10], 20)"), "5.5");
     }
 
     #[test]

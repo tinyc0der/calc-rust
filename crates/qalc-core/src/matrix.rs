@@ -1,10 +1,12 @@
 //! Vector and matrix support — port of `MathStructure-matrixvector.cc` and
 //! `BuiltinFunctions-matrixvector.cc`.
 //!
-//! A matrix is a [`MathStructure::Vector`] whose children are all vectors of
-//! equal, non-zero length (`MathStructure::isMatrix`, MathStructure.cc:714);
-//! any other vector is a flat vector. The two are not separate types, so
-//! nearly every operation here starts by classifying its operand.
+//! A matrix is a non-empty [`MathStructure::Vector`] whose children are all
+//! vectors of equal length (`MathStructure::isMatrix`, MathStructure.cc:714);
+//! any other vector is a flat vector. That length may be zero — `[[],[]]` is
+//! a 2×0 matrix — so a column count is never safe to divide or chunk by. The
+//! two are not separate types, so nearly every operation here starts by
+//! classifying its operand.
 //!
 //! The module owns three things:
 //!
@@ -1048,8 +1050,11 @@ fn concat(args: &[M], vertical: bool) -> Option<M> {
 /// `part(matrix, row1, column1, row2, column2)` — `AreaFunction`
 /// (BuiltinFunctions-matrixvector.cc:577).
 fn area(args: &[M]) -> Option<M> {
-    let g = as_matrix(args.first()?)?;
-    let (nr, nc) = (g.len() as i64, g[0].len() as i64);
+    let a = args.first()?;
+    let g = as_matrix(a)?;
+    // `rows()`/`columns()` of the argument itself: an empty vector has no
+    // rows and no columns, where `as_matrix` gives it one empty row.
+    let (nr, nc) = (rows(a) as i64, columns(a) as i64);
     let idx = |v: Option<&M>, default: i64, len: i64| -> Option<i64> {
         let raw = match v {
             None | Some(M::Undefined) => default,
@@ -1068,15 +1073,33 @@ fn area(args: &[M]) -> Option<M> {
     if r1 <= 0 || r2 <= 0 || c1 <= 0 || c2 <= 0 {
         return None;
     }
-    let (mut r1, mut r2) = (r1.min(r2), r1.max(r2));
-    let (mut c1, mut c2) = (c1.min(c2), c1.max(c2));
-    r1 = r1.min(nr);
-    c1 = c1.min(nc);
-    r2 = r2.min(nr);
-    c2 = c2.min(nc);
-    let out: Vec<Vec<M>> = ((r1 as usize)..=(r2 as usize))
-        .map(|r| ((c1 as usize)..=(c2 as usize)).map(|c| g[r - 1][c - 1].clone()).collect())
-        .collect();
+    let (flip_r, flip_c) = (r2 < r1, c2 < c1);
+    let (r1, r2) = (r1.min(r2), r1.max(r2));
+    let (c1, c2) = (c1.min(c2), c1.max(c2));
+    // The result always has the requested shape: `resizeMatrix` pads it with
+    // zeroes where the request runs off the grid, and a top-left corner that
+    // is outside it altogether gives an all-zero area.
+    let (want_r, want_c) = ((r2 - r1 + 1) as usize, (c2 - c1 + 1) as usize);
+    if want_r.saturating_mul(want_c) > 1_000_000 {
+        return None;
+    }
+    let mut out = vec![vec![num(0); want_c]; want_r];
+    if r1 <= nr && c1 <= nc {
+        for r in r1..=r2.min(nr) {
+            for c in c1..=c2.min(nc) {
+                out[(r - r1) as usize][(c - c1) as usize] =
+                    g[r as usize - 1][c as usize - 1].clone();
+            }
+        }
+    }
+    if flip_r {
+        out.reverse();
+    }
+    if flip_c {
+        for row in out.iter_mut() {
+            row.reverse();
+        }
+    }
     Some(matrix_struct(out))
 }
 
@@ -1192,8 +1215,15 @@ fn rank(args: &[M]) -> Option<M> {
         i = j;
     }
     if flat {
+        // `resizeMatrix(rows, cols)` (BuiltinFunctions-matrixvector.cc:96):
+        // a matrix of empty rows keeps its shape, and `chunks` cannot take a
+        // zero size.
         let cols = g[0].len();
-        let grid: Vec<Vec<M>> = ranks.chunks(cols).map(|c| c.to_vec()).collect();
+        let grid: Vec<Vec<M>> = if cols == 0 {
+            vec![Vec::new(); g.len()]
+        } else {
+            ranks.chunks(cols).map(|c| c.to_vec()).collect()
+        };
         Some(matrix_struct(grid))
     } else {
         Some(M::Vector(ranks))
@@ -1619,6 +1649,33 @@ mod tests {
     fn parts_and_slices() {
         assert_eq!(ev("part([1 2 3; 4 5 6; 7 8 9; 10 11 12], 1, 3, 2, 3)"), "[3; 6]");
         assert_eq!(ev("slice([5, 6, 7, 8, 9], 2, 4)"), "[6  7  8]");
+    }
+
+    /// `AreaFunction` returns exactly the requested shape: whatever falls
+    /// outside the grid is filled with zeroes (`resizeMatrix`, with the
+    /// "expanded with zeroes" notice in the C++), rather than clamped.
+    #[test]
+    fn part_expands_out_of_range_areas_with_zeroes() {
+        // An empty vector has no columns at all, so the whole area is filled.
+        assert_eq!(ev("part([], 1, 1, 1, 1)"), "0");
+        assert_eq!(ev("part([[],[]], 1, 1, 1, 1)"), "0");
+        assert_eq!(ev("part([[1,2],[3,4]], 5, 5, 6, 6)"), "[0  0; 0  0]");
+        assert_eq!(ev("part([[1,2],[3,4]], 1, 1, 3, 3)"), "[1  2  0; 3  4  0; 0  0  0]");
+        assert_eq!(ev("part([1,2,3], 2, 2)"), "[0  0; 2  3]");
+        assert_eq!(ev("part(5, 1, 1, 2, 2)"), "[5  0; 0  0]");
+        // A reversed range still flips the result.
+        assert_eq!(ev("part([[1,2],[3,4]], 1, 2, 2, 1)"), "[2  1; 4  3]");
+        assert_eq!(ev("part([1,2,3], 1, 3, 1, 1)"), "[3  2  1]");
+    }
+
+    /// A matrix of empty rows keeps its shape through `rank()`, where
+    /// splitting the (empty) rank vector into rows of 0 columns would ask
+    /// `chunks` for a zero-sized chunk.
+    #[test]
+    fn rank_of_a_matrix_without_columns() {
+        assert_eq!(ev("rank([[],[]])"), "([], [])");
+        assert_eq!(ev("rank([[],[]], 0)"), "([], [])");
+        assert_eq!(ev("rank([[1,2],[3,4]])"), "[1  2; 3  4]");
     }
 
     #[test]
