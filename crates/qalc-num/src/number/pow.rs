@@ -34,6 +34,19 @@ impl Number {
     }
 
     fn raise_impl(&mut self, o: &Number, try_exact: bool) -> bool {
+        // Infinite base/exponent, *before* the `x^0 = 1` shortcut.
+        //
+        // The reference orders it this way (Number.cc:3832, whose
+        // `!o.isNonZero() -> return false` runs long before its own
+        // `o.isZero()` branch at :3925), which is what leaves `infinity^0`
+        // unevaluated as `(+infinity)^0` rather than answering 1. Taking the
+        // shortcut first would decide the indeterminate form.
+        if (self.is_infinite(true) || o.is_infinite(true))
+            && !self.has_imaginary_part()
+            && !o.has_imaginary_part()
+        {
+            return self.raise_infinite(o);
+        }
         // Handle x^0 and x^1 quickly.
         if o.is_zero() {
             if self.is_zero() {
@@ -52,13 +65,9 @@ impl Number {
         if self.has_imaginary_part() || o.has_imaginary_part() {
             return self.raise_complex(o);
         }
-        // Infinite base/exponent.
-        if self.is_infinite(true) || o.is_infinite(true) {
-            return self.raise_infinite(o);
-        }
         // Exact integer exponent on rational base.
         if let (RealValue::Rational(r), Some(exp)) = (&self.value, o.to_i64()) {
-            if try_exact && exp.unsigned_abs() <= 1_000_000 {
+            if try_exact && exact_power_in_range(r, exp, 1, true) {
                 if exp < 0 && r.is_zero() {
                     return false;
                 }
@@ -116,7 +125,7 @@ impl Number {
             {
                 if base_r.is_negative() && oe.denom().to_u32() == Some(2) {
                     if let Some(num) = oe.numer().to_i64() {
-                        if num != 0 && num.unsigned_abs() <= 1_000_000 {
+                        if num != 0 && exact_power_in_range(base_r, num, 2, true) {
                             // The exponent is in lowest terms, so a
                             // denominator of 2 forces an odd numerator and
                             // `base^num` stays negative.
@@ -165,7 +174,16 @@ impl Number {
         // approximate evaluation mode used by root finding requests, so this
         // has to catch rationals too, not just floats.
         if let Some(exp) = o.to_i64() {
-            if exp != 0 && exp.unsigned_abs() <= 1_000_000 {
+            // A rational base is held to the same size guard as the exact
+            // path above — the repeated squaring here is the *same* exact
+            // computation, so letting it run would undo the guard. A float
+            // base costs a bounded amount per multiplication, so only the
+            // exponent is capped there.
+            let in_range = match &self.value {
+                RealValue::Rational(r) => exact_power_in_range(r, exp, 1, true),
+                _ => exp.unsigned_abs() <= 1_000_000,
+            };
+            if exp != 0 && in_range {
                 let neg = exp < 0;
                 let mut e = exp.unsigned_abs();
                 let mut acc = Number::from_i64(1);
@@ -307,31 +325,35 @@ impl Number {
     }
 
     fn raise_infinite(&mut self, o: &Number) -> bool {
-        // Port of the infinity cases of Number::raise.
-        if self.is_plus_infinity() {
+        // Port of the infinity cases of Number::raise (Number.cc:3832).
+        //
+        // An exponent that is not *known* non-zero is indeterminate against
+        // an infinite base, and a base that is not known non-zero is
+        // indeterminate under an infinite exponent — both `!isNonZero()`
+        // tests in the reference. They are why `infinity^0`, `0^infinity` and
+        // `0^(-infinity)` are left as powers rather than answered.
+        if self.is_infinite(false) {
             if o.real_part_is_negative() {
                 self.clear(true);
                 return true;
             }
-            if o.real_part_is_positive() {
-                return true;
+            if !o.is_nonzero() {
+                return false;
             }
-            return false;
-        }
-        if self.is_minus_infinity() {
-            if o.real_part_is_negative() {
-                self.clear(true);
-                return true;
-            }
-            if o.is_integer() {
+            if self.is_minus_infinity() {
                 if o.is_even() {
                     self.value = RealValue::PlusInfinity;
-                } // odd keeps minus infinity
-                return true;
+                } else if !o.is_integer() {
+                    return false;
+                }
+                // an odd integer keeps minus infinity
             }
-            return false;
+            return true;
         }
         if o.is_plus_infinity() {
+            if !self.is_nonzero() {
+                return false;
+            }
             // x^∞: |x|>1 → ∞; |x|<1 → 0; else undefined.
             let one = Number::from_i64(1);
             let mut a = self.clone();
@@ -352,6 +374,9 @@ impl Number {
             return false;
         }
         if o.is_minus_infinity() {
+            if !self.is_nonzero() {
+                return false;
+            }
             let one = Number::from_i64(1);
             let mut a = self.clone();
             if !a.abs() {
@@ -635,6 +660,42 @@ impl Number {
         self.approx = true;
         self.test_float_result(true)
     }
+}
+
+/// `mpz_sizeinbase(z, 10)` — the decimal length GMP reports.
+///
+/// GMP derives it from the bit count rather than from the digits, so the
+/// answer is the digit count or one more; this reproduces that, including
+/// `sizeinbase(0) == 1`. Nothing here needs the exact digit count — it feeds
+/// a size guard — and matching GMP keeps the guard's boundary where the
+/// reference puts it.
+fn decimal_size(z: &BigInt) -> u64 {
+    let bits = z.magnitude().bits();
+    (bits as f64 * std::f64::consts::LOG10_2) as u64 + 1
+}
+
+/// The reference's exact-power guard (`Number::raise`, Number.cc:4053).
+///
+/// `i_pow` is the exponent's numerator, `i_root` its denominator, and
+/// `length1` the larger decimal length of the base's numerator and
+/// denominator. The result of `base^i_pow` is about `i_pow * length1` digits
+/// long, so all three limits matter and the *product* is the one that bites:
+/// `123456789^200000` has an exponent well inside the limit but would produce
+/// 1.6 million digits, and `(1/3)^1000000` sits exactly on the exponent
+/// bound. The reference declines both and answers from the MPFR float path
+/// instead, in a few hundredths of a second.
+fn exact_power_in_range(base: &BigRational, i_pow: i64, i_root: u64, try_exact: bool) -> bool {
+    let length1 = decimal_size(base.numer()).max(decimal_size(base.denom()));
+    let (limit, root_ok) = if try_exact {
+        (1_000_000i64, i_root < 1_000_000)
+    } else {
+        (1_000i64, i_root <= 3)
+    };
+    root_ok
+        && i_pow < limit
+        && i_pow > -limit
+        && length1 < limit as u64
+        && (i_pow.unsigned_abs()).saturating_mul(length1) < limit as u64
 }
 
 /// The interval hull of a set of real numbers/intervals:

@@ -1,12 +1,17 @@
 //! Number printing — port of `Number::print` (Number.cc:10681-13169) and its
 //! helpers `printMPZ`, `format_number_string`, `add_base_exponent`.
 //!
-//! This pass covers the paths exercised with default options: exact
-//! integers, exact rationals (decimal + fraction formats), infinities,
-//! complex join, and floats via their exact binary-rational value.
-//! TODO(port): interval displays other than SIGNIFICANT_DIGITS/MIDPOINT,
-//! preserve_format ellipses, indicate_infinite_series, two's complement,
-//! special bases, BCD, bijective-26, IEEE-float bases.
+//! Covers exact integers, exact rationals (decimal + fraction formats),
+//! infinities, complex join, floats via their exact binary-rational value,
+//! two's complement, roman numerals, the sexagesimal/time/latitude/longitude
+//! family, and the IEEE-754 bit-string bases (FP16..FP128).
+//!
+//! Interval displays: SIGNIFICANT_DIGITS, PLUSMINUS, LOWER and UPPER are
+//! implemented; MIDPOINT, INTERVAL, CONCISE and RELATIVE are not.
+//!
+//! TODO(port): MIDPOINT/INTERVAL/CONCISE/RELATIVE interval displays,
+//! preserve_format ellipses, indicate_infinite_series, BCD (`BASE_BINARY_DECIMAL`),
+//! bijective-26, and the Unicode/golden-ratio/pi/e/sqrt2 bases.
 
 use super::{Number, RealValue};
 use crate::context;
