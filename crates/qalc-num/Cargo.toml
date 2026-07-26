@@ -1,0 +1,13 @@
+[package]
+name = "qalc-num"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Arbitrary-precision numeric core for rust-calc (GMP/MPFR replacement, pure Rust)"
+
+[dependencies]
+astro-float = "0.9.5"
+num-bigint = "0.5.1"
+num-integer = "0.1.46"
+num-rational = "0.4.2"
+num-traits = "0.2.19"

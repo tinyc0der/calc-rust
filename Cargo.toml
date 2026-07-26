@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/qalc-num", "crates/qalc-core", "crates/qalc"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+repository = ""
+description = "Pure-Rust port of libqalculate"
+
+[workspace.dependencies]
+qalc-num = { path = "crates/qalc-num" }
+qalc-core = { path = "crates/qalc-core" }
+
+[profile.release]
+lto = "thin"

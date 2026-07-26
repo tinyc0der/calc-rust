@@ -1,0 +1,9 @@
+[package]
+name = "qalc-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure-Rust port of the libqalculate library (parser, MathStructure, Calculator, units, functions)"
+
+[dependencies]
+qalc-num.workspace = true
