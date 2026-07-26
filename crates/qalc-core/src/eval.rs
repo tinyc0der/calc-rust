@@ -70,8 +70,16 @@ pub fn apply_conversion(m: &mut MathStructure, po: &mut PrintOptions) -> Result<
             let mut b = (**expr).clone();
             evaluate(&mut b);
             match &b {
+                // Anything that is not a plain integer base becomes the
+                // custom output base, which `Number::print` renders by
+                // repeated division: `to base sqrt(2)` is a real base, not an
+                // error (Number.cc:10840).
                 MathStructure::Number(n) => match n.to_i64() {
                     Some(v) if (2..=36).contains(&v) => po.base = v as i32,
+                    _ if n.is_real() && n.is_greater_than(&qalc_num::Number::from_i64(1)) => {
+                        po.base = qalc_num::options::base::CUSTOM;
+                        po.custom_base = Some(n.clone());
+                    }
                     _ => return Err("unsupported number base".to_string()),
                 },
                 _ => return Err("number base must evaluate to a number".to_string()),

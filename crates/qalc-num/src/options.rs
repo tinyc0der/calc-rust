@@ -278,6 +278,9 @@ pub struct PrintOptions {
     pub hexadecimal_twos_complement: bool,
     pub binary_bits: u32,
     pub duodecimal_symbols: bool,
+    /// `CALCULATOR->customOutputBase()` — the base selected by `to base <x>`
+    /// when it is not one of the built-in integer bases.
+    pub custom_base: Option<crate::Number>,
     /// Which zone dates are rendered in (`TIME_ZONE_*`).
     pub time_zone: TimeZoneMode,
     /// Custom time zone; also carries the TZ_TRUNCATE hack (see Number.cc).
@@ -320,6 +323,7 @@ impl Default for PrintOptions {
             hexadecimal_twos_complement: false,
             binary_bits: 0,
             duodecimal_symbols: false,
+            custom_base: None,
             time_zone: TimeZoneMode::Local,
             custom_time_zone: 0,
         }

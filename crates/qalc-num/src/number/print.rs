@@ -27,6 +27,94 @@ pub fn is_sexagesimal_base(b: i32) -> bool {
         || (base::LATITUDE..=base::LONGITUDE_2).contains(&b)
 }
 
+/// The base as a real number, for the bases `Number::print` handles by
+/// repeated division rather than by `to_str_radix` (Number.cc:10840): the
+/// named irrational bases and any custom base that is not an integer in
+/// 2..=62.
+fn real_base_of(po: &PrintOptions) -> Option<Number> {
+    use crate::options::base;
+    let mut b = match po.base {
+        base::PI => {
+            let mut n = Number::new();
+            n.pi();
+            n
+        }
+        base::E => {
+            let mut n = Number::new();
+            n.e();
+            n
+        }
+        base::SQRT2 => {
+            let mut n = Number::from_i64(2);
+            n.sqrt();
+            n
+        }
+        base::GOLDEN_RATIO => {
+            let mut n = Number::from_i64(5);
+            n.sqrt();
+            n.add(&Number::from_i64(1));
+            n.divide(&Number::from_i64(2));
+            n
+        }
+        base::CUSTOM => po.custom_base.clone()?,
+        _ => return None,
+    };
+    // An integer base in the ordinary range goes through the digit-string
+    // path instead, which is both exact and much cheaper.
+    if b.is_integer() && !b.is_less_than_i64(2) && b.is_less_than_i64(63) {
+        return None;
+    }
+    b.set_approximate(b.is_approximate());
+    Some(b)
+}
+
+/// The midpoint of a value's interval, as a *point* value
+/// (`intervalToMidValue`).
+///
+/// Interval arithmetic has to be off while this is computed: adding the two
+/// endpoints with directed rounding would hand back another interval, and
+/// flooring `[1-e, 1+e]` gives `[0, 1]` — which then displays as 0.5 rather
+/// than the 1 the caller is asking for.
+fn interval_midpoint(n: &Number) -> Number {
+    let saved = context::create_interval();
+    context::set_create_interval(false);
+    let lo = n.lower_end_point();
+    let hi = n.upper_end_point();
+    let mut mid = lo;
+    let ok = mid.add(&hi) && mid.divide(&Number::from_i64(2));
+    context::set_create_interval(saved);
+    if ok {
+        mid
+    } else {
+        n.clone()
+    }
+}
+
+/// The digit an interval determines, or `None` when it does not determine one.
+///
+/// For a point value this is plain truncation. For an interval the C++ floors
+/// the midpoint, adds one, and decrements again unless the upper endpoint has
+/// really reached that next integer — which pins `[1-e, 1+e]` to 1 rather than
+/// letting it truncate to 0.
+fn interval_digit(q: &Number) -> Option<i64> {
+    let lo = q.lower_end_point();
+    let hi = q.upper_end_point();
+    let mut width = hi.clone();
+    width.subtract(&lo);
+    if !width.is_less_than(&Number::from_i64(1)) {
+        return None;
+    }
+    let mut d = interval_midpoint(q);
+    d.floor();
+    let mut next = d.clone();
+    next.add(&Number::from_i64(1));
+    if hi.is_less_than(&next) {
+        d.to_i64()
+    } else {
+        next.to_i64()
+    }
+}
+
 /// `get_rounding_mode(po)` — legacy `round_halfway_to_even` folds in.
 pub(crate) fn get_rounding_mode(po: &PrintOptions) -> RoundingMode {
     if po.round_halfway_to_even {
@@ -271,6 +359,11 @@ impl Number {
         {
             return self.print_sexagesimal(po);
         }
+        if let Some(base) = real_base_of(po) {
+            if self.is_real() && !self.is_infinite(false) {
+                return self.print_real_base(po, &base);
+            }
+        }
         match &self.value {
             RealValue::PlusInfinity => {
                 if po.use_unicode_signs {
@@ -295,6 +388,151 @@ impl Number {
                 }
             }
         }
+    }
+
+    /// The non-integer-base branch of `Number::print` (Number.cc:10840).
+    ///
+    /// Digits are produced most-significant first by repeatedly dividing by
+    /// the largest remaining power of the base, so `sqrt(32) to base sqrt(2)`
+    /// is `100000` — five factors of sqrt(2) and nothing left over.
+    ///
+    /// The values involved are intervals, and a digit right on a boundary
+    /// (`5 / sqrt(2)^0` is *exactly* 1, but only to within the interval) would
+    /// truncate to the digit below. The C++ handles that by flooring the
+    /// midpoint, adding one, and backing off only when the upper endpoint is
+    /// genuinely below; this does the same.
+    ///
+    /// TODO(port): negative and complex bases, the escaped-digit form for
+    /// bases above 62, and `show_ending_zeroes` padding.
+    fn print_real_base(&self, po: &PrintOptions, base: &Number) -> String {
+        let decimal = |n: &Number| {
+            let mut po2 = po.clone();
+            po2.base = 10;
+            po2.custom_base = None;
+            n.print(&po2)
+        };
+        // Negative, complex, and shallow bases are not supported.
+        if base.has_imaginary_part() || !base.is_greater_than(&Number::from_i64(1)) {
+            return decimal(self);
+        }
+        if self.is_zero() {
+            return "0".to_string();
+        }
+        let precision = context::precision() as i64;
+        // How many digits the working precision is worth in this base:
+        // floor(log_base(10^precision - 1)).
+        let precision_base = {
+            let mut p = Number::from_i64(10);
+            p.raise(&Number::from_i64(precision), true);
+            p.subtract(&Number::from_i64(1));
+            p.log(base);
+            p.floor();
+            p.to_i64().unwrap_or(precision).max(1)
+        };
+        // Digits above 36 need a case distinction to stay unambiguous.
+        let b_case = base.is_greater_than(&Number::from_i64(36));
+
+        let neg = self.is_negative();
+        let mut nr = self.clone();
+        if neg {
+            nr.negate();
+        }
+        let mut exponent = {
+            let mut l = nr.clone();
+            l.log(base);
+            let mut l = interval_midpoint(&l);
+            l.floor();
+            match l.to_i64() {
+                Some(v) if (-1000..=1000).contains(&v) => v,
+                _ => return decimal(self),
+            }
+        };
+
+        let mut digits: Vec<i64> = Vec::new();
+        let mut point_at = 0usize;
+        let mut have_point = false;
+        let mut exact = false;
+        if exponent < 0 {
+            point_at = 0;
+            have_point = true;
+        }
+        loop {
+            let mut base_pow = base.clone();
+            base_pow.raise(&Number::from_i64(exponent), true);
+            if !have_point && exponent < 0 {
+                if digits.len() as i64 >= precision_base {
+                    break;
+                }
+                point_at = digits.len();
+                have_point = true;
+            }
+            if have_point && digits.len() as i64 >= precision_base {
+                break;
+            }
+            let mut quotient = nr.clone();
+            if !quotient.divide(&base_pow) {
+                return decimal(self);
+            }
+            let Some(digit) = interval_digit(&quotient) else {
+                // The interval no longer pins the digit down; every further
+                // digit would be noise.
+                break;
+            };
+            digits.push(digit);
+            let mut taken = Number::from_i64(digit);
+            taken.multiply(&base_pow);
+            nr.subtract(&taken);
+            if nr.is_zero() {
+                while exponent > 0 {
+                    digits.push(0);
+                    exponent -= 1;
+                }
+                exact = true;
+                break;
+            }
+            exponent -= 1;
+        }
+        let _ = exact;
+        // Trailing zeroes after the point carry no information.
+        if have_point {
+            while digits.len() > point_at && digits.last() == Some(&0) {
+                digits.pop();
+            }
+            if digits.len() <= point_at {
+                have_point = false;
+            }
+        }
+
+        let mut str = String::new();
+        if have_point && point_at == 0 {
+            str.push('0');
+        }
+        for (index, digit) in digits.iter().enumerate() {
+            if have_point && index == point_at {
+                str.push_str(po.decimalpoint());
+            }
+            let c = *digit;
+            if c <= 9 {
+                str.push((b'0' + c as u8) as char);
+            } else if b_case {
+                if c < 36 {
+                    str.push((b'A' + (c - 10) as u8) as char);
+                } else {
+                    str.push((b'a' + (c - 36) as u8) as char);
+                }
+            } else if po.lower_case_numbers {
+                str.push((b'a' + (c - 10) as u8) as char);
+            } else {
+                str.push((b'A' + (c - 10) as u8) as char);
+            }
+        }
+        if str.is_empty() {
+            str.push('0');
+        }
+        if neg {
+            str.insert_str(0, if po.use_unicode_signs { "\u{2212}" } else { "-" });
+        }
+        str
     }
 
     /// The `BASE_IS_SEXAGESIMAL || BASE_TIME` branch of `Number::print`
@@ -1539,6 +1777,28 @@ mod tests {
 
     fn p(n: &Number) -> String {
         n.print(&PrintOptions::default())
+    }
+
+    #[test]
+    fn irrational_number_bases() {
+        use crate::options::base;
+        let mut root2 = Number::from_i64(2);
+        assert!(root2.sqrt());
+        let mut po = PrintOptions::default();
+        po.base = base::CUSTOM;
+        po.custom_base = Some(root2.clone());
+
+        // Oracle values.
+        assert_eq!(Number::from_i64(1).print(&po), "1");
+        assert_eq!(Number::from_i64(2).print(&po), "100");
+        assert_eq!(Number::from_i64(5).print(&po), "10001");
+        assert_eq!(Number::from_i64(8).print(&po), "1000000");
+        // The value *is* the base: the leading digit sits right on the
+        // interval boundary, which plain truncation would round down to 0.
+        assert_eq!(root2.print(&po), "10");
+        let mut root32 = Number::from_i64(32);
+        assert!(root32.sqrt());
+        assert_eq!(root32.print(&po), "100000");
     }
 
     #[test]
