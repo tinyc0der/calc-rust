@@ -293,7 +293,8 @@ mod represents {
             M::Vector(v) => v.is_empty() || v.iter().all(|c| !c.is_vector()),
             M::Addition(v) | M::Multiplication(v) => v.iter().all(non_matrix),
             M::Power { base, .. } => non_matrix(base),
-            M::Function { .. } | M::Variable(_) => false,
+            M::Function { id, .. } => crate::builtins::returns_scalar(id.0),
+            M::Variable(_) => false,
             _ => true,
         }
     }

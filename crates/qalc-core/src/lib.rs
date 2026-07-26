@@ -4,6 +4,7 @@
 //! `MathStructure`, `Calculator`, units, variables, builtin functions,
 //! definitions loading, and output formatting.
 
+pub mod absolute;
 pub mod builtins;
 pub mod calculate;
 pub mod datetime;

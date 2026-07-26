@@ -92,6 +92,20 @@ pub mod id {
     pub const BASE_N: u32 = 1725;
 }
 
+/// Does this builtin always return a scalar?
+///
+/// `MathFunction::representsNonMatrix()` — the C++ asks the function
+/// definition; here the answer is "yes" for the plain numeric blocks and
+/// "unknown" for everything else, which is what lets `0 * sin(x)` collapse to
+/// zero while `0 * solve(...)` does not.
+pub fn returns_scalar(id: u32) -> bool {
+    (1000..=1014).contains(&id)      // trigonometric and exponential
+        || (1400..=1412).contains(&id) // abs, sgn, gamma, erf, zeta, ...
+        || (1500..=1502).contains(&id) // factorials and binomial
+        || (1700..=1725).contains(&id) // integer and bitwise helpers
+        || (3100..=3101).contains(&id) // IEEE-754 helpers
+}
+
 /// Evaluate a function call in place. Returns true if it was replaced by a
 /// value.
 pub fn calculate_function(m: &mut MathStructure) -> bool {
@@ -109,6 +123,11 @@ pub fn calculate_function_exact(m: &mut MathStructure, exact: bool) -> bool {
     // Polynomial and solver builtins take structured (non-numeric)
     // arguments too, so they are dispatched before the numeric fast path.
     if crate::polynomial::calculate_function(m) {
+        return true;
+    }
+    // `abs` with a symbolic argument has rewriting rules of its own; the
+    // numeric case still falls through to `apply` below.
+    if crate::absolute::calculate_function(m) {
         return true;
     }
     // Calculus builtins (`diff`, `limit`) take structured arguments and
