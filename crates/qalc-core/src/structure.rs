@@ -19,6 +19,7 @@
 
 use std::fmt;
 
+use crate::defs::PrefixId;
 use crate::ids::{FunctionId, UnitId, VariableId};
 use qalc_num::{Number, PrintOptions};
 
@@ -52,6 +53,13 @@ pub enum MathStructure {
     Vector(Vec<MathStructure>),
     /// `STRUCT_SYMBOLIC`
     Symbolic(String),
+    /// A text value — also `STRUCT_SYMBOLIC` in C++, where the distinction
+    /// is carried by the *printer*: an unknown name is a `STRUCT_VARIABLE`
+    /// and prints bare, while a quoted literal is a `STRUCT_SYMBOLIC` and
+    /// prints quoted (MathStructure-print.cc:4184). This port resolves
+    /// unknown names to [`MathStructure::Symbolic`], so text needs its own
+    /// tag to keep the two printing rules apart.
+    Text(String),
     /// `STRUCT_ADDITION`: two or more terms
     Addition(Vec<MathStructure>),
     /// `STRUCT_MULTIPLICATION`: two or more factors
@@ -68,8 +76,13 @@ pub enum MathStructure {
     },
     /// `STRUCT_VARIABLE`
     Variable(VariableId),
-    /// `STRUCT_UNIT` (prefix/plural flags come with the unit port)
-    Unit(UnitId),
+    /// `STRUCT_UNIT`. The optional prefix is the C++ `o_prefix` member,
+    /// which only a unit structure may carry (`km` is the meter unit with the
+    /// kilo prefix, not a multiplication by 1000).
+    Unit {
+        id: UnitId,
+        prefix: Option<PrefixId>,
+    },
     /// `STRUCT_COMPARISON`: children 0 and 1 in C++, plus `ct_comp`
     Comparison {
         left: Box<MathStructure>,
@@ -118,7 +131,17 @@ pub enum ConversionTarget {
     /// `to base N`, where N is an expression.
     Base(Box<MathStructure>),
     /// A unit expression.
-    Unit(Box<MathStructure>),
+    Unit {
+        expr: Box<MathStructure>,
+        /// `to -unit` suppresses mixed-unit output
+        /// (`Calculator-convert.cc:2294`).
+        mix: bool,
+        /// `to ?unit` / `to b?unit` asks for an automatic decimal/binary
+        /// output prefix.
+        prefix: crate::units::PrefixMode,
+    },
+    /// `to base` with no argument: expand to base units.
+    BaseUnits,
 }
 
 /// `MathStructure()` initializes to the number zero (`init()` sets
@@ -180,6 +203,11 @@ impl MathStructure {
         MathStructure::Symbolic(sym.into())
     }
 
+    /// A bare (unprefixed) unit structure.
+    pub fn unit(id: UnitId) -> Self {
+        MathStructure::Unit { id, prefix: None }
+    }
+
     /// `clear()` — reset the value to zero.
     pub fn clear(&mut self) {
         *self = MathStructure::default();
@@ -219,6 +247,10 @@ impl MathStructure {
     pub fn is_symbolic(&self) -> bool {
         matches!(self, MathStructure::Symbolic(_))
     }
+    /// `isSymbolic()` for a *text* value (see [`MathStructure::Text`]).
+    pub fn is_text(&self) -> bool {
+        matches!(self, MathStructure::Text(_))
+    }
     pub fn is_addition(&self) -> bool {
         matches!(self, MathStructure::Addition(_))
     }
@@ -235,7 +267,7 @@ impl MathStructure {
         matches!(self, MathStructure::Variable(_))
     }
     pub fn is_unit(&self) -> bool {
-        matches!(self, MathStructure::Unit(_))
+        matches!(self, MathStructure::Unit { .. })
     }
     pub fn is_comparison(&self) -> bool {
         matches!(self, MathStructure::Comparison { .. })
@@ -306,6 +338,19 @@ impl MathStructure {
         }
     }
 
+    /// `symbol()` restricted to text values.
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            MathStructure::Text(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// A text value (`MathStructure(string, force_symbol = false)`).
+    pub fn text_value(s: impl Into<String>) -> Self {
+        MathStructure::Text(s.into())
+    }
+
     /// `base()` — the base of a power structure (child 0 in C++).
     pub fn base(&self) -> Option<&MathStructure> {
         match self {
@@ -340,7 +385,7 @@ impl MathStructure {
     pub fn size(&self) -> usize {
         use MathStructure::*;
         match self {
-            Number(_) | Symbolic(_) | Variable(_) | Unit(_) | Undefined | Aborted
+            Number(_) | Symbolic(_) | Text(_) | Variable(_) | Unit { .. } | Undefined | Aborted
             | DateTime(_) => 0,
             // A conversion wraps exactly one value.
             Conversion { .. } => 1,
@@ -604,10 +649,13 @@ impl MathStructure {
         };
         match (self, o) {
             (Number(a), Number(b)) => a.equals(b, allow_interval, allow_infinite),
-            (Symbolic(a), Symbolic(b)) => a == b,
+            (Symbolic(a), Symbolic(b)) | (Text(a), Text(b)) => a == b,
             (Variable(a), Variable(b)) => a == b,
-            // C++ also compares prefixes; prefixes come with the unit port.
-            (Unit(a), Unit(b)) => a == b,
+            // C++ `equals` compares the unit *and* its prefix.
+            (
+                Unit { id: a, prefix: pa },
+                Unit { id: b, prefix: pb },
+            ) => a == b && pa == pb,
             (Undefined, Undefined) | (Aborted, Aborted) => true,
             (DateTime(a), DateTime(b)) => a == b,
             (Vector(a), Vector(b))
@@ -715,6 +763,7 @@ impl fmt::Display for MathStructure {
         match self {
             Number(n) => write!(f, "{}", n.print(&PrintOptions::default())),
             Symbolic(s) => write!(f, "{s}"),
+            Text(s) => write!(f, "{}", crate::strings::quote_text(s)),
             Conversion { value, .. } => write!(f, "{value}"),
             Vector(v) => {
                 write!(f, "[")?;
@@ -740,7 +789,10 @@ impl fmt::Display for MathStructure {
                 write!(f, ")")
             }
             Variable(v) => write!(f, "variable#{}", v.0),
-            Unit(u) => write!(f, "unit#{}", u.0),
+            Unit { id, prefix } => match prefix {
+                Some(p) => write!(f, "unit#{}[prefix#{}]", id.0, p.0),
+                None => write!(f, "unit#{}", id.0),
+            },
             Comparison { left, op, right } => {
                 let s = match op {
                     ComparisonType::Less => "<",
@@ -842,7 +894,7 @@ mod tests {
         assert!(!sym("x").equals(&sym("y")));
         assert!(MathStructure::Variable(VariableId(3)).equals(&MathStructure::Variable(VariableId(3))));
         assert!(!MathStructure::Variable(VariableId(3)).equals(&MathStructure::Variable(VariableId(4))));
-        assert!(!MathStructure::Unit(UnitId(1)).equals(&MathStructure::Variable(VariableId(1))));
+        assert!(!MathStructure::unit(UnitId(1)).equals(&MathStructure::Variable(VariableId(1))));
     }
 
     #[test]

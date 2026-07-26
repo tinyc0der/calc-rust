@@ -106,8 +106,17 @@ fn run_test_file(path: &str) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // `load(tests/data.csv)` in a transcript is relative to the reference
+    // project root, i.e. the parent of the directory holding the transcript.
+    if let Some(root) = std::path::Path::new(path)
+        .parent()
+        .and_then(|p| p.parent())
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        qalc_core::stats::set_data_dir(root.to_path_buf());
+    }
     let transcript = batch::parse_transcript(&src);
-    if transcript.cases.is_empty() {
+    if !transcript.cases.iter().any(|c| c.expected.is_some()) {
         println!("WARNING: 0 tests were run (indentation needs to be tab-based)");
         return ExitCode::FAILURE;
     }
@@ -121,13 +130,13 @@ fn run_test_file(path: &str) -> ExitCode {
             batch::Outcome::Mismatch { got } => {
                 println!("Mismatch at line {}:", case.line);
                 println!("  expression: {}", case.expression);
-                println!("  expected:   {}", case.expected);
+                println!("  expected:   {}", case.expected.as_deref().unwrap_or(""));
                 println!("  received:   {got}");
             }
             batch::Outcome::Error { message } => {
                 println!("Error at line {}:", case.line);
                 println!("  expression: {}", case.expression);
-                println!("  expected:   {}", case.expected);
+                println!("  expected:   {}", case.expected.as_deref().unwrap_or(""));
                 println!("  error:      {message}");
             }
             batch::Outcome::Pass => {}

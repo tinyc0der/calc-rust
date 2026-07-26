@@ -884,7 +884,11 @@ impl MathStructure {
                 }
             }
             // x^a*0=0
-            if other.is_zero() && !represents::undefined(self) && represents::non_matrix(self) {
+            if other.is_zero()
+                && zero_may_absorb(self, eo)
+                && !represents::undefined(self)
+                && represents::non_matrix(self)
+            {
                 self.clear();
                 return Merged;
             }
@@ -897,12 +901,20 @@ impl MathStructure {
             return TryReversed;
         }
         // x*0=0
-        if other.is_zero() && !represents::undefined(self) && represents::non_matrix(self) {
+        if other.is_zero()
+            && zero_may_absorb(self, eo)
+            && !represents::undefined(self)
+            && represents::non_matrix(self)
+        {
             self.clear();
             return MergedIntoOther;
         }
         // 0*x=0
-        if self.is_zero() && !represents::undefined(other) && represents::non_matrix(other) {
+        if self.is_zero()
+            && zero_may_absorb(other, eo)
+            && !represents::undefined(other)
+            && represents::non_matrix(other)
+        {
             return MergedUnchanged;
         }
         if self.equals(other) {
@@ -1053,6 +1065,15 @@ impl MathStructure {
         // x^1=x
         if other.is_one() {
             return MergedUnchanged;
+        }
+
+        // x^log(y, x)=y (MathStructure-calculate.cc, the LOG branch of
+        // default_power_merge).
+        if let MathStructure::Function { id, args } = &*other {
+            if id.0 == crate::builtins::id::LOG && args.len() == 2 && args[1].equals(self) {
+                *self = args[0].clone();
+                return Merged;
+            }
         }
         // 1^x=1
         if self.is_one() && represents::number(other) {
@@ -1418,6 +1439,13 @@ impl MathStructure {
         }
         b
     }
+}
+
+/// `eo.keep_zero_units` (MathStructure-calculate.cc:2989): multiplying by zero
+/// normally collapses the product, but a factor carrying a unit keeps it, so
+/// `0 m` stays `0 m` and can still be converted.
+fn zero_may_absorb(other: &MathStructure, eo: &EvaluationOptions) -> bool {
+    !eo.keep_zero_units || !crate::units::contains_unit(other)
 }
 
 /// "may the exponent of `base` become/stay negative?" — the recurring C++

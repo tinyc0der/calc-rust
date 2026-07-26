@@ -84,9 +84,41 @@ pub mod id {
 /// Evaluate a function call in place. Returns true if it was replaced by a
 /// value.
 pub fn calculate_function(m: &mut MathStructure) -> bool {
+    calculate_function_exact(m, false)
+}
+
+/// [`calculate_function`], refusing an approximate numeric result when
+/// `exact` is set (`/set approximation exact`).
+pub fn calculate_function_exact(m: &mut MathStructure, exact: bool) -> bool {
     // Matrix/vector builtins take structured (non-numeric) arguments, so
     // they are dispatched before the numeric fast path below.
     if crate::matrix::calculate_function(m) {
+        return true;
+    }
+    // Polynomial and solver builtins take structured (non-numeric)
+    // arguments too, so they are dispatched before the numeric fast path.
+    if crate::polynomial::calculate_function(m) {
+        return true;
+    }
+    if crate::solve::calculate_function(m) {
+        return true;
+    }
+    // Geometry is numeric-only but has its own id block and formulas.
+    if crate::geometry::calculate_function(m) {
+        return true;
+    }
+    // Text builtins take `MathStructure::Text` arguments (and give the
+    // base-reading functions their text form), so they also go first.
+    if crate::strings::calculate_function(m) {
+        return true;
+    }
+    if crate::stats::calculate_function(m) {
+        return true;
+    }
+    // `Argument::handleVector` (Function.cc:1730): a function whose argument
+    // is a scalar maps over a vector element by element — `abs([1 -2])` is
+    // `[1 2]`, which `geomean(abs(v))` depends on.
+    if handle_vector(m) {
         return true;
     }
     let MathStructure::Function { id, args } = m else {
@@ -105,7 +137,39 @@ pub fn calculate_function(m: &mut MathStructure) -> bool {
     let Some(result) = apply(id, &nums) else {
         return false;
     };
+    // `numeric_result_ok` in the merge engine: an exact-mode calculation
+    // must not silently become approximate.
+    if exact && result.is_approximate() && !nums.iter().any(Number::is_approximate) {
+        return false;
+    }
     *m = MathStructure::Number(result);
+    true
+}
+
+/// Map a one-argument numeric builtin over a vector argument.
+///
+/// The C++ `Argument` carries a `b_handle_vector` flag; when a scalar
+/// argument receives a vector, `MathFunction::calculate` applies the
+/// function to each element (Function.cc:1730).
+fn handle_vector(m: &mut MathStructure) -> bool {
+    let MathStructure::Function { id, args } = m else {
+        return false;
+    };
+    let fid = id.0;
+    let [MathStructure::Vector(items)] = args.as_slice() else {
+        return false;
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let MathStructure::Number(n) = item else {
+            return false;
+        };
+        match apply(fid, std::slice::from_ref(n)) {
+            Some(r) => out.push(MathStructure::Number(r)),
+            None => return false,
+        }
+    }
+    *m = MathStructure::Vector(out);
     true
 }
 
@@ -225,6 +289,25 @@ fn binary_with(
 
 /// Recursively evaluate every function call in the tree, bottom-up.
 pub fn calculate_functions(m: &mut MathStructure) -> bool {
+    calculate_functions_eo(m, &crate::options::EvaluationOptions::default())
+}
+
+/// [`calculate_functions`] with evaluation options.
+///
+/// The only option consulted is `approximation`: under
+/// `APPROXIMATION_EXACT` a call whose numeric result turned approximate
+/// while its arguments were exact is left unevaluated, so `sqrt(5)` stays
+/// symbolic instead of collapsing to 2.236… (the C++ gets the same effect
+/// from `Number::raise(…, try_exact)` inside `merge_power`).
+pub fn calculate_functions_eo(
+    m: &mut MathStructure,
+    eo: &crate::options::EvaluationOptions,
+) -> bool {
+    let exact = eo.approximation == crate::options::ApproximationMode::Exact;
+    calculate_functions_inner(m, exact)
+}
+
+fn calculate_functions_inner(m: &mut MathStructure, exact: bool) -> bool {
     let mut changed = false;
     match m {
         MathStructure::Vector(v)
@@ -237,32 +320,32 @@ pub fn calculate_functions(m: &mut MathStructure) -> bool {
         | MathStructure::LogicalOr(v)
         | MathStructure::LogicalXor(v) => {
             for child in v.iter_mut() {
-                changed |= calculate_functions(child);
+                changed |= calculate_functions_inner(child, exact);
             }
         }
         MathStructure::Power { base, exponent } => {
-            changed |= calculate_functions(base);
-            changed |= calculate_functions(exponent);
+            changed |= calculate_functions_inner(base, exact);
+            changed |= calculate_functions_inner(exponent, exact);
         }
         MathStructure::Comparison { left, right, .. } => {
-            changed |= calculate_functions(left);
-            changed |= calculate_functions(right);
+            changed |= calculate_functions_inner(left, exact);
+            changed |= calculate_functions_inner(right, exact);
         }
         MathStructure::BitwiseNot(x) | MathStructure::LogicalNot(x) => {
-            changed |= calculate_functions(x);
+            changed |= calculate_functions_inner(x, exact);
         }
         MathStructure::Conversion { value, .. } => {
-            changed |= calculate_functions(value);
+            changed |= calculate_functions_inner(value, exact);
         }
         MathStructure::Function { args, .. } => {
             for a in args.iter_mut() {
-                changed |= calculate_functions(a);
+                changed |= calculate_functions_inner(a, exact);
             }
         }
         _ => {}
     }
     if matches!(m, MathStructure::Function { .. }) {
-        changed |= calculate_function(m);
+        changed |= calculate_function_exact(m, exact);
     }
     // Bitwise/logical operators are dedicated node types rather than calls,
     // but their numeric evaluation belongs here.
@@ -416,7 +499,16 @@ pub fn function_id_for_name(name: &str) -> Option<FunctionId> {
         "oct" => id::BASE_OCT,
         "dec" => id::BASE_DEC,
         "base" => id::BASE_N,
-        _ => return crate::matrix::function_id_for_name(name),
+        _ => {
+            // Matrix names come first: `multiply` is the entrywise (Hadamard)
+            // product in data/functions.xml.in, not an alias for `expand`.
+            return crate::matrix::function_id_for_name(name)
+                .or_else(|| crate::polynomial::function_id_for_name(name))
+                .or_else(|| crate::solve::function_id_for_name(name))
+                .or_else(|| crate::geometry::function_id_for_name(name))
+                .or_else(|| crate::strings::function_id_for_name(name))
+                .or_else(|| crate::stats::function_id_for_name(name))
+        }
     };
     Some(FunctionId(id))
 }

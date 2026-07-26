@@ -31,6 +31,10 @@ enum MulSign {
     Operator,
 }
 
+// `MULTIPLICATION_SIGN_OPERATOR_SHORT` (the operator without spaces, used
+// between unit factors) is not a variant here: units are printed as one group
+// by `print_units_group`, which emits the `*` itself.
+
 /// Print `m` using `po`.
 pub fn print(m: &MathStructure, po: &PrintOptions) -> String {
     // `MathStructure::format` runs before printing; the only formatting this
@@ -38,15 +42,98 @@ pub fn print(m: &MathStructure, po: &PrintOptions) -> String {
     // `[1]` → `1`).
     let mut formatted = m.clone();
     crate::matrix::format_for_print(&mut formatted, false);
+    // A result that is nothing but a unit still shows its quantity: the
+    // reference prints `1 m`, never a bare `m`.
+    if crate::units::is_unit_exp(&formatted) {
+        return format!(
+            "1 {}",
+            print_units_group(std::slice::from_ref(&formatted), po)
+        );
+    }
     print_sub(&formatted, po, 0)
+}
+
+/// A unit factor's printed name, prefix included.
+fn print_unit(
+    id: crate::ids::UnitId,
+    prefix: Option<crate::defs::PrefixId>,
+    po: &PrintOptions,
+) -> String {
+    match crate::units::store() {
+        Some(s) => s.unit_name(id, prefix, po.abbreviate_names),
+        None => format!("unit{}", id.0),
+    }
+}
+
+/// Print a run of `unit`/`unit^n` factors the way the reference does: factors
+/// joined with `*`, a `/` before the negative-exponent ones (parenthesized
+/// when there is more than one), and plain negative exponents when there is
+/// no numerator at all (`1 s^-1`, not `1/s`).
+fn print_units_group(units: &[MathStructure], po: &PrintOptions) -> String {
+    type Part = (crate::ids::UnitId, Option<crate::defs::PrefixId>, i32);
+    let parts: Vec<Part> = units
+        .iter()
+        .filter_map(crate::units::unit_exp_parts)
+        .collect();
+    let one = |(id, p, e): &Part| {
+        let name = print_unit(*id, *p, po);
+        if *e == 1 {
+            name
+        } else {
+            format!("{name}^{e}")
+        }
+    };
+    let pos: Vec<Part> = parts.iter().filter(|(_, _, e)| *e > 0).cloned().collect();
+    let neg: Vec<Part> = parts.iter().filter(|(_, _, e)| *e < 0).cloned().collect();
+    if pos.is_empty() {
+        return parts.iter().map(one).collect::<Vec<_>>().join("*");
+    }
+    let n_str = pos.iter().map(one).collect::<Vec<_>>().join("*");
+    if neg.is_empty() {
+        return n_str;
+    }
+    let flipped: Vec<Part> = neg.iter().map(|(u, p, e)| (*u, *p, -*e)).collect();
+    let d_str = flipped.iter().map(one).collect::<Vec<_>>().join("*");
+    if flipped.len() > 1 {
+        format!("{n_str}/({d_str})")
+    } else {
+        format!("{n_str}/{d_str}")
+    }
+}
+
+/// A rational printed in fraction format never uses the spacious form:
+/// the reference writes `x = 3/2 - sqrt(5) / 2`, with the *number* tight and
+/// the division structure spaced.
+fn print_number(n: &Number, po: &PrintOptions) -> String {
+    use qalc_num::options::NumberFractionFormat as F;
+    if po.spacious
+        && matches!(po.number_fraction_format, F::Fractional | F::Combined)
+        && n.is_rational()
+        && !n.is_integer()
+    {
+        let mut po2 = po.clone();
+        po2.spacious = false;
+        return n.print(&po2);
+    }
+    n.print(po)
 }
 
 fn print_sub(m: &MathStructure, po: &PrintOptions, depth: usize) -> String {
     match m {
-        MathStructure::Number(n) => n.print(po),
+        // `to unicode` selects a base qalc-num does not print; the code
+        // points are rendered here instead (Number.cc:11185).
+        MathStructure::Number(n) if po.base == qalc_num::options::base::UNICODE => {
+            crate::strings::unicode_digits(n, po).unwrap_or_else(|| {
+                let mut po2 = po.clone();
+                po2.base = 10;
+                n.print(&po2)
+            })
+        }
+        MathStructure::Number(n) => print_number(n, po),
         MathStructure::Symbolic(s) => s.clone(),
+        MathStructure::Text(s) => crate::strings::quote_text(s),
         MathStructure::Variable(id) => format!("var{}", id.0),
-        MathStructure::Unit(id) => format!("unit{}", id.0),
+        MathStructure::Unit { id, prefix } => print_unit(*id, *prefix, po),
         MathStructure::Undefined => "undefined".to_string(),
         MathStructure::Aborted => "aborted".to_string(),
         MathStructure::DateTime(dt) => format!("{dt:?}"),
@@ -70,8 +157,10 @@ fn print_sub(m: &MathStructure, po: &PrintOptions, depth: usize) -> String {
         MathStructure::BitwiseOr(v) => print_infix(v, " | ", po, depth, m),
         MathStructure::BitwiseXor(v) => print_infix(v, " xor ", po, depth, m),
         MathStructure::BitwiseNot(x) => format!("~{}", print_operand(x, po, depth, m)),
-        MathStructure::LogicalAnd(v) => print_infix(v, " && ", po, depth, m),
-        MathStructure::LogicalOr(v) => print_infix(v, " || ", po, depth, m),
+        // `qalc` runs with `spell_out_logical_operators`, so the logical
+        // operators print as words (`x = 1 or x = 2`).
+        MathStructure::LogicalAnd(v) => print_infix(v, " and ", po, depth, m),
+        MathStructure::LogicalOr(v) => print_infix(v, " or ", po, depth, m),
         MathStructure::LogicalXor(v) => print_infix(v, " xor ", po, depth, m),
         MathStructure::LogicalNot(x) => format!("!{}", print_operand(x, po, depth, m)),
     }
@@ -322,6 +411,68 @@ fn print_multiplication(factors: &[MathStructure], po: &PrintOptions, depth: usi
             }
         }
     }
+    // `place_units_separately`: the units of a product are printed as one
+    // group at the end, with their own multiplication and division signs.
+    if factors.iter().any(crate::units::is_unit_exp) {
+        let others: Vec<MathStructure> = factors
+            .iter()
+            .filter(|f| !crate::units::is_unit_exp(f))
+            .cloned()
+            .collect();
+        let units: Vec<MathStructure> = factors
+            .iter()
+            .filter(|f| crate::units::is_unit_exp(f))
+            .cloned()
+            .collect();
+        let u_str = print_units_group(&units, po);
+        if others.is_empty() {
+            return format!("1 {u_str}");
+        }
+        let mut o_str = if others.len() == 1 {
+            print_operand(
+                &others[0],
+                po,
+                depth,
+                &MathStructure::Multiplication(Vec::new()),
+            )
+        } else {
+            print_multiplication(&others, po, depth)
+        };
+        let wrapped = others.len() > 1 && others.iter().any(|f| as_inverse(f).is_some());
+        if wrapped {
+            o_str = format!("({o_str})");
+        }
+        let sep = if wrapped {
+            MulSign::Space
+        } else {
+            match others.last() {
+                Some(MathStructure::Number(_))
+                | Some(MathStructure::Symbolic(_))
+                | Some(MathStructure::Variable(_))
+                | Some(MathStructure::Vector(_)) => MulSign::Space,
+                _ => MulSign::Operator,
+            }
+        };
+        return match sep {
+            MulSign::None => format!("{o_str}{u_str}"),
+            MulSign::Space => format!("{o_str} {u_str}"),
+            MulSign::Operator => {
+                if po.spacious {
+                    format!("{o_str} * {u_str}")
+                } else {
+                    format!("{o_str}*{u_str}")
+                }
+            }
+        };
+    }
+    // `MathStructure::formatsub` turns a leading `1/d` coefficient into a
+    // division when fractions are displayed as fractions:
+    //   `1/2 * x * y` -> `(xy) / 2`, `1/2 * x` -> `x / 2`.
+    // A coefficient with a numerator other than one stays a parenthesized
+    // factor instead (`3/2 * x` -> `(3/2)x`).
+    if let Some(s) = print_unit_fraction_multiplication(factors, po, depth) {
+        return s;
+    }
     // Partition into numerator and denominator factors.
     let mut numer: Vec<MathStructure> = Vec::new();
     let mut denom: Vec<MathStructure> = Vec::new();
@@ -359,6 +510,38 @@ fn print_multiplication(factors: &[MathStructure], po: &PrintOptions, depth: usi
     }
 }
 
+/// A multiplication whose first factor is the rational `1/d` (with fraction
+/// display enabled) prints as `rest / d`.
+fn print_unit_fraction_multiplication(
+    factors: &[MathStructure],
+    po: &PrintOptions,
+    depth: usize,
+) -> Option<String> {
+    use qalc_num::options::NumberFractionFormat as F;
+    if !matches!(po.number_fraction_format, F::Fractional | F::Combined) || factors.len() < 2 {
+        return None;
+    }
+    let MathStructure::Number(n) = &factors[0] else {
+        return None;
+    };
+    if !n.is_rational() || n.is_integer() || n.is_approximate() || !n.numerator_is_one() {
+        return None;
+    }
+    let den = MathStructure::Number(n.denominator());
+    let rest: Vec<MathStructure> = factors[1..].to_vec();
+    let body = if rest.len() == 1 {
+        print_operand(&rest[0], po, depth, &MathStructure::Multiplication(Vec::new()))
+    } else {
+        format!("({})", join_factors(&rest, po, depth))
+    };
+    let d = print_sub(&den, po, depth + 1);
+    Some(if po.spacious {
+        format!("{body} / {d}")
+    } else {
+        format!("{body}/{d}")
+    })
+}
+
 /// `x^-1` → `Some(x)`; used to recover division from the multiplication form.
 fn as_inverse(m: &MathStructure) -> Option<MathStructure> {
     if let MathStructure::Power { base, exponent } = m {
@@ -382,10 +565,19 @@ fn is_additive(m: &MathStructure) -> bool {
     matches!(m, MathStructure::Addition(_))
 }
 
+/// A rational shown as `n/d` needs parentheses as a factor (`(3/2)x`).
+fn is_displayed_fraction(m: &MathStructure, po: &PrintOptions) -> bool {
+    use qalc_num::options::NumberFractionFormat as F;
+    matches!(po.number_fraction_format, F::Fractional | F::Combined)
+        && matches!(m, MathStructure::Number(n)
+            if n.is_rational() && !n.is_integer() && !n.is_approximate())
+}
+
 fn join_factors(factors: &[MathStructure], po: &PrintOptions, depth: usize) -> String {
     let mut out = String::new();
     for (i, f) in factors.iter().enumerate() {
-        let par = needs_parenthesis(f, &MathStructure::Multiplication(Vec::new()));
+        let par = needs_parenthesis(f, &MathStructure::Multiplication(Vec::new()))
+            || (factors.len() > 1 && is_displayed_fraction(f, po));
         let text = {
             let s = print_sub(f, po, depth + 1);
             if par {
@@ -455,12 +647,34 @@ fn multiplication_sign(
     }
 }
 
+/// `MathStructure::formatsub` rewrites `x^(1/2)` as `sqrt(x)` before
+/// printing (reference: `x^(1/2)` prints as `sqrt(x)`).
+fn is_one_half(m: &MathStructure) -> bool {
+    matches!(m, MathStructure::Number(n)
+        if n.is_rational() && !n.is_approximate()
+            && n.numerator().is_one() && n.denominator().is_two())
+}
+
 fn print_power(
     base: &MathStructure,
     exponent: &MathStructure,
     po: &PrintOptions,
     depth: usize,
 ) -> String {
+    if is_one_half(exponent) {
+        return format!("sqrt({})", print_sub(base, po, depth + 1));
+    }
+    if is_displayed_fraction(exponent, po) {
+        let parent = MathStructure::Power {
+            base: Box::new(MathStructure::Undefined),
+            exponent: Box::new(MathStructure::Undefined),
+        };
+        return format!(
+            "{}^({})",
+            print_operand(base, po, depth, &parent),
+            print_sub(exponent, po, depth + 1)
+        );
+    }
     let parent = MathStructure::Power {
         base: Box::new(MathStructure::Undefined),
         exponent: Box::new(MathStructure::Undefined),
@@ -556,7 +770,13 @@ fn function_name(id: crate::ids::FunctionId) -> &'static str {
         f::INT => "int",
         f::BITWISE_NOT => "bitnot",
         f::PERCENT => "percent",
-        other => crate::matrix::function_name(other).unwrap_or("f"),
+        other => crate::polynomial::function_name(other)
+            .or_else(|| crate::solve::function_name(other))
+            .or_else(|| crate::matrix::function_name(other))
+            .or_else(|| crate::geometry::function_name(other))
+            .or_else(|| crate::strings::function_name(other))
+            .or_else(|| crate::stats::function_name(other))
+            .unwrap_or("f"),
     }
 }
 

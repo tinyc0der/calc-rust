@@ -475,7 +475,10 @@ fn is_ident_start(c: char) -> bool {
 }
 
 fn is_ident_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
+    // `?` belongs to a name because of the optional-prefix conversion syntax
+    // `to b?byte` / `to ?m`, which `Calculator::convert(string)` splits off
+    // from the unit name (Calculator-convert.cc:2300).
+    c.is_alphanumeric() || c == '_' || c == '?'
 }
 
 #[cfg(test)]

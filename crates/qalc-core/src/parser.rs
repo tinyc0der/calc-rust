@@ -212,11 +212,41 @@ impl<'a> Parser<'a> {
 
     /// Parse what follows `to`: a base name, `base N`, or a unit expression.
     fn parse_conversion_target(&mut self) -> Result<ConversionTarget, ParseError> {
+        // `to -unit` turns mixed-unit output off, `to +unit` forces it; the
+        // C++ strips the sign from the "to" string before looking up the unit
+        // (Calculator-convert.cc:2294).
+        let mut mix = true;
+        if *self.peek() == Tok::Minus && self.next_starts_unit() {
+            self.bump();
+            mix = false;
+        }
+        // `?unit` / `b?unit`: an automatic output prefix. The marker is part
+        // of the identifier token, so rewrite the token and keep parsing.
+        let mut prefix = crate::units::PrefixMode::None;
+        if let Tok::Ident(name) = self.peek().clone() {
+            if let Some(q) = name.find('?') {
+                let head = &name[..q];
+                let tail = &name[q + 1..];
+                if !tail.is_empty() {
+                    prefix = if head.eq_ignore_ascii_case("b") {
+                        crate::units::PrefixMode::Binary
+                    } else {
+                        crate::units::PrefixMode::Decimal
+                    };
+                    self.toks[self.i].tok = Tok::Ident(tail.to_string());
+                }
+            }
+        }
         if let Tok::Ident(name) = self.peek().clone() {
             let lower = name.to_ascii_lowercase();
-            // `to base N`
+            // `to base N`, and bare `to base` = expand to base units.
             if lower == "base" {
                 self.bump();
+                // Bare `to base` expands to base units; anything after it is
+                // the number base (`to base 16`, `to base sqrt(2)`).
+                if *self.peek() == Tok::Eof {
+                    return Ok(ConversionTarget::BaseUnits);
+                }
                 let m = self.parse_logical_and()?;
                 return Ok(ConversionTarget::Base(Box::new(m)));
             }
@@ -227,7 +257,19 @@ impl<'a> Parser<'a> {
         }
         // Anything else is a unit expression.
         let m = self.parse_logical_and()?;
-        Ok(ConversionTarget::Unit(Box::new(m)))
+        Ok(ConversionTarget::Unit {
+            expr: Box::new(m),
+            mix,
+            prefix,
+        })
+    }
+
+    /// Is the token after a `to`-leading `-` a plain unit name?
+    fn next_starts_unit(&self) -> bool {
+        matches!(
+            self.toks.get(self.i + 1).map(|t| &t.tok),
+            Some(Tok::Ident(_))
+        )
     }
 
     /// The `.` dot-product operator (`Calculator::parseAdd`'s internal
@@ -401,11 +443,19 @@ impl<'a> Parser<'a> {
                     };
                 }
                 Tok::Divide => {
+                    // Adaptive mode is whitespace-sensitive on *both* sides of
+                    // the operator. Verified against the reference binary:
+                    //   `1/2x`    -> 1/(2x)      (nothing spaced)
+                    //   `1/2 x`   -> 0.5x        (only the product is spaced)
+                    //   `1 / 2 x` -> 1/(2x)      (the operator is spaced too)
+                    // So the denominator only stops at a space when the
+                    // division sign itself is unspaced.
+                    let denom_stops_at_space = !self.peek_token().space_before;
                     self.bump();
                     // Adaptive mode: an unspaced implicit product after `/`
                     // goes wholly into the denominator (`1/2x` = `1/(2x)`),
                     // but `1/2 x` divides first.
-                    let mut denom = self.parse_implicit_product()?;
+                    let mut denom = self.parse_implicit_product_opt(denom_stops_at_space)?;
                     denom.inverse();
                     // C++ `divide(o, append)` appends into an existing
                     // multiplication (MathStructure.cc:1620), so `6/3/2`
@@ -417,6 +467,23 @@ impl<'a> Parser<'a> {
                         }
                         other => MathStructure::Multiplication(vec![other, denom]),
                     };
+                    // The space ended the denominator, so whatever follows
+                    // multiplies the quotient: `1/2 x` is `0.5x` and
+                    // `10 N / 5 Pa` is `(10/5) N*Pa^-1`.
+                    if self.starts_implicit_factor() {
+                        let extra = self.parse_implicit_product()?;
+                        left = match (left, extra) {
+                            (MathStructure::Multiplication(mut v), MathStructure::Multiplication(w)) => {
+                                v.extend(w);
+                                MathStructure::Multiplication(v)
+                            }
+                            (MathStructure::Multiplication(mut v), other) => {
+                                v.push(other);
+                                MathStructure::Multiplication(v)
+                            }
+                            (l, r) => MathStructure::Multiplication(vec![l, r]),
+                        };
+                    }
                 }
                 Tok::IntDivide => {
                     self.bump();
@@ -450,9 +517,25 @@ impl<'a> Parser<'a> {
     /// Implicit multiplication: adjacent primaries with no operator between
     /// them (`2x`, `5 km`, `2(3+4)`). Binds tighter than explicit `*` and `/`.
     fn parse_implicit_product(&mut self) -> Result<MathStructure, ParseError> {
+        self.parse_implicit_product_opt(false)
+    }
+
+    /// Parse an implicit product. With `stop_at_space`, the product ends at
+    /// the first factor preceded by whitespace — this is what makes the
+    /// denominator of a division whitespace-sensitive: `1/2x` is `1/(2x)`
+    /// but `1/2 x` is `(1/2)x`, and `8/2(2+2)` is 1 while `8/2 (2+2)` is 16.
+    /// The flag never applies to the first factor, so `20 miles / 2h` still
+    /// puts `2h` in the denominator.
+    fn parse_implicit_product_opt(
+        &mut self,
+        stop_at_space: bool,
+    ) -> Result<MathStructure, ParseError> {
         let first = self.parse_power()?;
         let mut factors = vec![first];
         while self.starts_implicit_factor() {
+            if stop_at_space && self.peek_token().space_before {
+                break;
+            }
             factors.push(self.parse_power()?);
         }
         Ok(if factors.len() == 1 {
@@ -596,6 +679,11 @@ impl<'a> Parser<'a> {
                 // Function call: identifier immediately followed by `(`.
                 if *self.peek() == Tok::LParen && !self.peek_token().space_before {
                     if let Some(fid) = self.resolver.resolve_function(name) {
+                        // Functions with `TextArgument`s see their source
+                        // text, not a parsed expression.
+                        if crate::strings::has_text_args(fid.0) {
+                            return self.parse_text_call(fid);
+                        }
                         let args = self.parse_call_args()?;
                         return Ok(MathStructure::Function { id: fid, args });
                     }
@@ -607,7 +695,7 @@ impl<'a> Parser<'a> {
             }
             Tok::Str(ref s) => {
                 self.bump();
-                Ok(MathStructure::symbolic(s.clone()))
+                Ok(MathStructure::Text(s.clone()))
             }
             Tok::LParen | Tok::LBrace => {
                 let close = if tok.tok == Tok::LParen {
@@ -790,6 +878,63 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// A call whose arguments are (partly) `TextArgument`s, which
+    /// `Argument::parse` (Function.cc:1614) takes from the *source text*
+    /// rather than from a parsed expression. See [`crate::strings`] for the
+    /// rule; the short version is that a fragment with no parenthesis and no
+    /// quoted literal is kept verbatim, unless it names a text variable.
+    fn parse_text_call(&mut self, fid: FunctionId) -> Result<MathStructure, ParseError> {
+        let open = self.peek_token().pos;
+        let close = matching_paren(self.src, open);
+        let content = &self.src[open + 1..close.min(self.src.len())];
+        // Skip past the tokens the raw slice covers.
+        self.i = self
+            .toks
+            .iter()
+            .position(|t| t.pos > close)
+            .unwrap_or(self.toks.len() - 1);
+
+        let mut args = Vec::new();
+        if !content.trim().is_empty() || crate::strings::is_text_arg(fid.0, 0) {
+            for (index, (s, e)) in split_top_level(content, |c| c == b',' || c == b';')
+                .into_iter()
+                .enumerate()
+            {
+                let raw = &content[s..e];
+                let text = raw.trim();
+                if crate::strings::is_text_arg(fid.0, index) {
+                    args.push(self.parse_text_arg(text, s)?);
+                } else {
+                    let offset = s + raw.len() - raw.trim_start().len();
+                    args.push(self.parse_sub(text, offset)?);
+                }
+            }
+        }
+        Ok(MathStructure::Function { id: fid, args })
+    }
+
+    /// One `TextArgument`, from its source fragment.
+    fn parse_text_arg(&self, text: &str, offset: usize) -> Result<MathStructure, ParseError> {
+        if text.is_empty() {
+            return Ok(MathStructure::Text(String::new()));
+        }
+        // A fragment holding a call or a quoted literal is parsed normally.
+        if text.contains('(') || text.contains('"') || text.contains('\'') {
+            return self.parse_sub(text, offset);
+        }
+        // A bare name bound to a text value resolves to that value; every
+        // other fragment is kept verbatim. Only plain identifiers are looked
+        // up — `getActiveVariable` in the C++ never sees anything else.
+        let is_name = text.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if is_name {
+            if let Some(m @ MathStructure::Text(_)) = self.resolver.resolve(text) {
+                return Ok(m);
+            }
+        }
+        Ok(MathStructure::Text(text.to_string()))
+    }
+
     fn parse_call_args(&mut self) -> Result<Vec<MathStructure>, ParseError> {
         self.bump(); // consume '('
         let mut args = Vec::new();
@@ -830,6 +975,28 @@ fn matching_bracket(src: &str, open: usize) -> usize {
             b'\'' if !cit1 => cit2 = !cit2,
             b'[' if !cit1 && !cit2 => depth += 1,
             b']' if !cit1 && !cit2 => {
+                depth -= 1;
+                if depth == 0 {
+                    return i;
+                }
+            }
+            _ => {}
+        }
+    }
+    src.len()
+}
+
+/// Byte index of the `)` matching the `(` at `open`, ignoring quoted text.
+fn matching_paren(src: &str, open: usize) -> usize {
+    let b = src.as_bytes();
+    let mut depth = 0i32;
+    let (mut cit1, mut cit2) = (false, false);
+    for i in open..b.len() {
+        match b[i] {
+            b'"' if !cit2 => cit1 = !cit1,
+            b'\'' if !cit1 => cit2 = !cit2,
+            b'(' if !cit1 && !cit2 => depth += 1,
+            b')' if !cit1 && !cit2 => {
                 depth -= 1;
                 if depth == 0 {
                     return i;
@@ -984,6 +1151,7 @@ fn base_target_from_name(lower: &str) -> Option<ConversionTarget> {
         "dec" | "decimal" => 10,
         "duo" | "duodecimal" => 12,
         "hexadecimal" => 16,
+        "unicode" => base::UNICODE,
         "roman" => base::ROMAN_NUMERALS,
         "sexa" | "sexagesimal" => base::SEXAGESIMAL,
         "time" => base::TIME,

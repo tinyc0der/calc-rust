@@ -11,7 +11,9 @@ use crate::builtins;
 use crate::ids::FunctionId;
 use crate::parser::{self, NameResolver, ParseError};
 use crate::print;
-use crate::structure::{ConversionTarget, MathStructure};
+use crate::options::{ApproximationMode, EvaluationOptions};
+use crate::structure::MathStructure;
+use qalc_num::options::NumberFractionFormat;
 use qalc_num::{ParseOptions, PrintOptions};
 
 /// A calculator session.
@@ -20,6 +22,8 @@ pub struct Session {
     variables: HashMap<String, MathStructure>,
     pub parse_options: ParseOptions,
     pub print_options: PrintOptions,
+    /// `/set approximation ...` and friends.
+    pub eval_options: EvaluationOptions,
 }
 
 impl Default for Session {
@@ -34,6 +38,7 @@ impl Session {
             variables: HashMap::new(),
             parse_options: ParseOptions::default(),
             print_options: crate::eval::batch_print_options(),
+            eval_options: EvaluationOptions::default(),
         }
     }
 
@@ -52,7 +57,56 @@ impl Session {
     /// and echoes it (matching the reference CLI).
     pub fn evaluate_line(&mut self, line: &str) -> Result<String, String> {
         let line = line.trim();
+        // `/set <option> <value>` — the CLI command set (src/qalc.cc). Only
+        // the options the transcripts depend on are honoured; the rest are
+        // accepted and ignored so a transcript keeps running.
+        if let Some(rest) = line.strip_prefix('/') {
+            return Ok(self.set_option(rest));
+        }
+        // The CLI command words that apply an operation to the rest of the
+        // line (`factor x^2-1`, `expand (x+1)^2`) — src/qalc.cc.
+        for (word, fid) in [
+            ("factor", crate::polynomial::id::FACTORIZE),
+            ("factorize", crate::polynomial::id::FACTORIZE),
+            ("expand", crate::polynomial::id::EXPAND),
+            ("simplify", crate::polynomial::id::EXPAND),
+        ] {
+            if let Some(rest) = line.strip_prefix(word) {
+                let rest = rest.trim_start();
+                if rest.len() + word.len() < line.len() && !rest.is_empty() {
+                    let value = self.evaluate_expression(rest)?;
+                    let mut out = if fid == crate::polynomial::id::FACTORIZE {
+                        // The result must not go back through the merge
+                        // engine, which would expand the product again.
+                        crate::polynomial::factor(&value, &self.eval_options)
+                    } else {
+                        let mut eo = self.eval_options.clone();
+                        eo.expand = 1;
+                        let mut v = value;
+                        crate::eval::evaluate_calculated_with(&mut v, &eo);
+                        v
+                    };
+                    crate::sort::sort(&mut out);
+                    return Ok(print::print(&out, &self.print_options));
+                }
+            }
+        }
+        // `delete <name>` removes a user variable.
+        if let Some(name) = line.strip_prefix("delete ") {
+            self.variables.remove(name.trim());
+            return Ok(String::new());
+        }
         if let Some((name, expr)) = split_assignment(line) {
+            let value = self.evaluate_expression(expr)?;
+            let printed = print::print(&value, &self.print_options);
+            self.set_variable(name, value);
+            return Ok(printed);
+        }
+        // `name = expr` is an assignment too when the left side is a plain
+        // name: the reference CLI stores the value and echoes it (in
+        // interactive mode it first asks). Anything else with `=` stays a
+        // comparison for the solver.
+        if let Some((name, expr)) = self.split_plain_assignment(line) {
             let value = self.evaluate_expression(expr)?;
             let printed = print::print(&value, &self.print_options);
             self.set_variable(name, value);
@@ -61,15 +115,89 @@ impl Session {
         let value = self.evaluate_expression(line)?;
         let mut value = value;
         let mut po = self.print_options.clone();
-        apply_conversion(&mut value, &mut po)?;
+        crate::eval::apply_conversion(&mut value, &mut po)?;
         Ok(print::print(&value, &po))
+    }
+
+    /// Split `name = expr` when `name` is a free identifier — not a unit and
+    /// not a function. Comparison forms (`x^2 = 4`, `a == b`, `x <= 1`) are
+    /// rejected so the solver still sees them.
+    fn split_plain_assignment<'l>(&self, line: &'l str) -> Option<(&'l str, &'l str)> {
+        let idx = line.find('=')?;
+        if line[idx + 1..].starts_with('=') {
+            return None;
+        }
+        let name = line[..idx].trim();
+        let expr = line[idx + 1..].trim();
+        if name.is_empty() || expr.is_empty() {
+            return None;
+        }
+        // `<=`, `>=`, `!=` end in `=` but are not assignments.
+        if name.ends_with(['<', '>', '!', ':']) {
+            return None;
+        }
+        if !name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return None;
+        }
+        if builtins::function_id_for_name(name).is_some() {
+            return None;
+        }
+        // A name the unit registry already owns stays a comparison.
+        if !self.variables.contains_key(name) {
+            if let Some(store) = crate::units::store() {
+                if store.resolve_name(name).is_some() {
+                    return None;
+                }
+            }
+        }
+        Some((name, expr))
+    }
+
+    /// Apply a `/set <option> <value>` command. Unknown options are ignored,
+    /// like the reference CLI's `set_option` when it cannot match a name.
+    fn set_option(&mut self, cmd: &str) -> String {
+        let mut words = cmd.split_whitespace();
+        if words.next() != Some("set") {
+            return String::new();
+        }
+        let Some(option) = words.next() else {
+            return String::new();
+        };
+        let value = words.next().unwrap_or("1");
+        match option {
+            "unicode" => {
+                self.print_options.use_unicode_signs = value != "0" && value != "off";
+            }
+            // `/set approximation exact | try exact | approximate`
+            "approximation" | "appr" | "approx" => {
+                self.eval_options.approximation = match value {
+                    "exact" | "0" => ApproximationMode::Exact,
+                    "approximate" | "2" => ApproximationMode::Approximate,
+                    _ => ApproximationMode::TryExact,
+                };
+            }
+            // `/set fractions 2` (FRACTION_FRACTIONAL) prints rationals as
+            // `1/2` and pulls a fractional coefficient into a division.
+            "fractions" | "fr" => {
+                self.print_options.number_fraction_format = match value {
+                    "2" | "fraction" | "fractional" => NumberFractionFormat::Fractional,
+                    "3" | "combined" | "mixed" => NumberFractionFormat::Combined,
+                    "1" | "exact" => NumberFractionFormat::DecimalExact,
+                    _ => NumberFractionFormat::Decimal,
+                };
+            }
+            _ => {}
+        }
+        String::new()
     }
 
     /// Parse and evaluate an expression against this session's variables.
     fn evaluate_expression(&self, expr: &str) -> Result<MathStructure, String> {
         let mut m = self.parse(expr).map_err(|e| e.to_string())?;
         crate::percent::apply(&mut m);
-        crate::eval::evaluate_calculated(&mut m);
+        crate::eval::evaluate_calculated_with(&mut m, &self.eval_options);
         Ok(m)
     }
 
@@ -78,11 +206,60 @@ impl Session {
     }
 }
 
+impl Session {
+    /// The predefined one-letter unknowns of the C++ (`VARIABLE_ID_X`,
+    /// `_Y`, `_Z`, `_N`, `_C`).
+    const UNKNOWNS: [char; 5] = ['x', 'y', 'z', 'n', 'c'];
+
+    /// Whether `c` is a name the calculator knows on its own.
+    fn resolves_alone(&self, c: char) -> bool {
+        if Session::UNKNOWNS.contains(&c) {
+            return true;
+        }
+        let s = c.to_string();
+        if self.variables.contains_key(&s) {
+            return true;
+        }
+        crate::units::store().is_some_and(|store| store.resolve_name(&s).is_some())
+    }
+
+    fn resolve_char(&self, c: char) -> MathStructure {
+        let s = c.to_string();
+        if let Some(v) = self.variables.get(&s) {
+            return v.clone();
+        }
+        if !Session::UNKNOWNS.contains(&c) {
+            if let Some(m) = crate::units::store().and_then(|store| store.resolve_name(&s)) {
+                return m;
+            }
+        }
+        MathStructure::symbolic(s)
+    }
+}
+
 impl NameResolver for Session {
     fn resolve(&self, name: &str) -> Option<MathStructure> {
         // A user assignment shadows everything else, as in the reference.
         if let Some(v) = self.variables.get(name) {
             return Some(v.clone());
+        }
+        // Then the unit registry, including prefixed forms (`km`, `dm3`).
+        if let Some(store) = crate::units::store() {
+            if let Some(m) = store.resolve_name(name) {
+                return Some(m);
+            }
+        }
+        // `Calculator::parse` matches the longest *known* name at each
+        // position, so a name built entirely out of known one-character names
+        // splits into a product: `3yx^2` parses as `3*y*x^2` and `abc` as
+        // `are*barn*c`. A name with an unknown character (`pi`, `foo`) stays
+        // one symbol, which is exactly what keeps `pi` intact.
+        if name.len() > 1 && name.chars().all(|c| self.resolves_alone(c)) {
+            let parts: Vec<MathStructure> = name
+                .chars()
+                .map(|c| self.resolve_char(c))
+                .collect();
+            return Some(MathStructure::Multiplication(parts));
         }
         Some(MathStructure::symbolic(name))
     }
@@ -111,36 +288,6 @@ fn split_assignment(line: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((name, expr))
-}
-
-/// Fold an outer `to <base>` conversion into the print options.
-fn apply_conversion(m: &mut MathStructure, po: &mut PrintOptions) -> Result<(), String> {
-    let MathStructure::Conversion { value, target } = m else {
-        return Ok(());
-    };
-    match target {
-        ConversionTarget::NumberBase { base, bits } => {
-            po.base = *base;
-            po.binary_bits = *bits;
-        }
-        ConversionTarget::Base(expr) => {
-            let mut b = (**expr).clone();
-            crate::eval::evaluate(&mut b);
-            match &b {
-                MathStructure::Number(n) => match n.to_i64() {
-                    Some(v) if (2..=36).contains(&v) => po.base = v as i32,
-                    _ => return Err("unsupported number base".to_string()),
-                },
-                _ => return Err("number base must evaluate to a number".to_string()),
-            }
-        }
-        ConversionTarget::Unit(_) => {
-            // TODO(port): unit conversion needs the unit registry.
-            return Err("unit conversion is not implemented yet".to_string());
-        }
-    }
-    *m = (**value).clone();
-    Ok(())
 }
 
 #[cfg(test)]

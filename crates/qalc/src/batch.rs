@@ -9,11 +9,16 @@
 
 use std::fmt;
 
-/// One expression and its expected output.
+/// One expression and, when the transcript states one, its expected output.
+///
+/// Lines *without* an expectation still run: they carry state the later
+/// assertions depend on (`alpha := 5`, `v = load(data.csv)`, `/set unicode 1`,
+/// `delete v`). The C++ harness executes every line and only compares the
+/// ones followed by a tab-indented expectation, so this does too.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Case {
     pub expression: String,
-    pub expected: String,
+    pub expected: Option<String>,
     /// 1-based line number of the expression in the source file.
     pub line: usize,
 }
@@ -37,7 +42,7 @@ pub fn parse_transcript(src: &str) -> Transcript {
             if let Some((expression, line)) = pending.take() {
                 t.cases.push(Case {
                     expression,
-                    expected,
+                    expected: Some(expected),
                     line,
                 });
             }
@@ -45,7 +50,13 @@ pub fn parse_transcript(src: &str) -> Transcript {
         }
         let trimmed = raw.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
-            pending = None;
+            if let Some((expression, line)) = pending.take() {
+                t.cases.push(Case {
+                    expression,
+                    expected: None,
+                    line,
+                });
+            }
             continue;
         }
         // A space-indented line following an expression was meant to be an
@@ -53,7 +64,23 @@ pub fn parse_transcript(src: &str) -> Transcript {
         if raw.starts_with(' ') && pending.is_some() {
             t.space_indented.push(line_no);
         }
+        // The previous expression had no expectation: keep it as a setup
+        // line rather than dropping it.
+        if let Some((expression, line)) = pending.take() {
+            t.cases.push(Case {
+                expression,
+                expected: None,
+                line,
+            });
+        }
         pending = Some((trimmed.to_string(), line_no));
+    }
+    if let Some((expression, line)) = pending.take() {
+        t.cases.push(Case {
+            expression,
+            expected: None,
+            line,
+        });
     }
     t
 }
@@ -113,8 +140,15 @@ pub fn run_transcript(
         results: Vec::new(),
     };
     for case in &t.cases {
-        let outcome = match eval(&case.expression) {
-            Ok(got) if got == case.expected => Outcome::Pass,
+        let result = eval(&case.expression);
+        // A line without an expectation is setup (an assignment, a `/set`
+        // command, a `delete`): run it for its side effects, assert nothing,
+        // and let a failure surface on the assertions that depend on it.
+        let Some(expected) = case.expected.as_deref() else {
+            continue;
+        };
+        let outcome = match result {
+            Ok(got) if got == expected => Outcome::Pass,
             Ok(got) => Outcome::Mismatch { got },
             Err(message) => Outcome::Error { message },
         };
@@ -133,10 +167,10 @@ mod tests {
         let t = parse_transcript(src);
         assert_eq!(t.cases.len(), 2);
         assert_eq!(t.cases[0].expression, "1+1");
-        assert_eq!(t.cases[0].expected, "2");
+        assert_eq!(t.cases[0].expected.as_deref(), Some("2"));
         assert_eq!(t.cases[0].line, 1);
         assert_eq!(t.cases[1].expression, "2*3");
-        assert_eq!(t.cases[1].expected, "6");
+        assert_eq!(t.cases[1].expected.as_deref(), Some("6"));
     }
 
     #[test]
@@ -147,12 +181,25 @@ mod tests {
     }
 
     #[test]
-    fn expressions_without_expectations_are_dropped() {
-        // Commands like `/set ...` carry state but assert nothing.
+    fn expressions_without_expectations_are_kept_but_unasserted() {
+        // Commands like `/set ...` and assignments carry state but assert
+        // nothing; they must still run, in order.
         let src = "alpha := 5\nalpha + 1\n\t6\n";
         let t = parse_transcript(src);
-        assert_eq!(t.cases.len(), 1);
-        assert_eq!(t.cases[0].expression, "alpha + 1");
+        assert_eq!(t.cases.len(), 2);
+        assert_eq!(t.cases[0].expression, "alpha := 5");
+        assert_eq!(t.cases[0].expected, None);
+        assert_eq!(t.cases[1].expression, "alpha + 1");
+        assert_eq!(t.cases[1].expected.as_deref(), Some("6"));
+
+        let mut seen = Vec::new();
+        let r = run_transcript("t", &t, |e| {
+            seen.push(e.to_string());
+            Ok("6".to_string())
+        });
+        assert_eq!(seen, vec!["alpha := 5", "alpha + 1"]);
+        // Only the line with an expectation is scored.
+        assert_eq!(r.total(), 1);
     }
 
     #[test]
@@ -160,14 +207,18 @@ mod tests {
         let src = "1+1\n  2\n";
         let t = parse_transcript(src);
         assert_eq!(t.space_indented, vec![2]);
-        assert_eq!(t.cases.len(), 0, "space-indented lines are not cases");
+        assert_eq!(
+            t.cases.iter().filter(|c| c.expected.is_some()).count(),
+            0,
+            "space-indented lines are not expectations"
+        );
     }
 
     #[test]
     fn expectation_whitespace_is_trimmed() {
         let src = "1+1\n\t  2  \n";
         let t = parse_transcript(src);
-        assert_eq!(t.cases[0].expected, "2");
+        assert_eq!(t.cases[0].expected.as_deref(), Some("2"));
     }
 
     #[test]

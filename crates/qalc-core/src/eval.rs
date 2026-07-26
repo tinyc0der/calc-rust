@@ -33,17 +33,29 @@ pub fn evaluate_to_string(expr: &str) -> Result<String, String> {
     Ok(print::print(&m, &po))
 }
 
-/// Fold an outer `to <base>` conversion into the print options, mirroring
-/// how the C++ CLI applies a parsed "to" expression to `printops` rather
-/// than to the value.
-fn apply_conversion(m: &mut MathStructure, po: &mut PrintOptions) -> Result<(), String> {
+/// Apply an outer `to <target>` conversion.
+///
+/// The C++ CLI splits the "to" expression off before parsing
+/// (`Calculator::separateToExpression`) and then either folds it into the
+/// print options (number bases) or runs `Calculator::convert` on the value.
+/// This port keeps the conversion in the tree and unwraps it here.
+///
+/// When there is no explicit conversion the automatic post-conversion runs
+/// instead, which is what turns `50 ohm * 2 A` into `100 V`
+/// (`POST_CONVERSION_OPTIMAL_SI`, Calculator-calculate.cc:4043).
+pub fn apply_conversion(m: &mut MathStructure, po: &mut PrintOptions) -> Result<(), String> {
     let MathStructure::Conversion { value, target } = m else {
+        if let Some(store) = crate::units::store() {
+            crate::units::convert_to_optimal(store, m);
+        }
         return Ok(());
     };
     match target {
         ConversionTarget::NumberBase { base, bits } => {
             po.base = *base;
             po.binary_bits = *bits;
+            let v = (**value).clone();
+            *m = v;
         }
         ConversionTarget::Base(expr) => {
             let mut b = (**expr).clone();
@@ -55,13 +67,25 @@ fn apply_conversion(m: &mut MathStructure, po: &mut PrintOptions) -> Result<(), 
                 },
                 _ => return Err("number base must evaluate to a number".to_string()),
             }
+            let v = (**value).clone();
+            *m = v;
         }
-        ConversionTarget::Unit(_) => {
-            // TODO(port): unit conversion needs the unit registry.
-            return Err("unit conversion is not implemented yet".to_string());
+        ConversionTarget::BaseUnits => {
+            let store = crate::units::store()
+                .ok_or_else(|| "unit definitions are not available".to_string())?;
+            let mut v = (**value).clone();
+            crate::units::convert_to_base_units(store, &mut v);
+            evaluate_calculated(&mut v);
+            *m = v;
+        }
+        ConversionTarget::Unit { expr, mix, prefix } => {
+            let store = crate::units::store()
+                .ok_or_else(|| "unit definitions are not available".to_string())?;
+            let mut r = crate::units::convert_to(store, value, expr, *mix)?;
+            crate::units::apply_prefix_mode(store, &mut r, *prefix);
+            *m = r;
         }
     }
-    *m = (**value).clone();
     Ok(())
 }
 
@@ -80,14 +104,22 @@ pub fn evaluate(m: &mut MathStructure) {
 
 /// The evaluation loop proper, with percent rewriting already done.
 pub fn evaluate_calculated(m: &mut MathStructure) {
-    let eo = EvaluationOptions::default();
+    evaluate_calculated_with(m, &EvaluationOptions::default());
+}
+
+/// [`evaluate_calculated`] with explicit evaluation options — the session
+/// passes its own so `/set approximation exact` reaches the merge engine.
+pub fn evaluate_calculated_with(m: &mut MathStructure, eo: &EvaluationOptions) {
     for _ in 0..MAX_EVAL_PASSES {
-        let functions_changed = builtins::calculate_functions(m);
-        let merged = m.calculatesub(&eo);
+        let functions_changed = builtins::calculate_functions_eo(m, eo);
+        let merged = m.calculatesub(eo);
         if !functions_changed && !merged {
             break;
         }
     }
+    // `eo.isolate_x` (default on for the CLI): an equation in one unknown is
+    // solved rather than merely simplified.
+    crate::solve::isolate_x_toplevel(m, eo);
     // Canonical ordering, as the C++ does in evalSort before printing.
     crate::sort::sort(m);
 }
