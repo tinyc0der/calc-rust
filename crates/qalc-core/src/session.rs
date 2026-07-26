@@ -320,6 +320,14 @@ impl NameResolver for Session {
                 return Some(m);
             }
         }
+        // The "Special Numbers" builtin variables (data/variables.xml).
+        // These have to be values, not symbols: the whole indeterminate-form
+        // machinery in `calculate` keys off an infinite `Number` and off
+        // `MathStructure::Undefined`, so a symbolic `infinity` would let
+        // `0*infinity` collapse to `0`.
+        if let Some(m) = special_number(name) {
+            return Some(m);
+        }
         // `Calculator::parse` matches the longest *known* name at each
         // position, so a name built entirely out of known one-character names
         // splits into a product: `3yx^2` parses as `3*y*x^2` and `abc` as
@@ -357,6 +365,21 @@ impl NameResolver for Session {
     }
 }
 
+/// The `<builtin_variable>` entries of the "Special Numbers" category that
+/// carry a fixed value (`data/variables.xml`). `i` and the rest still need the
+/// `DynamicVariable` port, so only the three that are pure `MathStructure`
+/// constants are answered here.
+fn special_number(name: &str) -> Option<MathStructure> {
+    let mut n = qalc_num::Number::new();
+    match name {
+        "infinity" | "plus_infinity" | "∞" => n.set_plus_infinity(false, false),
+        "minus_infinity" => n.set_minus_infinity(false, false),
+        "undefined" => return Some(MathStructure::Undefined),
+        _ => return None,
+    };
+    Some(MathStructure::Number(n))
+}
+
 /// Split `name := expr`, rejecting `:=` that is not at the top level.
 fn split_assignment(line: &str) -> Option<(&str, &str)> {
     let idx = line.find(":=")?;
@@ -381,6 +404,26 @@ fn split_assignment(line: &str) -> Option<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The "Special Numbers" constants have to arrive as values: a symbolic
+    /// `infinity` would be an ordinary unknown, and the merge engine would
+    /// then happily reduce `0*infinity` to `0` and `infinity/infinity` to `1`.
+    #[test]
+    fn special_numbers_resolve_to_values() {
+        let mut s = Session::new();
+        assert_eq!(s.evaluate_line("infinity").unwrap(), "+infinity");
+        assert_eq!(s.evaluate_line("plus_infinity").unwrap(), "+infinity");
+        assert_eq!(s.evaluate_line("∞").unwrap(), "+infinity");
+        assert_eq!(s.evaluate_line("minus_infinity").unwrap(), "-infinity");
+        assert_eq!(s.evaluate_line("undefined").unwrap(), "undefined");
+        // ...and behave like values from there on.
+        assert_eq!(s.evaluate_line("infinity + 1").unwrap(), "+infinity");
+        assert_eq!(s.evaluate_line("2 * infinity").unwrap(), "+infinity");
+        assert_eq!(s.evaluate_line("1 / infinity").unwrap(), "0");
+        // A user assignment still shadows them, as in the reference.
+        assert_eq!(s.evaluate_line("infinity := 7").unwrap(), "7");
+        assert_eq!(s.evaluate_line("infinity + 1").unwrap(), "8");
+    }
 
     /// The variables.batch transcript, verified against the reference.
     #[test]

@@ -273,14 +273,53 @@ pub(crate) mod represents {
     /// `representsUndefined(include_childs = false, include_infinite = false,
     /// be_strict = false)`.
     pub fn undefined(m: &M) -> bool {
+        undefined_opt(m, false, false, false)
+    }
+
+    /// The full `MathStructure::representsUndefined(include_childs,
+    /// include_infinite, be_strict)` (`MathStructure.cc:1250`).
+    ///
+    /// `include_infinite` is what keeps the indeterminate forms alive: with it
+    /// set, an infinite *number* counts as undefined, so `0*infinity` and
+    /// `infinity^0` are refused by the rules that would otherwise collapse
+    /// them. `include_childs` extends that to anything containing such a
+    /// value, and `be_strict` widens the power case from "is a division by
+    /// zero" to "might be one".
+    ///
+    /// The C++ `switch` deliberately falls through `STRUCT_POWER` into
+    /// `STRUCT_MULTIPLICATION` and then into `default`, so a power is tested
+    /// against the multiplication rule as well and both fall through to the
+    /// child scan. This port spells that out.
+    pub fn undefined_opt(m: &M, include_childs: bool, include_infinite: bool, be_strict: bool) -> bool {
         match m {
-            M::Undefined => true,
+            M::Undefined => return true,
+            M::Number(n) => return include_infinite && n.includes_infinity(),
+            // The C++ answers these from the registries and returns rather
+            // than scanning the children, so `0*sin(infinity)` is still 0.
+            M::Variable(_) | M::Function { .. } => return false,
             M::Power { base, exponent } => {
-                (zero(base) && negative(exponent)) || (infinite(base) && zero(exponent))
+                let bad = if be_strict {
+                    (!non_zero(base) && !non_negative(exponent))
+                        || (infinite(base) && !non_zero(exponent))
+                } else {
+                    (zero(base) && negative(exponent)) || (infinite(base) && zero(exponent))
+                };
+                // ...falling through to the STRUCT_MULTIPLICATION test, whose
+                // `CHILD(0)`/`CHILD(1)` are a power's base and exponent.
+                if bad || (base.is_zero() && infinite(exponent)) {
+                    return true;
+                }
             }
-            M::Multiplication(v) => v.len() > 1 && v[0].is_zero() && infinite(&v[1]),
-            _ => false,
+            M::Multiplication(v) => {
+                if v.len() > 1 && v[0].is_zero() && infinite(&v[1]) {
+                    return true;
+                }
+            }
+            _ => {}
         }
+        include_childs
+            && m.children()
+                .any(|c| undefined_opt(c, include_childs, include_infinite, be_strict))
     }
 
     /// `isInfinity()` — an infinite *number* leaf.
@@ -896,7 +935,7 @@ impl MathStructure {
             // x^a*0=0
             if other.is_zero()
                 && zero_may_absorb(self, eo)
-                && !represents::undefined(self)
+                && !zero_absorbs_undefined(self, eo)
                 && represents::non_matrix(self)
             {
                 self.clear();
@@ -913,7 +952,7 @@ impl MathStructure {
         // x*0=0
         if other.is_zero()
             && zero_may_absorb(self, eo)
-            && !represents::undefined(self)
+            && !zero_absorbs_undefined(self, eo)
             && represents::non_matrix(self)
         {
             self.clear();
@@ -922,7 +961,7 @@ impl MathStructure {
         // 0*x=0
         if self.is_zero()
             && zero_may_absorb(other, eo)
-            && !represents::undefined(other)
+            && !zero_absorbs_undefined(other, eo)
             && represents::non_matrix(other)
         {
             return MergedUnchanged;
@@ -1130,9 +1169,10 @@ impl MathStructure {
             // 0^negative is a division by zero; the C++ only emits a message.
         }
 
-        // x^0=1
+        // x^0=1 — but not `infinity^0`, which `representsUndefined`'s
+        // `include_infinite` flag rules out (MathStructure-calculate.cc:3407).
         if other.is_zero()
-            && !represents::undefined(self)
+            && !represents::undefined_opt(self, true, true, false)
             && (eo.assume_denominators_nonzero || represents::non_zero(self))
         {
             *self = MathStructure::from(1);
@@ -1709,6 +1749,17 @@ fn zero_may_absorb(other: &MathStructure, eo: &EvaluationOptions) -> bool {
     !eo.keep_zero_units || !crate::units::contains_unit(other)
 }
 
+/// The `!representsUndefined(true, true, !eo.assume_denominators_nonzero)`
+/// half of the `x*0=0` / `0*x=0` guards
+/// (`MathStructure-calculate.cc:2694`, `:2989` and `:2995`).
+///
+/// `include_infinite` is the part that matters here: `0*infinity` and
+/// `0*(x/0)` are indeterminate, so the other factor must be known to be a
+/// finite value before the zero may swallow it.
+fn zero_absorbs_undefined(other: &MathStructure, eo: &EvaluationOptions) -> bool {
+    represents::undefined_opt(other, true, true, !eo.assume_denominators_nonzero)
+}
+
 /// "may the exponent of `base` become/stay negative?" — the recurring C++
 /// guard
 ///
@@ -2116,6 +2167,212 @@ mod tests {
         // (-2) * infinity = -infinity
         let r = eval_mul(num(-2), MathStructure::Number(inf));
         assert!(r.number().expect("number").is_minus_infinity());
+    }
+
+    // -- indeterminate forms --------------------------------------------
+    //
+    // The reference leaves `0*infinity`, `infinity-infinity`, `infinity/
+    // infinity` and friends standing rather than picking one of the values
+    // the limit could take. What stops the collapse is
+    // `representsUndefined(include_childs, include_infinite, ...)`: with
+    // `include_infinite` set, an infinite *number* counts as undefined, so
+    // the `x*0=0` / `0*x=0` / `x^0=1` rules refuse it.
+
+    fn inf() -> MathStructure {
+        let mut n = Number::new();
+        n.set_plus_infinity(false, false);
+        MathStructure::Number(n)
+    }
+
+    fn neg_inf() -> MathStructure {
+        let mut n = Number::new();
+        n.set_minus_infinity(false, false);
+        MathStructure::Number(n)
+    }
+
+    /// `a * b^-1`, the shape a parsed division has.
+    fn eval_div(a: MathStructure, b: MathStructure) -> MathStructure {
+        let mut m = a;
+        m.divide(b, false);
+        m.calculatesub(&eo());
+        m
+    }
+
+    /// `MathStructure::equals` follows the C++ `Number::operator==`, which is
+    /// false for two infinities, so the indeterminate-form tests match their
+    /// operands by shape instead.
+    fn matches(m: &MathStructure, want: &MathStructure) -> bool {
+        match (m.number(), want.number()) {
+            (Some(a), Some(b)) if a.includes_infinity() || b.includes_infinity() => {
+                a.is_plus_infinity() == b.is_plus_infinity()
+                    && a.is_minus_infinity() == b.is_minus_infinity()
+            }
+            _ => m.equals(want),
+        }
+    }
+
+    /// The two operands are still there, side by side.
+    fn assert_unevaluated_pair(m: &MathStructure, a: &MathStructure, b: &MathStructure) {
+        assert_eq!(m.size(), 2, "{m} should have stayed unevaluated");
+        let (x, y) = (m.get(0).expect("size 2"), m.get(1).expect("size 2"));
+        assert!(
+            (matches(x, a) && matches(y, b)) || (matches(x, b) && matches(y, a)),
+            "{m} should have kept both operands"
+        );
+    }
+
+    #[test]
+    fn zero_times_infinity_stays_indeterminate() {
+        // 0*infinity -> 0(+infinity), infinity*0 -> 0(+infinity)
+        let r = eval_mul(num(0), inf());
+        assert!(r.is_multiplication(), "{r}");
+        assert_unevaluated_pair(&r, &num(0), &inf());
+
+        let r = eval_mul(inf(), num(0));
+        assert!(r.is_multiplication(), "{r}");
+        assert_unevaluated_pair(&r, &num(0), &inf());
+
+        // 0*(-infinity) -> (-infinity) * 0
+        let r = eval_mul(num(0), neg_inf());
+        assert!(r.is_multiplication(), "{r}");
+        assert_unevaluated_pair(&r, &num(0), &neg_inf());
+    }
+
+    #[test]
+    fn zero_times_undefined_stays_indeterminate() {
+        // 0*undefined -> 0 * undefined, undefined*0 -> 0 * undefined
+        for r in [
+            eval_mul(num(0), MathStructure::Undefined),
+            eval_mul(MathStructure::Undefined, num(0)),
+        ] {
+            assert!(r.is_multiplication(), "{r}");
+            assert_unevaluated_pair(&r, &num(0), &MathStructure::Undefined);
+        }
+    }
+
+    #[test]
+    fn infinity_minus_infinity_stays_indeterminate() {
+        // infinity-infinity -> (+infinity) - (+infinity)
+        let mut m = inf();
+        m.subtract(inf(), false);
+        m.calculatesub(&eo());
+        assert!(m.is_addition(), "{m}");
+        assert_unevaluated_pair(&m, &inf(), &neg_inf());
+    }
+
+    #[test]
+    fn infinity_over_infinity_stays_indeterminate() {
+        // infinity/infinity -> 0(+infinity): `infinity^-1` is 0, and the
+        // product `infinity * 0` then refuses to merge.
+        let r = eval_div(inf(), inf());
+        assert!(r.is_multiplication(), "{r}");
+        assert_unevaluated_pair(&r, &inf(), &num(0));
+
+        // (-infinity)/infinity -> (-infinity) * 0
+        let r = eval_div(neg_inf(), inf());
+        assert!(r.is_multiplication(), "{r}");
+        assert_unevaluated_pair(&r, &neg_inf(), &num(0));
+    }
+
+    #[test]
+    fn one_raised_to_infinity_stays_indeterminate() {
+        // 1^infinity -> 1^(+infinity)
+        let r = eval_pow(num(1), inf());
+        assert!(r.is_power(), "{r}");
+        assert!(r.base().expect("power").is_one());
+        assert!(matches(r.exponent().expect("power"), &inf()), "{r}");
+    }
+
+    /// `infinity^0` -> `(+infinity)^0`.
+    ///
+    /// The structural guard is in place (`represents::undefined_opt` refuses
+    /// the `x^0=1` rule for an infinite base), but the merge never gets that
+    /// far: `merge_power`'s numeric fast path succeeds because
+    /// `Number::raise` answers `1` for `infinity^0`. The reference fails the
+    /// raise instead (`Number.cc:3847`, before its own `o.isZero()` shortcut),
+    /// which is a fix in `qalc-num/src/number/pow.rs`, not in this module.
+    #[test]
+    #[ignore = "needs Number::raise to reject infinity^0 (qalc-num/src/number/pow.rs)"]
+    fn infinity_to_the_zero_stays_indeterminate() {
+        let r = eval_pow(inf(), num(0));
+        assert!(r.is_power(), "{r}");
+        assert!(matches(r.base().expect("power"), &inf()), "{r}");
+        assert!(r.exponent().expect("power").is_zero());
+    }
+
+    /// `0^(-0.5)` -> `1 / sqrt(0)`: `Number::raise` refuses `0^negative`
+    /// (`Number.cc:3908`), so `merge_power`'s numeric branch fails and the
+    /// power survives rather than becoming `+infinity`.
+    #[test]
+    fn zero_to_a_negative_power_stays_a_power() {
+        let r = eval_pow(num(0), rat(-1, 2));
+        assert!(r.is_power(), "{r}");
+        assert!(r.base().expect("power").is_zero());
+    }
+
+    /// `10^10^10` -> `10^10000000000`, a finite value that is merely too big
+    /// to write out: `Number::raise` refuses an exponent past its exact
+    /// limits (`Number.cc:4046`) rather than overflowing to `+infinity`.
+    #[test]
+    fn a_huge_power_is_not_infinite() {
+        let r = eval_pow(num(10), num(10_000_000_000));
+        assert!(r.is_power(), "{r}");
+        assert!(!r.number().is_some_and(Number::includes_infinity), "{r}");
+    }
+
+    /// `0^infinity` -> `0^(+infinity)` and `0^(-infinity)` -> `0^(-infinity)`.
+    ///
+    /// Not part of the merge engine at all: the reference's `Number::raise`
+    /// refuses a zero base under an infinite exponent (`Number.cc:3867` and
+    /// `:3887`, `!isNonZero()`), so `merge_power`'s numeric branch returns
+    /// `-1` and the power survives. This port's `Number::raise` answers `0`,
+    /// and `merge_power` faithfully takes the result. Same `pow.rs` fix.
+    #[test]
+    #[ignore = "needs Number::raise to reject 0^(+-infinity) (qalc-num/src/number/pow.rs)"]
+    fn zero_to_an_infinite_power_stays_a_power() {
+        for exponent in [inf(), neg_inf()] {
+            let r = eval_pow(num(0), exponent);
+            assert!(r.is_power(), "{r}");
+            assert!(r.base().expect("power").is_zero(), "{r}");
+        }
+    }
+
+    #[test]
+    fn represents_undefined_flags_follow_the_reference() {
+        use represents::undefined_opt;
+        // include_infinite: an infinite number is "undefined" only with it.
+        assert!(!undefined_opt(&inf(), false, false, false));
+        assert!(undefined_opt(&inf(), false, true, false));
+        // include_childs reaches into a subexpression.
+        let product = MathStructure::Multiplication(vec![sym("x"), inf()]);
+        assert!(!undefined_opt(&product, false, true, false));
+        assert!(undefined_opt(&product, true, true, false));
+        // The power cases: 0^-1 is a division by zero either way, while
+        // x^-1 only counts when be_strict widens "is" to "might be".
+        let zero_inv = MathStructure::Power {
+            base: Box::new(num(0)),
+            exponent: Box::new(num(-1)),
+        };
+        assert!(undefined_opt(&zero_inv, false, false, false));
+        let sym_inv = MathStructure::Power {
+            base: Box::new(sym("x")),
+            exponent: Box::new(num(-1)),
+        };
+        assert!(!undefined_opt(&sym_inv, false, false, false));
+        assert!(undefined_opt(&sym_inv, false, false, true));
+    }
+
+    #[test]
+    fn a_zero_factor_still_absorbs_ordinary_values() {
+        // The guard must not cost the plain rule: x*0=0 and 0*x=0.
+        assert!(eval_mul(sym("x"), num(0)).is_zero());
+        assert!(eval_mul(num(0), sym("x")).is_zero());
+        // ...including a division whose denominator is assumed non-zero.
+        let inv = MathStructure::Power {
+            base: Box::new(sym("x")),
+            exponent: Box::new(num(-1)),
+        };
+        assert!(eval_mul(num(0), inv).is_zero());
     }
 
     #[test]
