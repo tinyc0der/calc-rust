@@ -43,8 +43,19 @@ The reference binary is the oracle. Every behavioural decision in this port is
 checked against it rather than assumed, and the interesting ones are recorded
 as tests next to the code.
 
-1. **Transcript parity.** `scripts/parity.sh` runs all 17 transcripts from
-   `libqalculate/tests/` through this CLI and reports per-file scores:
+1. **Transcript parity, enforced by `cargo test`.** `crates/qalc/tests/transcripts.rs`
+   runs all 17 transcripts from `libqalculate/tests/` and fails the build on
+   any mismatch. Its `KNOWN_FAILURES` list is empty, and the test fails both
+   when a new case breaks *and* when a listed one starts passing, so the count
+   cannot drift in either direction.
+
+   ```
+   cargo test -p qalc --test transcripts
+   ```
+
+   `scripts/parity.sh` runs the same transcripts through the built CLI and
+   prints per-file scores instead of a pass/fail. It has no per-file timeout —
+   a transcript that hangs will hang the script rather than be scored zero.
 
    ```
    ./scripts/parity.sh /path/to/libqalculate
@@ -53,12 +64,31 @@ as tests next to the code.
 2. **Unit tests.** `cargo test` — several hundred, most asserting
    oracle-verified output.
 
-3. **Dependency audit.** `cargo tree` shows no `-sys` crate, no `libc`, and no
-   `build.rs` linking a system library.
+3. **Dependency audit.** `./scripts/check-pure-rust.sh` is the proof of the
+   zero-C-linkage constraint. It gates on resolved `cargo metadata` (no `-sys`
+   crate, no `libc`, no `links` key), then scans the source of every crate in
+   the graph for `extern "C"`, `#[link]` and `build.rs` native linkage, then
+   scans the workspace itself. Both metadata gates use `--locked`, so an
+   unreviewed lockfile change fails here rather than quietly re-resolving.
 
 ## Status
 
-This is an in-progress port. Fully passing transcripts include the operator,
-bitwise, matrix/vector, geometry and variable suites; symbolic algebra
-(limits, polynomial factoring, equation solving) is still being built out.
-Run `scripts/parity.sh` for the current numbers.
+**All 17 transcripts pass: 656/656 assertions, byte-identical to the reference
+binary.** That includes the symbolic-algebra suites — limits at 181/181,
+polynomial at 49/49, solver at 25/25, calculus at 11/11 — alongside
+matrix/vector (130/130), stats (39/39), operators, bitwise, geometry, units,
+dates, strings, number bases, percentages, parser and variables.
+
+Parity is a regression test, not a milestone: `cargo test` fails if it drops.
+
+The port is not the whole of libqalculate, though. Known gaps, each recorded in
+the module that would own it:
+
+- unit synchronization in the merge engine — `1 m + 1 cm` does not combine
+  (`qalc-core/src/calculate.rs`)
+- the builtin constants `pi`, `e`, `c` are not substituted for their values
+- function-specific simplification identities (`sin(x)^2+cos(x)^2`, `ln(e^2)`)
+- comparison evaluation (`5>2` is not reduced to `true`) and fraction
+  reduction (`(x^2-1)/(x-1)`)
+- quartic radicals in the solver; Bessel, Airy and polylogarithm in `qalc-num`
+- the interactive niceties of `qalc.cc`: line editing, `save`, RPN mode

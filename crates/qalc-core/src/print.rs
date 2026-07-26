@@ -109,7 +109,10 @@ fn print_number(n: &Number, po: &PrintOptions) -> String {
     // `restrict_fraction_length` (PrintOptions, set by `/set fractions on`):
     // a fraction whose numerator or denominator is longer than the display
     // precision allows is shown as a decimal instead — `(3/2)^30` prints as
-    // `191751.0592`, not `205891132094649/1073741824` (Number.cc:12957).
+    // `191751.0592`, not `205891132094649/1073741824`
+    // (Number.cc:13127-13161: the C++ prints numerator and denominator with
+    // `is_approximate` armed and reprints the whole number as
+    // `FRACTION_DECIMAL` if either came out approximate).
     if let Some(s) = print_long_fraction_as_decimal(n, po) {
         return s;
     }
@@ -888,8 +891,9 @@ fn is_constant_symbol(m: &MathStructure) -> bool {
     matches!(m, MathStructure::Symbolic(s) if s == "pi" || s == "e")
 }
 
-/// `namelen` for the node types that carry a name: a bare symbol, or a power
-/// of one (`MathStructure-print.cc:3488` delegates a power to its base).
+/// `namelen` (`MathStructure-print.cc:2992-3024`) for the node types that
+/// carry a name: a bare symbol, or a power of one — `neededMultiplicationSign`
+/// delegates a `STRUCT_POWER` to its base at `MathStructure-print.cc:3492`.
 fn name_len(m: &MathStructure) -> Option<usize> {
     match m {
         MathStructure::Symbolic(s) => Some(s.chars().count()),
@@ -1075,8 +1079,10 @@ fn comparison_sign(op: ComparisonType, po: &PrintOptions) -> &'static str {
     }
 }
 
-/// Names for the builtin function ids the parser produces. The full table
-/// arrives with the function registry.
+/// Names for the builtin function ids the parser produces. The arms here are
+/// the ids `builtins` owns; everything else falls through to the owning
+/// module's own `function_name`, so each module keeps its ids and their
+/// printed names together.
 fn function_name(id: crate::ids::FunctionId) -> &'static str {
     use crate::builtins::id as f;
     match id.0 {

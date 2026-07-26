@@ -103,9 +103,10 @@ impl Drop for DepthGuard {
 /// Resolves identifiers to variables, units and functions.
 ///
 /// The C++ parser consults the `CALCULATOR` singleton's `ufv` name buckets;
-/// threading a resolver keeps `qalc-core` free of global state. Until the
-/// registries are ported, [`SymbolicResolver`] turns every name into a
-/// symbol.
+/// threading a resolver keeps `qalc-core` free of global state.
+/// [`crate::session::Session`] is the real implementation, backed by the unit
+/// and definition registries. [`SymbolicResolver`] — every name becomes a
+/// symbol — is what bare [`parse`] uses, for callers that only want a tree.
 pub trait NameResolver {
     /// Resolve `name` to a structure (variable, unit, or constant).
     fn resolve(&self, name: &str) -> Option<MathStructure>;
@@ -1412,9 +1413,9 @@ fn base_target_from_name(lower: &str) -> Option<ConversionTarget> {
     Some(ConversionTarget::NumberBase { base: b, bits: 0 })
 }
 
-/// Builtin operations the parser desugars into function calls. Real
-/// `FunctionId`s arrive with the registry port; these placeholder ids match
-/// the C++ `FUNCTION_ID_*` values so the mapping stays stable.
+/// Builtin operations the parser desugars into function calls. The ids are the
+/// C++ `FUNCTION_ID_*` values, which is what lets [`crate::builtins`] dispatch
+/// them directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinOp {
     Abs,

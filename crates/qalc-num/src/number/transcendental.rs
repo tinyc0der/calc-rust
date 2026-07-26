@@ -3,8 +3,15 @@
 //!
 //! Interval propagation: monotone functions map [l,u] → [f(l)↓, f(u)↑];
 //! sin/cos locate contained extrema. Point mode uses round-to-nearest.
-//! TODO(port): gamma/digamma/zeta/erf/bessel/polylog/expint/… (no astro-float
-//! equivalents; need hand-rolled series — see special-functions plan).
+//! astro-float has no counterpart to MPFR's special functions, so gamma,
+//! digamma, zeta, erf/erfc/erfi, Bernoulli numbers and the exponential,
+//! logarithmic, sine and cosine integrals live next door in
+//! [`super::special`] as hand-rolled precision-scaled series; `builtins.rs`
+//! in qalc-core dispatches to them.
+//!
+//! TODO(port): the Bessel functions (`mpfr_jn`/`mpfr_yn`), Airy and the
+//! polylogarithm (`mpfr_li2`) are still stubs — see the bottom of
+//! `special.rs`.
 
 use super::{Number, RealValue};
 use crate::context;

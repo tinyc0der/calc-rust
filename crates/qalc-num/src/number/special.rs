@@ -1215,7 +1215,25 @@ impl Number {
     }
 
     // ------------------------------------------------------------------
-    // Not yet ported
+    // Stubs
+    //
+    // Two different things live here, and the difference matters:
+    //
+    // * `besselj`, `bessely`, `airy` and `polylog` are genuinely unported —
+    //   the calculator cannot evaluate them at all (`besselj(0,1)` comes back
+    //   unevaluated from the CLI).
+    // * `igamma`, `fresnels`, `fresnelc` and `erfinv` are dead code. The
+    //   calculator *does* have all four; they are just implemented a layer
+    //   up, on `MathStructure` rather than on `Number`, because the reference
+    //   defines them over structures too. `igamma`/`fresnels`/`fresnelc` are
+    //   in `qalc-core/src/integrate.rs` (`igamma(3, 1)` = `1.839397206`,
+    //   `fresnels(1)` = `0.4382591474`, `fresnelc(1)` = `0.7798934004`) and
+    //   `erfinv` in `qalc-core/src/stats.rs` (`erfinv_f64`, which `probit`
+    //   and `normdistinv` are built on).
+    //
+    // Nothing calls the second group; they are kept only so the `Number`
+    // surface still names every `Number.cc` special function, and the test
+    // below pins them at `false` so a caller cannot appear by accident.
     // ------------------------------------------------------------------
 
     /// TODO(port): Bessel function of the first kind, `mpfr_jn`.
@@ -1238,22 +1256,26 @@ impl Number {
         false
     }
 
-    /// TODO(port): upper incomplete gamma, `mpfr_gamma_inc`.
+    /// Dead: the upper incomplete gamma is implemented in
+    /// `qalc-core/src/integrate.rs` (`FUNCTION_ID_I_GAMMA`), not here.
     pub fn igamma(&mut self, _o: &Number) -> bool {
         false
     }
 
-    /// TODO(port): Fresnel sine integral S(x).
+    /// Dead: the Fresnel sine integral S(x) is implemented in
+    /// `qalc-core/src/integrate.rs` (`FUNCTION_ID_FRESNEL_S`), not here.
     pub fn fresnels(&mut self) -> bool {
         false
     }
 
-    /// TODO(port): Fresnel cosine integral C(x).
+    /// Dead: the Fresnel cosine integral C(x) is implemented in
+    /// `qalc-core/src/integrate.rs` (`FUNCTION_ID_FRESNEL_C`), not here.
     pub fn fresnelc(&mut self) -> bool {
         false
     }
 
-    /// TODO(port): inverse error function.
+    /// Dead: the inverse error function is implemented as `erfinv_f64` in
+    /// `qalc-core/src/stats.rs`, not here.
     pub fn erfinv(&mut self) -> bool {
         false
     }

@@ -9,15 +9,23 @@
 //! Methods keep the C++ mutate-and-return-`bool` shape: `false` means the
 //! operation was not applicable and `self` was left unchanged.
 //!
+//! The *Calendrical Calculations* astronomy at the bottom of
+//! `QalculateDateTime.cc` is in [`astro`], which has the authoritative list of
+//! what is and is not covered there: `lunarPhase` and `findNextLunarPhase` are
+//! ported and tested, `solarLongitude` and `findNextSolarLongitude` are not.
+//!
+//! Time zones exist on the *print* side: `PrintOptions::time_zone` selects
+//! local, UTC or a fixed custom offset, which is what backs the CLI's
+//! `to utc` / `to +08:00`.
+//!
 //! TODO(port): not ported in this pass —
 //! - non-Gregorian calendars (`CalendarSystem`, `calendarToDate`,
 //!   `dateToCalendar`, Hebrew/Islamic/Chinese/... month tables)
-//! - astronomy (`solarLongitude`, `lunarPhase`, `findNextSolarLongitude`,
-//!   `findNextLunarPhase`)
-//! - time zones (`dateTimeZone`): all values are treated as being in a
-//!   single zone; the `convert_to_utc` flags are accepted for API parity
-//!   but behave as `false`. Explicit offsets in parsed strings ("+02:00",
-//!   "CET", ...) are normalized to UTC.
+//! - `solarLongitude` / `findNextSolarLongitude` (see [`astro`])
+//! - time zones on the *value* side (`dateTimeZone`): stored values carry no
+//!   zone, so the `convert_to_utc` flags are accepted for API parity but
+//!   behave as `false`, and explicit offsets in parsed strings ("+02:00",
+//!   "CET", ...) are normalized to UTC on the way in.
 //! - leap seconds (`countLeapSeconds`, `nextLeapSecond`, `prevLeapSecond`):
 //!   the `count_leap_seconds` flags behave as `false`. A stored second
 //!   value of 60 (from `set_time`) is still tolerated by the

@@ -4,18 +4,27 @@
 //!
 //! The C++ isolates `x` by repeatedly moving everything else to the other
 //! side of a `STRUCT_COMPARISON`, falling back to polynomial factorization
-//! for higher degrees. This port implements the cases the transcripts use:
+//! for higher degrees. This port implements:
 //!
 //! - linear and quadratic equations (the quadratic formula, kept exact),
 //! - polynomials of any degree that factor into rational roots,
+//! - cubics that do not, via Cardano kept in radicals (`cubic_roots`):
+//!   `x^3 + x^2 + x = 5` → `2 / (3 * cbrt(3 * sqrt(561) - 71)) - 0.3333333333
+//!   - cbrt(3 * sqrt(561) - 71) / 3`,
 //! - `a^x = b` → `x = ln(b)/ln(a)`,
+//! - the trigonometric general solutions: `1/3*sin(3x) - 1/3 = 0` →
+//!   `x = 0.6666666667 pi * n + pi / 6`,
+//! - Lambert-W inversion ([`solve_lambert`]), covering both `ln(x) + x = b`
+//!   (`ln(x) + x = 3` → `x = lambertw(e^3)`) and `x^(a x) = b`, which uses
+//!   both W branches (`x^(-3x) = 2` → two roots),
 //! - numeric root finding for `newtonsolve`/`secantsolve` and for the
 //!   approximate cases.
 //!
-//! TODO(port): the trigonometric general solutions (`sin(x) = a` →
-//! `x = 2*pi*n + asin(a)`), Lambert-W inversion, `x^(a x) = b`, cubic/quartic
-//! radicals for non-rational roots, and interval/assumption filtering of the
-//! solution set.
+//! TODO(port): quartic radicals via the resolvent cubic — every quartic in the
+//! transcripts factors into rational roots, so `x^4 + x + 1 = 0` comes back
+//! unsolved (see [`solve_polynomial`]) — and interval/assumption filtering of
+//! the solution set, which is what would drop the roots the C++ rejects
+//! against `CALCULATOR->defaultAssumptions()`.
 
 use crate::builtins::id as bid;
 use crate::ids::FunctionId;
@@ -2097,8 +2106,12 @@ fn converged(step: &Number, x: &Number) -> bool {
     mag.is_less_than(&tol)
 }
 
-/// Newton iteration using a numeric derivative (the C++ uses the symbolic
-/// `diff`, which is not ported yet — TODO(port)).
+/// Newton iteration where the C++ uses the symbolic `diff`.
+///
+/// [`crate::differentiate::differentiate`] exists, but this seeds a secant
+/// step at `x0 * (1 + 1e-8)` instead: the secant iteration is already here for
+/// `secantsolve`, and a numeric derivative avoids the symbolic derivative
+/// failing on the very expressions `newtonsolve` is reached for.
 pub fn newton_solve(
     expr: &MathStructure,
     xvar: &MathStructure,

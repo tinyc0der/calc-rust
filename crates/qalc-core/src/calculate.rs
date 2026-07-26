@@ -35,18 +35,34 @@
 //! success codes as "result is in `self`, drop `other`", and only use the
 //! distinction for the loop optimizations.
 //!
+//! # What this module is *not*
+//!
+//! Several things the C++ does inside the merge engine live elsewhere in this
+//! port, so do not look for them here: function evaluation is
+//! [`crate::builtins::calculate_functions_eo`], variable substitution is the
+//! `NameResolver` on [`crate::session::Session`], `evalSort` is
+//! [`crate::sort`], matrix/vector arithmetic is [`crate::matrix`], and the
+//! whole ordering is spelled out in [`crate::eval::evaluate_calculated_with`].
+//! Bitwise and logical merging is done here (`5 xor 3` is `6`, `2 and 3` is
+//! `1`); comparison merging is not.
+//!
 //! # Deliberate omissions (TODO(port))
 //!
-//! - unit synchronization (`syncUnits`, `eo.sync_units`, temperature modes)
-//! - function evaluation and every function-specific identity
-//!   (`sin(x)^2+cos(x)^2`, `sgn`, `abs`, `ln`, ...) — needs the function
-//!   registry
-//! - variable substitution (`eo.calculate_variables`) — needs the variable
-//!   registry
-//! - `eval()` with structuring/factorization, `evalSort`, `format`
-//! - comparison, bitwise and logical merging beyond recursing into children
-//! - matrix/vector arithmetic and the non-reorderable matrix merge loop
-//! - fraction reduction / polynomial division (`eo.reduce_divisions`)
+//! Each verified against the reference binary; the reference's answer is in
+//! parentheses.
+//!
+//! - unit synchronization (`syncUnits`, `eo.sync_units`, temperature modes):
+//!   `1 m + 1 cm` stays `m + cm` (`1.01 m`)
+//! - the function-specific identities inside the merge engine, as opposed to
+//!   evaluating a function call: `sin(x)^2+cos(x)^2` stays put (`1`) and
+//!   `ln(e^2)` stays put (`2`)
+//! - substitution of the *builtin* constants — `pi`, `e`, `c` reach the
+//!   printer as symbols (`3.14159265358979323846264338328`,
+//!   `299.792458 km/ms`). User-assigned variables do substitute.
+//! - comparison merging (`eo.test_comparisons`): `5>2` stays `5 > 2` (`true`)
+//! - fraction reduction / polynomial division (`eo.reduce_divisions`):
+//!   `(x^2-1)/(x-1)` stays split (`x + 1`)
+//! - `eval()` with structuring/factorization, and `format`
 //! - `split_squares` (needs the prime tables) and interval/precision
 //!   bookkeeping (`MERGE_APPROX_AND_PREC`, `b_approx`, `i_precision`)
 
@@ -109,8 +125,13 @@ type MergeFn = fn(&mut MathStructure, &mut MathStructure, &EvaluationOptions, bo
 /// defaults to `ASSUMPTION_TYPE_NUMBER` + `ASSUMPTION_SIGN_UNKNOWN`
 /// (`Variable.cc:25`): a symbol is a (possibly complex) number of unknown
 /// sign, so only `represents_number` and `represents_non_matrix` hold.
-/// Variables, units, functions and date/times always answer conservatively
-/// here because the registries are not ported yet.
+///
+/// Units, variables and date/times answer conservatively: the registries do
+/// exist ([`crate::units`], [`crate::session::Session`]), but these predicates
+/// are pure functions of the structure and have no handle on them, so they
+/// give the answer that is safe for every definition. Functions are the one
+/// exception — [`crate::builtins::returns_scalar`] is a static table, so
+/// `non_matrix` can consult it.
 pub(crate) mod represents {
     use crate::structure::MathStructure as M;
 
@@ -327,8 +348,9 @@ pub(crate) mod represents {
         matches!(m, M::Number(n) if n.is_infinite(false))
     }
 
-    /// `representsNonMatrix()` — only vectors can be matrices here; the
-    /// variable/function cases need the registries.
+    /// `representsNonMatrix()` — only vectors can be matrices here. Functions
+    /// answer from the static `returns_scalar` table; a variable could hold a
+    /// matrix, and this has no way to look it up, so it answers `false`.
     pub fn non_matrix(m: &M) -> bool {
         match m {
             M::Vector(v) => v.is_empty() || v.iter().all(|c| !c.is_vector()),
@@ -682,7 +704,8 @@ impl MathStructure {
 
     /// `ax+bx=(a+b)x`, `axy+xy=(a+1)xy`, `xy+xy=2xy` — the
     /// `STRUCT_MULTIPLICATION` / `STRUCT_MULTIPLICATION` branch of
-    /// `merge_addition` (`MathStructure-calculate.cc:1358`).
+    /// `merge_addition` (`MathStructure-calculate.cc:357`; the quoted comment
+    /// is at `:370`).
     fn merge_addition_of_multiplications(
         &mut self,
         other: &mut MathStructure,

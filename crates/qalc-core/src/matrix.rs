@@ -713,7 +713,7 @@ fn invert(g: &[Vec<M>]) -> Option<Vec<Vec<M>>> {
     )
 }
 
-/// `matrix_to_rref` (BuiltinFunctions-matrixvector.cc:900) — Gauss-Jordan
+/// `matrix_to_rref` (BuiltinFunctions-matrixvector.cc:919) — Gauss-Jordan
 /// reduction to reduced row echelon form.
 fn rref(g: &mut Vec<Vec<M>>) -> bool {
     let rows_n = g.len();

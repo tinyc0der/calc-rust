@@ -199,7 +199,8 @@ impl Session {
             return String::new();
         };
         // `set input base 16` and `set base 16` — a two-word option name, so
-        // the value is one word further along (src/qalc.cc:5863).
+        // the value is one word further along (`set_option`, src/qalc.cc:1366;
+        // the two-word split is at :1377-1443).
         let (option, value) = match option {
             "input" | "output" => (
                 match (option, words.next()) {

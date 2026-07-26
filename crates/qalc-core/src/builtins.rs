@@ -166,9 +166,11 @@ pub fn calculate_function_exact(m: &mut MathStructure, exact: bool) -> bool {
     if crate::stats::calculate_function(m) {
         return true;
     }
-    // `Argument::handleVector` (Function.cc:1730): a function whose argument
-    // is a scalar maps over a vector element by element — `abs([1 -2])` is
-    // `[1 2]`, which `geomean(abs(v))` depends on.
+    // `Argument::handlesVector()` (MathStructure-calculate.cc:7178-7188, in
+    // `calculateFunctions`): a function whose argument is a scalar maps over a
+    // vector element by element — `abs([1 -2])` is `[1 2]`, which
+    // `geomean(abs(v))` depends on. (There is no `Argument::handleVector`
+    // symbol in the C++; the flag is read, never dispatched through.)
     if handle_vector(m) {
         return true;
     }
@@ -200,8 +202,8 @@ pub fn calculate_function_exact(m: &mut MathStructure, exact: bool) -> bool {
 /// Map a one-argument numeric builtin over a vector argument.
 ///
 /// The C++ `Argument` carries a `b_handle_vector` flag; when a scalar
-/// argument receives a vector, `MathFunction::calculate` applies the
-/// function to each element (Function.cc:1730).
+/// argument receives a vector, `MathStructure::calculateFunctions` applies the
+/// function to each element (MathStructure-calculate.cc:7178-7188).
 fn handle_vector(m: &mut MathStructure) -> bool {
     let MathStructure::Function { id, args } = m else {
         return false;

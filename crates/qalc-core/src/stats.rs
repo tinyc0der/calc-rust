@@ -25,7 +25,7 @@ use qalc_num::{Number, ParseOptions};
 use MathStructure as M;
 
 /// Function ids. `TOTAL`..`MODE` are the real `FUNCTION_ID_*` values from
-/// BuiltinFunctions.h:194; `LOAD` is FUNCTION_ID_LOAD (1126). The rest are
+/// BuiltinFunctions.h:406-410; `LOAD` is FUNCTION_ID_LOAD (1126, :239). The rest are
 /// XML user functions with no C++ id, so the port allocates a private block.
 pub mod id {
     pub const LOAD: u32 = 1126;

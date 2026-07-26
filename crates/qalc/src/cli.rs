@@ -11,8 +11,9 @@ use qalc_num::options::IntervalDisplay;
 
 
 thread_local! {
-    /// `adaptive_interval_display` (src/qalc.cc:116): on until `/set ivdisp`
-    /// picks a display explicitly.
+    /// `adaptive_interval_display` (declared src/qalc.cc:82): on until
+    /// `/set ivdisp` picks a display explicitly — the CLI clears it at
+    /// src/qalc.cc:2211 and restores it at :2203 for the `0`/adaptive value.
     static ADAPTIVE_INTERVAL_DISPLAY: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
 

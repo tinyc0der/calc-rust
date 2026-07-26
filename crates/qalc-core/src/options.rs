@@ -2,9 +2,8 @@
 //! from `includes.h` (`ApproximationMode`, `StructuringMode`).
 //!
 //! Only the fields the calculation core ([`crate::calculate`]) actually
-//! consults are ported so far; the unit-conversion, isolation and printing
-//! fields arrive with their respective ports. Defaults are taken verbatim
-//! from `EvaluationOptions::EvaluationOptions()` in `Calculator.cc:72`.
+//! consults are ported. Defaults are taken verbatim from
+//! `EvaluationOptions::EvaluationOptions()` in `Calculator.cc:72`.
 
 /// `ApproximationMode` (`includes.h:607`). Declaration order is preserved
 /// because the C++ code compares modes with `<` and `>=`
@@ -40,20 +39,37 @@ pub enum StructuringMode {
 /// `isolate_var`, `auto_post_conversion`, `mixed_units_conversion`,
 /// `parse_options`, `do_polynomial_division`, `protected_function`,
 /// `complex_number_form`, `local_currency_conversion`,
-/// `transform_trigonometric_functions` and `interval_calculation`. They need
-/// the unit/function/variable registries or the printing layer.
+/// `transform_trigonometric_functions` and `interval_calculation`.
+///
+/// Adding one is not a no-op for three of them: the behaviour they gate is
+/// already live and hard-wired *on*, so a field defaulting to the C++ default
+/// would change results rather than preserve them.
+///
+/// - `isolate_x`: [`crate::eval::evaluate_calculated_with`] always calls
+///   `solve::isolate_x_toplevel`.
+/// - `auto_post_conversion`: [`crate::eval::apply_conversion`] always runs
+///   `units::convert_to_optimal` when there is no explicit `to`.
+/// - `interval_calculation`: the CLI pins it to `VarianceFormula` in
+///   `qalc/src/cli.rs`.
+///
+/// The rest are simply unread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvaluationOptions {
     /// How exact the result must be. Default: `TryExact`.
     pub approximation: ApproximationMode,
     /// Whether units are synced/converted to allow evaluation.
-    /// Default: true. TODO(port): not consulted yet — no unit registry.
+    /// Default: true. TODO(port): not consulted — `syncUnits` itself is not
+    /// ported, so there is nothing to switch off (`1 m + 1 cm` does not
+    /// combine at all). See the omissions list in [`crate::calculate`].
     pub sync_units: bool,
     /// Whether known variables are replaced by their value. Default: true.
-    /// TODO(port): not consulted yet — no variable registry.
+    /// TODO(port): not consulted — substitution happens unconditionally, in
+    /// the parser's `NameResolver` rather than in the merge engine, so there
+    /// is no point at which this could be tested.
     pub calculate_variables: bool,
     /// Whether functions are calculated. Default: true.
-    /// TODO(port): not consulted yet — no function registry.
+    /// TODO(port): not consulted — [`crate::builtins::calculate_functions_eo`]
+    /// runs on every evaluation pass regardless.
     pub calculate_functions: bool,
     /// Whether comparisons are evaluated (`5>2` => `1`). Default: true
     /// (C++ uses an `int`, where 2 means "only if the result is definite").

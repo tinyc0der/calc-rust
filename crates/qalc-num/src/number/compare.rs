@@ -1,5 +1,5 @@
 //! Comparison — faithful port of `Number::compare`/`equals` and friends
-//! (Number.cc:2450-2970), including interval-aware `ComparisonResult`
+//! (Number.cc:2607-3050), including interval-aware `ComparisonResult`
 //! semantics.
 //!
 //! Convention (matches C++): `self.compare(o)` describes **o relative to
@@ -39,7 +39,7 @@ fn cmp_ff(a: &BigFloat, b: &BigFloat) -> Option<i32> {
 }
 
 impl Number {
-    /// `equals(o, allow_interval, allow_infinite)` — Number.cc:2450.
+    /// `equals(o, allow_interval, allow_infinite)` — Number.cc:2610.
     pub fn equals(&self, o: &Number, allow_interval: bool, allow_infinite: bool) -> bool {
         // Imaginary parts must match.
         let ia = self.imag.as_deref();

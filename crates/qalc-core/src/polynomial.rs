@@ -108,7 +108,7 @@ fn power_of(m: &MathStructure, xvar: &MathStructure) -> Option<Number> {
 // degree / ldegree / coefficient
 // ----------------------------------------------------------------------
 
-/// `MathStructure::degree` (`MathStructure-polynomial.cc:301`) — the highest
+/// `MathStructure::degree` (`MathStructure-polynomial.cc:227`) — the highest
 /// power of `xvar` occurring in `m`, or zero when it does not occur.
 pub fn degree(m: &MathStructure, xvar: &MathStructure) -> Number {
     let mut best: Option<Number> = None;
@@ -130,7 +130,7 @@ pub fn degree(m: &MathStructure, xvar: &MathStructure) -> Number {
     best.unwrap_or_else(Number::new)
 }
 
-/// `MathStructure::ldegree` (`MathStructure-polynomial.cc:326`) — the lowest
+/// `MathStructure::ldegree` (`MathStructure-polynomial.cc:263`) — the lowest
 /// power of `xvar`. A term free of `xvar` short-circuits the answer to zero,
 /// exactly as the C++ `return nr_zero` does.
 pub fn ldegree(m: &MathStructure, xvar: &MathStructure) -> Number {

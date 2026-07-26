@@ -12,12 +12,13 @@
 //! - "+/-"/"±" uncertainty and "(n)" parenthesized uncertainty;
 //! - two's complement (`po.twos_complement` / `po.hexadecimal_twos_complement`
 //!   with `po.binary_bits`);
-//! - read_precision: value becomes a float interval of ±half the last digit.
+//! - read_precision: value becomes a float interval of ±half the last digit;
+//! - sexagesimal ':' notation (Number.cc:1076) — `10:31` is 10 + 31/60.
 //!
 //! Skipped this pass (see TODO(port) markers below): roman numerals,
 //! binary-coded decimal, bijective base-26, non-integer/negative/Unicode/
-//! custom bases, sexagesimal ':' notation, and error reporting via
-//! `CALCULATOR->error` (unrecognized characters are silently ignored).
+//! custom bases, and error reporting via `CALCULATOR->error` (unrecognized
+//! characters are silently ignored).
 
 use super::{Number, RealValue};
 use crate::context;

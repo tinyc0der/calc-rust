@@ -3,8 +3,10 @@
 //! Argument handling and the output side. The evaluation path itself lives in
 //! [`qalc::cli`] so the transcript parity test can drive the same code.
 //!
-//! `/set` and `to` are implemented; the interactive REPL, `save`, and RPN mode
-//! land with the Calculator port.
+//! `/set` (see [`qalc_core::Session`]) and `to` conversions (see
+//! [`qalc_core::eval::apply_conversion`]) are implemented. [`repl`] is a bare
+//! read-eval-print loop over stdin — no line editing, history or completion —
+//! and `save` and RPN mode are not ported.
 
 use qalc::batch;
 use qalc::cli::{evaluate_cli_line, new_session};
