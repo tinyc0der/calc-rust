@@ -1112,6 +1112,12 @@ fn divisors(z: i64) -> Vec<i64> {
 /// factors. Only univariate rational-root and square-free factorization is
 /// ported; anything else is returned unchanged.
 pub fn factor(m: &MathStructure, eo: &EvaluationOptions) -> MathStructure {
+    // A perfect-square trinomial needs no variable of its own and may have
+    // two, so it is tried before the univariate machinery:
+    // `x + 2sqrt(x)sqrt(y) + y` is `(sqrt(x) + sqrt(y))^2`.
+    if let Some(square) = factor_perfect_square(m, eo) {
+        return square;
+    }
     let Some(xvar) = crate::polynomial::find_x_var(m) else {
         return m.clone();
     };
@@ -1589,5 +1595,104 @@ mod tests {
         let parts = dense_sqrfree(&c);
         let mults: Vec<usize> = parts.iter().map(|(_, m)| *m).collect();
         assert!(mults.contains(&1) && mults.contains(&2), "got {mults:?}");
+    }
+}
+
+/// `u^2 + 2uv + v^2` -> `(u + v)^2`, and `u^2 - 2uv + v^2` -> `(u - v)^2`.
+///
+/// The univariate factorizer works on a dense coefficient vector over one
+/// variable, so it cannot see this when `u` and `v` involve different
+/// unknowns. Matching is by structure: the two outer terms give `u` and `v`
+/// as their square roots, and the candidate cross term `2uv` has to come out
+/// *equal* to the remaining term, which is a strong enough check that no
+/// ordinary trinomial slips through.
+fn factor_perfect_square(
+    m: &MathStructure,
+    eo: &EvaluationOptions,
+) -> Option<MathStructure> {
+    let MathStructure::Addition(terms) = m else {
+        return None;
+    };
+    if terms.len() != 3 {
+        return None;
+    }
+    let evaluated = |mut x: MathStructure| {
+        crate::eval::evaluate_calculated_with(&mut x, eo);
+        crate::sort::sort(&mut x);
+        x
+    };
+    for cross in 0..3 {
+        let square_a = &terms[(cross + 1) % 3];
+        let square_b = &terms[(cross + 2) % 3];
+        let middle = &terms[cross];
+        let half = MathStructure::Number(Number::from_ints(1, 2, 0));
+        let u = evaluated(MathStructure::Power {
+            base: Box::new(square_a.clone()),
+            exponent: Box::new(half.clone()),
+        });
+        let v = evaluated(MathStructure::Power {
+            base: Box::new(square_b.clone()),
+            exponent: Box::new(half),
+        });
+        for negated in [false, true] {
+            let signed_v = if negated {
+                crate::absolute::negate_struct(&v)
+            } else {
+                v.clone()
+            };
+            let candidate = evaluated(MathStructure::Multiplication(vec![
+                MathStructure::from(2),
+                u.clone(),
+                signed_v.clone(),
+            ]));
+            if !candidate.equals(middle) {
+                continue;
+            }
+            let sum = evaluated(MathStructure::Addition(vec![u.clone(), signed_v]));
+            let mut result = MathStructure::Power {
+                base: Box::new(sum),
+                exponent: Box::new(MathStructure::from(2)),
+            };
+            crate::sort::sort(&mut result);
+            return Some(result);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod perfect_square_tests {
+    use crate::session::Session;
+
+    fn session() -> Session {
+        let mut s = Session::new();
+        s.evaluate_line("/set approximation exact").ok();
+        s.evaluate_line("/set fr 2").ok();
+        s
+    }
+
+    #[test]
+    fn a_trinomial_in_two_unknowns_is_still_a_square() {
+        let mut s = session();
+        s.evaluate_line("/assume positive").unwrap();
+        assert_eq!(
+            s.evaluate_line("factor x + 2 * sqrt(xy) + y").unwrap(),
+            "(sqrt(x) + sqrt(y))^2"
+        );
+        s.evaluate_line("/assume unknown").unwrap();
+    }
+
+    #[test]
+    fn ordinary_trinomials_still_factor_the_ordinary_way() {
+        let mut s = session();
+        crate::assumptions::set_sign(crate::assumptions::Sign::Unknown);
+        assert_eq!(s.evaluate_line("factor x^2+2x+1").unwrap(), "(x + 1)^2");
+        assert_eq!(s.evaluate_line("factor x^2-2x+1").unwrap(), "(x - 1)^2");
+        // Not a square: the cross term does not match, so this falls through
+        // to the univariate factorizer.
+        assert_eq!(
+            s.evaluate_line("factor x^2+3x+2").unwrap(),
+            "(x + 1)(x + 2)"
+        );
     }
 }
