@@ -5,6 +5,8 @@
 //! definitions loading, and output formatting.
 
 pub mod ids;
+pub mod lexer;
+pub mod parser;
 pub mod structure;
 
 pub use ids::{FunctionId, UnitId, VariableId};

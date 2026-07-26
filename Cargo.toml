@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/qalc-num", "crates/qalc-core", "crates/qalc"]
+members = ["crates/qalc-num", "crates/qalc-datetime", "crates/qalc-core", "crates/qalc"]
 
 [workspace.package]
 version = "0.1.0"

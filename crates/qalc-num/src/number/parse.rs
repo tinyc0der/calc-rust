@@ -161,7 +161,7 @@ impl Number {
         }
 
         // read numbers with positive integer bases >= 2 and <= 36
-        let base: i32 = if (2..=36).contains(&po.base) { po.base } else { 10 };
+        let mut base: i32 = if (2..=36).contains(&po.base) { po.base } else { 10 };
 
         let mut i_unc: i64 = 0;
         let mut num = BigInt::zero();
@@ -172,21 +172,24 @@ impl Number {
         // remove_blank_ends
         let mut number: &str = text.trim_matches(|c: char| c.is_ascii_whitespace());
 
-        // remove base prefixes
+        // Remove base prefixes. A prefix also *selects* the base: the
+        // reference binary reads `0xFF` as 255, `0b1011` as 11 and `0o17` as
+        // 15 regardless of the configured input base.
         let nb = number.as_bytes();
-        if po.base == 16 && nb.len() >= 2 && nb[0] == b'0' && (nb[1] == b'x' || nb[1] == b'X') {
+        if nb.len() >= 2 && nb[0] == b'0' && (nb[1] == b'x' || nb[1] == b'X') {
             number = &number[2..];
-        } else if po.base == 8 && nb.len() >= 2 && nb[0] == b'0' && (nb[1] == b'o' || nb[1] == b'O')
-        {
+            base = 16;
+        } else if nb.len() >= 2 && nb[0] == b'0' && (nb[1] == b'o' || nb[1] == b'O') {
             number = &number[2..];
+            base = 8;
+        } else if nb.len() >= 2 && nb[0] == b'0' && (nb[1] == b'b' || nb[1] == b'B') {
+            number = &number[2..];
+            base = 2;
+        } else if nb.len() >= 2 && nb[0] == b'0' && (nb[1] == b'd' || nb[1] == b'D') {
+            number = &number[2..];
+            base = 12;
         } else if po.base == 8 && nb.len() > 1 && nb[0] == b'0' && nb[1] != b'.' {
             number = &number[1..];
-        } else if po.base == 2 && nb.len() >= 2 && nb[0] == b'0' && (nb[1] == b'b' || nb[1] == b'B')
-        {
-            number = &number[2..];
-        } else if po.base == 12 && nb.len() >= 2 && nb[0] == b'0' && (nb[1] == b'd' || nb[1] == b'D')
-        {
-            number = &number[2..];
         }
         let bytes = number.as_bytes();
 

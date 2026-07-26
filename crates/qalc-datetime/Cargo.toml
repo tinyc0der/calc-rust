@@ -1,0 +1,9 @@
+[package]
+name = "qalc-datetime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Date/time core for rust-calc (port of libqalculate's QalculateDateTime)"
+
+[dependencies]
+qalc-num = { path = "../qalc-num" }
