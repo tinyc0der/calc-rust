@@ -11,6 +11,7 @@
 use super::{Number, RealValue};
 use crate::context;
 use crate::float::bigfloat_to_ratio;
+use crate::options::IntervalDisplay;
 use crate::options::{
     exp_mode, BaseDisplay, NumberFractionFormat, PrintOptions, RoundingMode,
 };
@@ -299,6 +300,41 @@ impl Number {
     /// Float printing: the float value is an exact binary rational; print it
     /// through the rational path with precision limited by the value's
     /// interval width (or working precision for point values).
+
+    /// `midpoint ± half-width`, or `None` when the bounds are unusable.
+    fn print_plus_minus(
+        &self,
+        po: &PrintOptions,
+        lower: &astro_float::BigFloat,
+        upper: &astro_float::BigFloat,
+    ) -> Option<String> {
+        let (ln_, ld) = bigfloat_to_ratio(lower)?;
+        let (un, ud) = bigfloat_to_ratio(upper)?;
+        let lo = BigRational::new(ln_, ld);
+        let hi = BigRational::new(un, ud);
+        let two = BigRational::from_integer(BigInt::from(2));
+        let mid = (&lo + &hi) / &two;
+        let half = (&hi - &lo) / &two;
+        if half.is_zero() {
+            return None;
+        }
+        // Two significant digits of the uncertainty fixes the decimal count
+        // for both parts.
+        let decimals = significant_decimals(&half, 2);
+        let mut po2 = po.clone();
+        po2.interval_display = IntervalDisplay::Midpoint;
+        po2.use_max_decimals = true;
+        po2.max_decimals = decimals;
+        po2.use_min_decimals = true;
+        po2.min_decimals = decimals;
+        po2.show_ending_zeroes = true;
+        po2.min_exp = crate::options::exp_mode::NONE;
+        let mid_s = Number::from_rational(mid).print(&po2);
+        let unc_s = Number::from_rational(half).print(&po2);
+        let sign = if po.use_unicode_signs { "±" } else { "±" };
+        Some(format!("{mid_s}{sign}{unc_s}"))
+    }
+
     fn print_float(&self, po: &PrintOptions) -> String {
         let RealValue::Float { lower, upper } = &self.value else {
             unreachable!()
@@ -312,6 +348,16 @@ impl Number {
                 n.set_minus_infinity(true, false);
             }
             return n.print(po);
+        }
+        // `interval_display = PlusMinus`: `midpoint ± half-width`.
+        //
+        // The reference prints the uncertainty to two significant digits and
+        // gives the value the same number of decimals — `5+/-1` is `5.0±1.0`
+        // and `Ei(3+/-0.3)` is `9.9±2.0`.
+        if po.interval_display == IntervalDisplay::PlusMinus && lower != upper {
+            if let Some(s) = self.print_plus_minus(po, lower, upper) {
+                return s;
+            }
         }
         let (mid, prec_from_interval) = if lower == upper {
             let (n, d) = match bigfloat_to_ratio(lower) {
@@ -985,6 +1031,31 @@ impl Number {
     }
 }
 
+
+/// Decimals needed to show `v` with `sig` significant digits.
+///
+/// `0.000043` with two significant digits needs six decimals; `2.0` needs
+/// one.
+fn significant_decimals(v: &BigRational, sig: i32) -> i32 {
+    if v.is_zero() {
+        return sig - 1;
+    }
+    let mut x = v.abs();
+    let ten = BigRational::from_integer(BigInt::from(10));
+    let one = BigRational::one();
+    // exponent of the leading digit
+    let mut e = 0i32;
+    while x >= ten {
+        x /= &ten;
+        e += 1;
+    }
+    while x < one {
+        x *= &ten;
+        e -= 1;
+    }
+    (sig - 1 - e).max(0)
+}
+
 /// Round an integer quotient per PrintOptions rounding (used by the integer
 /// path). `rem`/`div` describe the discarded fraction rem/div.
 fn round_quotient(quo: BigUint, rem: &BigUint, div: &BigUint, neg: bool, po: &PrintOptions) -> BigUint {
@@ -1213,5 +1284,46 @@ mod tests {
         n.pi();
         let s = p(&n);
         assert!(s.starts_with("3.14159265"), "pi prints as 3.141592654, got {s}");
+    }
+}
+
+#[cfg(test)]
+mod plusminus_tests {
+    use crate::options::{IntervalDisplay, ParseOptions, PrintOptions};
+    use crate::Number;
+
+    fn pm_options() -> PrintOptions {
+        let mut po = PrintOptions::default();
+        po.interval_display = IntervalDisplay::PlusMinus;
+        po
+    }
+
+    fn uncertain(value: &str, unc: &str) -> Number {
+        let po = ParseOptions::default();
+        let mut n = Number::parse(value, &po);
+        n.set_uncertainty(&Number::parse(unc, &po));
+        n
+    }
+
+    #[test]
+    fn value_matches_the_uncertainty_decimals() {
+        // Reference: `5+/-1` prints `5.0±1.0` — the uncertainty carries two
+        // significant digits and the value takes the same decimal count.
+        assert_eq!(uncertain("5", "1").print(&pm_options()), "5.0±1.0");
+    }
+
+    #[test]
+    fn small_uncertainties_get_more_decimals() {
+        assert_eq!(
+            uncertain("0.389008", "0.000043").print(&pm_options()),
+            "0.389008±0.000043"
+        );
+    }
+
+    #[test]
+    fn an_exact_value_is_unaffected() {
+        // No interval, so no ± regardless of the display mode.
+        let n = Number::from_i64(5);
+        assert_eq!(n.print(&pm_options()), "5");
     }
 }
