@@ -1,0 +1,254 @@
+# isprime
+isprime(1)
+	0
+isprime(2)
+	1
+isprime(3)
+	1
+isprime(4)
+	0
+isprime(0)
+	0
+isprime(-7)
+	isprime(-7)
+isprime(97)
+	1
+isprime(561)
+	0
+isprime(1000003)
+	1
+isprime(1000033)
+	1
+isprime(1000003 * 1000033)
+	0
+isprime(2147483647)
+	1
+isprime(4294967297)
+	0
+isprime(7.5)
+	isprime(7.5)
+isprime(1000000007)
+	1
+
+# nextprime / prevprime
+nextprime(1)
+	2
+nextprime(2)
+	2
+nextprime(3)
+	3
+nextprime(10)
+	11
+nextprime(0)
+	2
+nextprime(-5)
+	nextprime(-5)
+nextprime(97)
+	97
+nextprime(1000000)
+	1000003
+prevprime(3)
+	3
+prevprime(4)
+	3
+prevprime(2)
+	2
+prevprime(10)
+	7
+prevprime(100)
+	97
+prevprime(1000000)
+	999983
+
+# nthprime
+nthprime(1)
+	2
+nthprime(2)
+	3
+nthprime(10)
+	29
+nthprime(25)
+	97
+nthprime(100)
+	541
+nthprime(0)
+	nthprime(0)
+nthprime(1000)
+	7919
+nthprime(-1)
+	nthprime(-1)
+
+# prime_pi
+prime_pi(1)
+	0
+prime_pi(2)
+	1
+prime_pi(10)
+	4
+prime_pi(100)
+	25
+prime_pi(0)
+	0
+prime_pi(-3)
+	primePi(-3)
+prime_pi(1000)
+	168
+prime_pi(97)
+	25
+prime_pi(2.5)
+	1
+
+# primes (all primes <= n)
+primes(1)
+	[]
+primes(2)
+	2
+primes(10)
+	[2  3  5  7]
+primes(30)
+	[2  3  5  7  11  13  17  19  23  29]
+primes(0)
+	primes(0)
+primes(-1)
+	primes(-1)
+primes(50)
+	[2  3  5  7  11  13  17  19  23  29  31  37  41  43  47]
+
+# divisors
+divisors(1)
+	1
+divisors(2)
+	[1  2]
+divisors(12)
+	[1  2  3  4  6  12]
+divisors(36)
+	[1  2  3  4  6  9  12  18  36]
+divisors(97)
+	[1  97]
+divisors(-12)
+	[1  2  3  4  6  12]
+divisors(0)
+	divisors(0)
+divisors(1000003)
+	[1  1000003]
+divisors(1000003 * 1000033)
+	[1  1000003  1000033  1000036000099]
+
+# lcm / HCF (gcd)
+lcm(4, 6)
+	12
+lcm(3, 5)
+	15
+lcm(0, 5)
+	lcm(0, 5)
+lcm(-4, 6)
+	12
+lcm(4, 6, 8)
+	24
+lcm(1/2, 1/3)
+	1
+lcm(12, 12)
+	12
+HCF(12, 18)
+	6
+HCF(0, 5)
+	gcd(0, 5)
+HCF(-12, 18)
+	6
+HCF(12, 18, 24)
+	6
+HCF(1/2, 1/3)
+	0.1666666667
+HCF(1000003, 1000033)
+	1
+HCF(7, 13)
+	1
+
+# powmod
+powmod(2, 10, 1000)
+	24
+powmod(2, 0, 7)
+	1
+powmod(3, 100, 7)
+	4
+powmod(0, 5, 7)
+	0
+powmod(2, -1, 7)
+	4
+powmod(5, 3, 13)
+	8
+powmod(1000003, 65537, 1000033)
+	898557
+powmod(2, 10, 1)
+	0
+powmod(-2, 3, 7)
+	6
+
+# factorial / factorial2 / multifactorial
+factorial(0)
+	1
+factorial(1)
+	1
+factorial(5)
+	120
+factorial(10)
+	3628800
+factorial(20)
+	2.432902008E18
+factorial(-1)
+	factorial(-1)
+factorial(1/2)
+	factorial(0.5)
+factorial(2.5)
+	factorial(2.5)
+factorial(25)
+	1.551121004E25
+factorial2(0)
+	1
+factorial2(1)
+	1
+factorial2(5)
+	15
+factorial2(6)
+	48
+factorial2(10)
+	3840
+factorial2(-1)
+	1
+factorial2(11)
+	10395
+multifactorial(18, 4)
+	30240
+multifactorial(10, 3)
+	280
+multifactorial(5, 1)
+	120
+multifactorial(9, 2)
+	945
+multifactorial(0, 3)
+	1
+
+# binomial
+binomial(5, 2)
+	10
+binomial(5, 0)
+	1
+binomial(5, 5)
+	1
+binomial(5, 6)
+	0
+binomial(0, 0)
+	1
+binomial(10, 5)
+	252
+binomial(-5, 2)
+	15
+binomial(52, 5)
+	2598960
+binomial(5, -1)
+	0
+binomial(100, 50)
+	1.008913445E29
+binomial(1/2, 2)
+	-0.125
+

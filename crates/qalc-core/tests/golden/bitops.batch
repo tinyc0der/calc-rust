@@ -1,0 +1,200 @@
+# bitget
+bitget(12, 3)
+	1
+bitget(12, 1)
+	0
+bitget(12, 2)
+	0
+bitget(12, 4)
+	1
+bitget(12, 5)
+	0
+bitget(0, 1)
+	0
+bitget(1, 1)
+	1
+bitget(92, 2, 4)
+	6
+bitget(255, 1, 8)
+	255
+bitget(255, 5, 8)
+	15
+bitget(-1, 1)
+	1
+bitget(1024, 11)
+	1
+
+# bitset
+bitset(8, 3)
+	12
+bitset(8, 1)
+	9
+bitset(0, 1)
+	1
+bitset(0, 8)
+	128
+bitset(15, 1, 0)
+	14
+bitset(15, 4, 0)
+	7
+bitset(12, 3, 0)
+	8
+bitset(0, 8, 1, 8, 1)
+	-128
+bitset(0, 8, 1, 8, 0)
+	128
+bitset(255, 8, 0, 8, 0)
+	127
+bitset(1, 64)
+	9.223372037E18
+
+# bitcmp (one's complement within a width)
+bitcmp(0, 8)
+	255
+bitcmp(255, 8)
+	0
+bitcmp(1, 8)
+	254
+bitcmp(170, 8)
+	85
+bitcmp(0, 16)
+	65535
+bitcmp(1, 8, 1)
+	-2
+bitcmp(127, 8, 1)
+	-128
+bitcmp(-1, 8, 1)
+	0
+bitcmp(0, 32)
+	4294967295
+bitcmp(5, 4)
+	10
+
+# bitrot (circular shift)
+bitrot(1, 1, 8)
+	2
+bitrot(1, -1, 8)
+	-128
+bitrot(128, 1, 8)
+	1
+bitrot(1, 8, 8)
+	1
+bitrot(0b10000001, 1, 8)
+	3
+bitrot(1, 4, 8)
+	16
+bitrot(1, 0, 8)
+	1
+bitrot(255, 3, 8)
+	-1
+bitrot(1, 1, 16)
+	2
+bitrot(1, -1, 8, 1)
+	-128
+
+# popCount
+popCount(9)
+	2
+popCount(0)
+	0
+popCount(1)
+	1
+popCount(255)
+	8
+popCount(256)
+	1
+popCount(7)
+	3
+popCount(1023)
+	10
+popCount(2^64 - 1)
+	64
+popCount(-1)
+	popCount(-1)
+popCount(12)
+	2
+
+# setbits
+setbits(0xFFFF, 9, 12, 0xA)
+	64255
+setbits(0, 1, 4, 0xF)
+	15
+setbits(0, 1, 8, 0xFF)
+	255
+setbits(255, 1, 4, 0)
+	240
+setbits(0, 5, 8, 1)
+	16
+setbits(0xFF00, 1, 8, 0xAB)
+	65451
+setbits(0, 1, 1, 1)
+	1
+setbits(0, 2, 3, 3)
+	6
+
+# shift
+shift(1, 1)
+	2
+shift(1, 8)
+	256
+shift(256, -8)
+	1
+shift(255, -4)
+	15
+shift(1, 0)
+	1
+shift(-8, -1)
+	-4
+shift(-8, -1, 1)
+	-4
+shift(-1, 1)
+	-2
+shift(5, 3)
+	40
+shift(1024, -10)
+	1
+shift(7, -3)
+	0
+
+# xor (bitwise) and lxor (logical)
+xor(12, 10)
+	6
+xor(0, 0)
+	0
+xor(255, 255)
+	0
+xor(255, 0)
+	255
+xor(1, 2)
+	3
+xor(0xF0, 0x0F)
+	255
+xor(-1, 0)
+	-1
+xor(5, 3)
+	6
+lxor(1, 0)
+	1
+lxor(0, 1)
+	1
+lxor(1, 1)
+	0
+lxor(0, 0)
+	0
+lxor(5, 0)
+	1
+lxor(5, 7)
+	0
+
+# operator forms
+12 xor 10
+	6
+1 || 0
+	1
+5 && 3
+	1
+~0
+	-1
+~5
+	-6
+

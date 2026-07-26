@@ -127,6 +127,7 @@ dependencies = [
 name = "qalc-core"
 version = "0.1.0"
 dependencies = [
+ "qalc",
  "qalc-datetime",
  "qalc-num",
  "roxmltree",

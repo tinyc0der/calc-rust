@@ -1,0 +1,228 @@
+# bin (binary literal / conversion)
+bin(101)
+	5
+bin(0)
+	0
+bin(1)
+	1
+bin(1111)
+	15
+bin(11111111)
+	255
+bin(11111111, 1)
+	-1
+bin(1000000, 1)
+	-64
+bin(5, 0, 1)
+	101
+bin(255, 0, 1)
+	11111111
+bin(-101)
+	-5
+bin(1010, 0, 1)
+	1111110010
+
+# oct
+oct(7)
+	7
+oct(10)
+	8
+oct(0)
+	0
+oct(777)
+	511
+oct(8, 1)
+	10
+oct(64, 1)
+	100
+oct(-17)
+	-15
+oct(1234)
+	668
+
+# base (arbitrary radix)
+base("FF", 16)
+	255
+base("ff", 16)
+	255
+base("777", 8)
+	511
+base("101", 2)
+	5
+base("z", 36)
+	35
+base("10", 2)
+	2
+base(255, 16, 0, 1)
+	FF
+base(255, 2, 0, 1)
+	11111111
+base(100, 7, 0, 1)
+	202
+base("11", 3)
+	4
+base("A", 16)
+	10
+base("-FF", 16)
+	-255
+base(0, 16, 0, 1)
+	0
+base("zZ", 62)
+	3817
+
+# roman numerals
+roman("XIV")
+	14
+roman("MCMXCIV")
+	1994
+roman("IV")
+	4
+roman("I")
+	1
+roman("MMXXV")
+	2025
+roman(14, 1)
+	XIV
+roman(1994, 1)
+	MCMXCIV
+roman(4, 1)
+	IV
+roman(3999, 1)
+	MMMCMXCIX
+roman(1, 1)
+	I
+roman("IIII")
+	4
+
+# bijective base-26
+bijective("A")
+	1
+bijective("Z")
+	26
+bijective("AA")
+	27
+bijective("AZ")
+	52
+bijective("BA")
+	53
+bijective(1, 1)
+	A
+bijective(26, 1)
+	Z
+bijective(27, 1)
+	AA
+bijective(52, 1)
+	AZ
+bijective(703, 1)
+	AAA
+
+# binary-coded decimal
+bcd(1001)
+	9
+bcd(10010001)
+	91
+bcd(0)
+	0
+bcd(9, 0, 1)
+	00001001
+bcd(91, 0, 1)
+	00001001 00000001
+bcd(1234, 0, 1)
+	00000001 00000010 00000011 00000100
+bcd(1001, 1)
+	9
+bcd(9, 1, 1)
+	1001
+
+# digitGet / digitSet
+digitGet(1234, 1)
+	3
+digitGet(1234, 2)
+	2
+digitGet(1234, 4)
+	0
+digitGet(1234, 5)
+	0
+digitGet(255, 1, 16)
+	15
+digitGet(255, 2, 16)
+	0
+digitGet(5, 1, 2)
+	0
+digitGet(5, 2, 2)
+	1
+digitGet(5, 3, 2)
+	0
+digitGet(-1234, 1)
+	-3
+digitSet(1234, 1, 9)
+	1294
+digitSet(1234, 4, 9)
+	91234
+digitSet(1234, 5, 7)
+	701234
+digitSet(255, 1, 0, 16)
+	15
+digitSet(5, 2, 1, 2)
+	5
+digitSet(0, 3, 4)
+	4000
+
+# integerDigits
+integerDigits(1234)
+	[1  2  3  4]
+integerDigits(1234, 10)
+	[1  2  3  4]
+integerDigits(255, 16)
+	[15  15]
+integerDigits(5, 2)
+	[1  0  1]
+integerDigits(0, 10)
+	0
+integerDigits(-1234, 10)
+	[1  2  3  4]
+integerDigits(1234, 10, 6)
+	[0  0  1  2  3  4]
+integerDigits(255, 2, 8)
+	[1  1  1  1  1  1  1  1]
+integerDigits(7, 8)
+	7
+
+# IEEE 754 bits / parts / value
+floatBits(1, 32)
+	1065353216
+floatBits(0, 32)
+	0
+floatBits(-1, 32)
+	3212836864
+floatBits(1.5, 32)
+	1069547520
+floatBits(0.5, 64)
+	4.602678819E18
+floatBits(1, 64)
+	4.607182419E18
+floatBits(3.14159, 32)
+	1078530000
+floatParts(1)
+	[1  0  1]
+floatParts(1.5)
+	[1  0  1.5]
+floatParts(-1)
+	[-1  0  1]
+floatParts(0)
+	[1  0  0]
+floatParts(0.5, 64)
+	[1  -1  1]
+floatParts(2, 32)
+	[1  1  1]
+floatValue(1065353216, 32)
+	1065353216
+floatValue(0, 32)
+	0
+floatValue(1069547520, 32)
+	1069547520
+floatValue(3212836864, 32)
+	3212836864
+floatValue(4575657221408423936, 64)
+	4.575657221E18
+

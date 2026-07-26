@@ -1,0 +1,276 @@
+# floor
+floor(2)
+	2
+floor(2.5)
+	2
+floor(2.999)
+	2
+floor(-2.5)
+	-3
+floor(-2.0001)
+	-3
+floor(0)
+	0
+floor(-0.5)
+	-1
+floor(7/2)
+	3
+floor(-7/2)
+	-4
+floor(1e20 + 0.5)
+	1E20
+floor(pi)
+	3
+floor(-pi)
+	-4
+
+# ceil
+ceil(2)
+	2
+ceil(2.5)
+	3
+ceil(2.0001)
+	3
+ceil(-2.5)
+	-2
+ceil(-2.999)
+	-2
+ceil(0)
+	0
+ceil(-0.5)
+	0
+ceil(7/2)
+	4
+ceil(-7/2)
+	-3
+ceil(pi)
+	4
+ceil(-pi)
+	-3
+
+# trunc (toward zero)
+trunc(2.7)
+	2
+trunc(-2.7)
+	-2
+trunc(2)
+	2
+trunc(-2)
+	-2
+trunc(0.9)
+	0
+trunc(-0.9)
+	0
+trunc(7/2)
+	3
+trunc(-7/2)
+	-3
+trunc(pi)
+	3
+
+# int / frac
+int(2.7)
+	2
+int(-2.7)
+	-2
+int(5)
+	5
+int(-5)
+	-5
+int(7/3)
+	2
+int(-7/3)
+	-2
+frac(2.75)
+	0.75
+frac(-2.75)
+	-0.75
+frac(5)
+	0
+frac(-5)
+	0
+frac(7/3)
+	0.3333333333
+frac(-7/3)
+	-0.3333333333
+frac(0.1)
+	0.1
+
+# round, default (half away from zero)
+round(2.5)
+	3
+round(3.5)
+	4
+round(-2.5)
+	-3
+round(-3.5)
+	-4
+round(2.4)
+	2
+round(2.6)
+	3
+round(0)
+	0
+round(-0.5)
+	-1
+round(7/2)
+	4
+round(-7/2)
+	-4
+round(pi)
+	3
+
+# round to a number of decimals
+round(pi, 2)
+	3.14
+round(pi, 4)
+	3.1416
+round(pi, 0)
+	3
+round(1.005, 2)
+	1.01
+round(1234.5678, -2)
+	1200
+round(1234.5678, -3)
+	1000
+round(-1234.5678, -2)
+	-1200
+round(2.345, 2)
+	2.35
+round(1/3, 5)
+	0.33333
+
+# round, explicit rounding methods
+round(2.5, 0, 0)
+	3
+round(2.5, 0, 1)
+	2
+round(2.5, 0, 2)
+	3
+round(2.5, 0, 3)
+	2
+round(2.5, 0, 4)
+	3
+round(2.5, 0, 5)
+	2
+round(3.5, 0, 1)
+	4
+round(3.5, 0, 2)
+	3
+round(-2.5, 0, 1)
+	-2
+round(-2.5, 0, 4)
+	-2
+round(-2.5, 0, 5)
+	-3
+round(2.4, 0, 7)
+	2
+round(2.4, 0, 8)
+	3
+round(2.4, 0, 9)
+	3
+round(2.4, 0, 10)
+	2
+round(-2.4, 0, 7)
+	-2
+round(-2.4, 0, 8)
+	-3
+round(-2.4, 0, 9)
+	-2
+round(-2.4, 0, 10)
+	-3
+
+# rem (remainder, sign of numerator)
+rem(7, 3)
+	1
+rem(-7, 3)
+	-1
+rem(7, -3)
+	1
+rem(-7, -3)
+	-1
+rem(7.5, 2)
+	1.5
+rem(-7.5, 2)
+	-1.5
+rem(0, 5)
+	0
+rem(5, 5)
+	0
+rem(1/2, 1/3)
+	0.1666666667
+rem(5, 0)
+	rem(5, 0)
+
+# mod (modulus, sign of denominator)
+mod(7, 3)
+	1
+mod(-7, 3)
+	2
+mod(7, -3)
+	-2
+mod(-7, -3)
+	-1
+mod(7.5, 2)
+	1.5
+mod(-7.5, 2)
+	0.5
+mod(0, 5)
+	0
+mod(5, 5)
+	0
+mod(1/2, 1/3)
+	0.1666666667
+mod(5, 0)
+	mod(5, 0)
+mod(-1, 12)
+	11
+
+# sq
+sq(3)
+	9
+sq(-3)
+	9
+sq(0)
+	0
+sq(1/3)
+	0.1111111111
+sq(2.5)
+	6.25
+sq(i)
+	-1
+sq(1+i)
+	2i
+sq(-1.5)
+	2.25
+sq(1e10)
+	1E20
+
+# exp
+exp(0)
+	1
+exp(1)
+	2.718281828
+exp(-1)
+	0.3678794412
+exp(2)
+	7.389056099
+exp(0.5)
+	1.648721271
+exp(-10)
+	0.00004539992976
+exp(10)
+	22026.46579
+exp(1/3)
+	1.395612425
+exp(100)
+	2.688117142E43
+exp(i*pi)
+	-1
+exp(1+i)
+	1.468693940 + 2.287355287i
+exp(-0.0001)
+	0.9999000050
+exp(709)
+	8.218407462E307
+

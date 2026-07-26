@@ -9,3 +9,10 @@ description = "Pure-Rust port of the libqalculate library (parser, MathStructure
 qalc-num.workspace = true
 qalc-datetime = { path = "../qalc-datetime" }
 roxmltree = { version = "0.21", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# The golden transcripts in `tests/golden/` must be driven by exactly what
+# `qalc --test-file=` drives, which lives in the CLI crate. Cargo permits a
+# dev-dependency cycle (`qalc` depends on `qalc-core` normally), and it keeps
+# the golden runner and the reference-parity runner on one code path.
+qalc = { path = "../qalc" }
