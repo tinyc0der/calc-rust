@@ -624,6 +624,115 @@ pub fn unit_exp_parts(m: &MathStructure) -> Option<(UnitId, Option<PrefixId>, i3
     }
 }
 
+/// The mixed-unit rule of `Calculator::parse` (Calculator-parse.cc:6161): a
+/// run of quantity pairs in *decreasing* units is a sum, not a product —
+/// `5m 2cm` is 5 m + 2 cm, `5ft 2in` is 5 ft + 2 in, `10h 31min` is
+/// 10 h + 31 min. Returns the addition terms, or `None` when the run is an
+/// ordinary product.
+///
+/// Two shapes qualify, and the reference keeps them deliberately narrow so an
+/// ordinary product like `5 m 2 s` stays a product:
+///
+/// * metric — the leading unit is base `m` (or unprefixed `L`) and every
+///   later pair repeats that unit with a strictly smaller decimal prefix, no
+///   smaller than milli;
+/// * customary — the leading unit is an unprefixed alias that opted into
+///   mixing (`<mix>` in units.xml), and each later unit is the one it is
+///   defined against, walking up the alias chain.
+pub fn mixed_unit_sum(factors: &[MathStructure]) -> Option<Vec<MathStructure>> {
+    use crate::defs::{PrefixKind, UnitKind};
+    let store = store_if_ready()?;
+    if factors.len() < 4 || factors.len() % 2 != 0 || is_unit_exp(&factors[0]) {
+        return None;
+    }
+    let MathStructure::Unit { id: first_id, prefix: first_prefix } = factors[1] else {
+        return None;
+    };
+    // Every odd position must be a bare unit and every even position a
+    // non-unit; that check is shared by both shapes.
+    for i in (3..factors.len()).step_by(2) {
+        if is_unit_exp(&factors[i - 1]) || !matches!(factors[i], MathStructure::Unit { .. }) {
+            return None;
+        }
+    }
+    let decimal_exponent = |p: Option<PrefixId>| -> Option<i64> {
+        let p = p?;
+        let pr = store.registry().prefix(p);
+        (pr.kind == PrefixKind::Decimal).then_some(pr.exponent)
+    };
+
+    let ref_name = store.reference_name(first_id);
+    let is_metric_head = matches!(store.reg.unit(first_id).kind, UnitKind::Base)
+        && (ref_name == "m" || (first_prefix.is_none() && ref_name == "L"));
+    let mut ok = false;
+    if is_metric_head
+        && first_prefix
+            .map(|_| matches!(decimal_exponent(first_prefix), Some(e) if e <= 3 && e > -3))
+            .unwrap_or(true)
+    {
+        ok = true;
+        let mut p1 = first_prefix;
+        for i in (3..factors.len()).step_by(2) {
+            let MathStructure::Unit { id, prefix: p2 } = factors[i] else {
+                ok = false;
+                break;
+            };
+            if id != first_id {
+                ok = false;
+                break;
+            }
+            ok = match (decimal_exponent(p1), decimal_exponent(p2), p1, p2) {
+                (Some(e1), Some(e2), _, _) => e1 > e2 && e2 >= -3,
+                (None, Some(e2), None, _) => e2 < 0 && e2 >= -3,
+                (Some(e1), None, _, None) => e1 > 1,
+                _ => false,
+            };
+            if !ok {
+                break;
+            }
+            p1 = p2;
+        }
+    } else if first_prefix.is_none() && mix_priority(store, first_id) > 0 {
+        ok = true;
+        let mut u1 = first_id;
+        let last = factors.len() - 1;
+        for i in (3..factors.len()).step_by(2) {
+            let MathStructure::Unit { id, prefix } = factors[i] else {
+                ok = false;
+                break;
+            };
+            if prefix.is_some() || (i != last && mix_priority(store, id) <= 0) {
+                ok = false;
+                break;
+            }
+            // Walk up the alias chain to the named unit; every step has to be
+            // a mixable alias of its own.
+            while alias_base(store, u1) != Some(id) {
+                match alias_base(store, u1) {
+                    Some(next) if mix_priority(store, next) > 0 => u1 = next,
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if !ok {
+                break;
+            }
+            u1 = id;
+        }
+    }
+    if !ok {
+        return None;
+    }
+    Some(
+        factors
+            .chunks(2)
+            .map(|pair| MathStructure::Multiplication(pair.to_vec()))
+            .collect(),
+    )
+}
+
 // ----------------------------------------------------------------------
 // Conversion
 // ----------------------------------------------------------------------
@@ -1437,5 +1546,33 @@ mod tests {
         need_units!();
         assert_eq!(ev("x + x"), "2x");
         assert_eq!(ev("y*x"), "xy");
+    }
+}
+
+#[cfg(test)]
+mod mixed_unit_tests {
+    use crate::session::Session;
+
+    fn ev(s: &str) -> String {
+        Session::new().evaluate_line(s).expect("evaluates")
+    }
+
+    #[test]
+    fn decreasing_units_parse_as_a_sum() {
+        // Oracle: `10h 31min` is 10 h + 31 min, not 310 h*min.
+        assert_eq!(ev("10h 31min + 8h 30min to time"), "19:01");
+        assert_eq!(ev("90min to time"), "1:30");
+    }
+
+    #[test]
+    fn unrelated_units_stay_a_product() {
+        assert_eq!(ev("5 m 2 s"), "10 m*s");
+    }
+
+    #[test]
+    fn a_non_duration_keeps_base_ten_numbers() {
+        // MathStructure-print.cc:4603 — the coefficient of a unit that time
+        // format cannot absorb still prints sexagesimally, as in the C++.
+        assert_eq!(ev("5 m to time"), "5:00 m");
     }
 }

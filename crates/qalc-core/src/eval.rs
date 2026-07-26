@@ -59,8 +59,12 @@ pub fn apply_conversion(m: &mut MathStructure, po: &mut PrintOptions) -> Result<
         ConversionTarget::NumberBase { base, bits } => {
             po.base = *base;
             po.binary_bits = *bits;
+            let is_time = *base == qalc_num::options::base::TIME;
             let v = (**value).clone();
             *m = v;
+            if is_time {
+                convert_for_time_format(m);
+            }
         }
         ConversionTarget::Base(expr) => {
             let mut b = (**expr).clone();
@@ -92,6 +96,65 @@ pub fn apply_conversion(m: &mut MathStructure, po: &mut PrintOptions) -> Result<
         }
     }
     Ok(())
+}
+
+/// `convert_for_time_format` (Calculator-calculate.cc:929).
+///
+/// Time format counts in hours, so a time-valued result is divided by `h`
+/// before it is printed: `10h 31min + 8h 30min to time` reaches the printer as
+/// the bare number 19.01666…, which the sexagesimal printer renders as `19:01`.
+/// A value that is not a plain duration is left alone.
+fn convert_for_time_format(m: &mut MathStructure) -> bool {
+    let Some(store) = crate::units::store() else {
+        return false;
+    };
+    let is_seconds = |x: &MathStructure| -> bool {
+        let MathStructure::Unit { id, .. } = x else {
+            return false;
+        };
+        store
+            .base_form(*id)
+            .is_some_and(|f| f.sig.len() == 1 && f.sig.values().all(|e| *e == 1) && !f.nonlinear)
+            && store
+                .base_form(*id)
+                .and_then(|f| f.sig.keys().next().copied())
+                .is_some_and(|b| store.reference_name(b) == "s")
+    };
+    let is_duration = |x: &MathStructure| -> bool {
+        match x {
+            MathStructure::Multiplication(f) => {
+                f.len() == 2 && matches!(f[0], MathStructure::Number(_)) && is_seconds(&f[1])
+            }
+            _ => is_seconds(x),
+        }
+    };
+    let convertible = match &*m {
+        MathStructure::Addition(terms) => terms.iter().all(is_duration),
+        other => is_duration(other),
+    };
+    if !convertible {
+        return false;
+    }
+    let Some(hour) = store.resolve_name("h") else {
+        return false;
+    };
+    let mut divided = MathStructure::Multiplication(vec![
+        m.clone(),
+        MathStructure::Power {
+            base: Box::new(hour),
+            exponent: Box::new(MathStructure::Number(qalc_num::Number::from_i64(-1))),
+        },
+    ]);
+    // `eo2.sync_units` in the C++: the terms may be in different time units
+    // (`18 h + 61 min`), which only cancel against `h` once everything is in
+    // seconds.
+    crate::units::convert_to_base_units(store, &mut divided);
+    evaluate_calculated(&mut divided);
+    if crate::units::contains_unit(&divided) {
+        return false;
+    }
+    *m = divided;
+    true
 }
 
 /// Evaluate a structure in place using default evaluation options.

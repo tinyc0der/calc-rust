@@ -538,11 +538,15 @@ impl<'a> Parser<'a> {
             }
             factors.push(self.parse_power()?);
         }
-        Ok(if factors.len() == 1 {
-            factors.pop().unwrap()
-        } else {
-            MathStructure::Multiplication(factors)
-        })
+        if factors.len() == 1 {
+            return Ok(factors.pop().unwrap());
+        }
+        // A run of quantities in decreasing units is a sum: `10h 31min` is
+        // 10 h + 31 min, not 310 h*min.
+        if let Some(terms) = crate::units::mixed_unit_sum(&factors) {
+            return Ok(MathStructure::Addition(terms));
+        }
+        Ok(MathStructure::Multiplication(factors))
     }
 
     /// Is the `%` at the cursor a binary modulo rather than postfix percent?
