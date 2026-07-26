@@ -1614,13 +1614,12 @@ fn plus_minus_string(
     if precision < 2 {
         precision = 2;
     }
+    if mid.is_zero() {
+        return zero_plus_minus_string(&lo, &hi, precision, po);
+    }
     let mut rerun = false;
     loop {
-        let i_log = if mid.is_zero() {
-            ilog10_rat(&(&hi - &lo))
-        } else {
-            ilog10_rat(&mid)
-        };
+        let i_log = ilog10_rat(&mid);
         let decimals = precision - 1 - i_log;
         // scale = 10^decimals
         let scale = if decimals >= 0 {
@@ -1675,6 +1674,58 @@ fn plus_minus_string(
         }
         if neg {
             mid_s.insert_str(0, if po.use_unicode_signs { "\u{2212}" } else { "-" });
+        }
+        return Some(format!("{mid_s}\u{00B1}{unc_s}"));
+    }
+}
+
+/// `0 ± uncertainty` — the `b_pm_zero` branch of `Number::print`
+/// (Number.cc:12309).
+///
+/// A zero midpoint has no significant digits to hang the format on, so the
+/// reference swaps the *uncertainty* into the value's place, formats that to
+/// `precision` significant digits, and then prints the value as a bare `0`
+/// padded to the same decimals. Deriving the digit count from the midpoint
+/// instead — which is what the general path does — leaves
+/// `(1+/-0.1)-(1+/-0.1)` printing `0±0.1` where the reference has
+/// `0.00±0.14`.
+fn zero_plus_minus_string(
+    lo: &BigRational,
+    hi: &BigRational,
+    mut precision: i64,
+    po: &PrintOptions,
+) -> Option<String> {
+    let ten = BigRational::from_integer(BigInt::from(10));
+    // The larger half-width, the midpoint being zero.
+    let unc = if -lo > *hi { -lo.clone() } else { hi.clone() };
+    if unc.is_zero() {
+        return None;
+    }
+    let mut rerun = false;
+    loop {
+        let decimals = precision - 1 - ilog10_rat(&unc);
+        let scale = if decimals >= 0 {
+            ten.pow(decimals.min(10_000) as i32)
+        } else {
+            BigRational::one() / ten.pow((-decimals).min(10_000) as i32)
+        };
+        let u = round_rat(&(&unc * &scale));
+        if u.is_zero() {
+            return None;
+        }
+        let ustr = u.magnitude().to_str_radix(10);
+        // Re-derive the precision from the digits the uncertainty produced,
+        // the same second pass the general path makes.
+        if !rerun && decimals > 0 && ustr.len() > 2 {
+            precision = (ustr.len() as i64 - decimals).max(2);
+            rerun = true;
+            continue;
+        }
+        let mut mid_s = place_decimal_point("0", decimals, po);
+        let mut unc_s = place_decimal_point(&ustr, decimals, po);
+        if decimals <= 0 {
+            trim_trailing_zeroes(&mut mid_s, &po.decimalpoint);
+            trim_trailing_zeroes(&mut unc_s, &po.decimalpoint);
         }
         return Some(format!("{mid_s}\u{00B1}{unc_s}"));
     }

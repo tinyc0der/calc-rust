@@ -501,6 +501,20 @@ impl Number {
 
     /// `sqrt()`.
     pub fn sqrt(&mut self) -> bool {
+        // `sqrt(f)' = f'/(2·sqrt(f))` (MathStructure-differentiate.cc:182).
+        if self.unc.is_some() {
+            return self.uncertain_unary(
+                |x| {
+                    let mut d = x.clone();
+                    (d.sqrt() && d.multiply(&Number::from_i64(2)) && d.recip()).then_some(d)
+                },
+                Number::sqrt_impl,
+            );
+        }
+        self.sqrt_impl()
+    }
+
+    fn sqrt_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             return false; // handled by raise(1/2) at MathStructure level
         }
@@ -594,6 +608,24 @@ impl Number {
     }
 
     fn root_i(&mut self, n: u32) -> bool {
+        // `root(f,a)' = f'·root(f,a)^(1−a)/a`
+        // (MathStructure-differentiate.cc:191; `cbrt` is the a = 3 case, whose
+        // own rule at :201 is the same expression written out).
+        if self.unc.is_some() {
+            return self.uncertain_unary(
+                move |x| {
+                    let mut d = x.clone();
+                    let e = Number::from_i64(1 - i64::from(n));
+                    (d.root_i(n) && d.raise(&e, true) && d.divide(&Number::from_i64(i64::from(n))))
+                        .then_some(d)
+                },
+                move |s| s.root_i_impl(n),
+            );
+        }
+        self.root_i_impl(n)
+    }
+
+    fn root_i_impl(&mut self, n: u32) -> bool {
         if self.has_imaginary_part() {
             return false;
         }
@@ -718,6 +750,51 @@ fn hull_of(parts: &[Number]) -> Option<Number> {
     }
     let mut n = Number::new();
     n.set_interval(&lo, &hi, false).then_some(n)
+}
+
+#[cfg(test)]
+mod uncertainty_tests {
+    use crate::number::uncertainty_test_support::{plus_minus, uncertain};
+
+    #[test]
+    fn sqrt_of_four() {
+        // Reference: `sqrt(4+/-0.5)` = `2.00±0.13` — 0.5/(2·2).
+        let mut n = uncertain("4", "0.5");
+        assert!(n.sqrt());
+        assert_eq!(plus_minus(&n), "2.00±0.13");
+    }
+
+    #[test]
+    fn sqrt_of_nine() {
+        // Reference: `sqrt(9+/-1)` = `3.00±0.17` — 1/(2·3).
+        let mut n = uncertain("9", "1");
+        assert!(n.sqrt());
+        assert_eq!(plus_minus(&n), "3.00±0.17");
+    }
+
+    #[test]
+    fn nested_sqrt_chains_the_derivatives() {
+        // Reference: `sqrt(sqrt(16+/-1))` = `2.000±0.031` — 1/8 then /(2·2).
+        let mut n = uncertain("16", "1");
+        assert!(n.sqrt() && n.sqrt());
+        assert_eq!(plus_minus(&n), "2.000±0.031");
+    }
+
+    #[test]
+    fn cbrt_of_eight() {
+        // Reference: `cbrt(8+/-0.6)` = `2.000±0.050` — 0.6/(3·2²).
+        let mut n = uncertain("8", "0.6");
+        assert!(n.cbrt());
+        assert_eq!(plus_minus(&n), "2.000±0.050");
+    }
+
+    #[test]
+    fn cube_root_of_eight() {
+        // Reference: `root(8+/-0.6,3)` = `2.000±0.050`, same as `cbrt`.
+        let mut n = uncertain("8", "0.6");
+        assert!(n.root(&crate::Number::from_i64(3)));
+        assert_eq!(plus_minus(&n), "2.000±0.050");
+    }
 }
 
 #[cfg(test)]

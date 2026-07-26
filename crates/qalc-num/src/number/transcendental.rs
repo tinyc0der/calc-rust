@@ -21,6 +21,13 @@ use num_traits::{Signed, Zero};
 
 type MonoFn = fn(&BigFloat, usize, RoundingMode, &mut Consts) -> BigFloat;
 
+/// `1/sqrt(1 − x²)` — the shared factor of the `asin`/`acos` derivatives.
+fn one_over_sqrt_one_minus_square(x: &Number) -> Option<Number> {
+    let mut d = x.clone();
+    (d.square() && d.negate() && d.add(&Number::from_i64(1)) && d.sqrt() && d.recip())
+        .then_some(d)
+}
+
 impl Number {
     /// Apply a monotone-increasing function to the real interval.
     /// Returns false if any resulting bound is NaN (domain error).
@@ -183,6 +190,20 @@ impl Number {
 
     /// `sin()`.
     pub fn sin(&mut self) -> bool {
+        // `sin(f)' = f'·cos(f)` (MathStructure-differentiate.cc:480).
+        if self.unc.is_some() {
+            return self.uncertain_unary(
+                |x| {
+                    let mut d = x.clone();
+                    d.cos().then_some(d)
+                },
+                Number::sin_impl,
+            );
+        }
+        self.sin_impl()
+    }
+
+    fn sin_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             // sin(a+bi) = sin a cosh b + i cos a sinh b
             let a = self.real_part();
@@ -212,6 +233,20 @@ impl Number {
 
     /// `cos()`.
     pub fn cos(&mut self) -> bool {
+        // `cos(f)' = −f'·sin(f)` (MathStructure-differentiate.cc:488).
+        if self.unc.is_some() {
+            return self.uncertain_unary(
+                |x| {
+                    let mut d = x.clone();
+                    (d.sin() && d.negate()).then_some(d)
+                },
+                Number::cos_impl,
+            );
+        }
+        self.cos_impl()
+    }
+
+    fn cos_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             // cos(a+bi) = cos a cosh b − i sin a sinh b
             let a = self.real_part();
@@ -245,6 +280,20 @@ impl Number {
 
     /// `tan()`.
     pub fn tan(&mut self) -> bool {
+        // `tan(f)' = f'·(1 + tan(f)²)` (MathStructure-differentiate.cc:498).
+        if self.unc.is_some() {
+            return self.uncertain_unary(
+                |x| {
+                    let mut d = x.clone();
+                    (d.tan() && d.square() && d.add(&Number::from_i64(1))).then_some(d)
+                },
+                Number::tan_impl,
+            );
+        }
+        self.tan_impl()
+    }
+
+    fn tan_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             let mut s = self.clone();
             let mut c = self.clone();
@@ -288,6 +337,20 @@ impl Number {
 
     /// `sinh()` — monotone increasing.
     pub fn sinh(&mut self) -> bool {
+        // `sinh(f)' = f'·cosh(f)` (MathStructure-differentiate.cc:506).
+        if self.unc.is_some() {
+            return self.uncertain_unary(
+                |x| {
+                    let mut d = x.clone();
+                    d.cosh().then_some(d)
+                },
+                Number::sinh_impl,
+            );
+        }
+        self.sinh_impl()
+    }
+
+    fn sinh_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             return self.sinh_complex();
         }
@@ -302,6 +365,20 @@ impl Number {
 
     /// `cosh()` — decreasing on (−∞,0], increasing on [0,∞).
     pub fn cosh(&mut self) -> bool {
+        // `cosh(f)' = f'·sinh(f)` (MathStructure-differentiate.cc:512).
+        if self.unc.is_some() {
+            return self.uncertain_unary(
+                |x| {
+                    let mut d = x.clone();
+                    d.sinh().then_some(d)
+                },
+                Number::cosh_impl,
+            );
+        }
+        self.cosh_impl()
+    }
+
+    fn cosh_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             return self.cosh_complex();
         }
@@ -346,6 +423,21 @@ impl Number {
 
     /// `tanh()` — monotone increasing.
     pub fn tanh(&mut self) -> bool {
+        // `tanh(f)' = f'·(1 − tanh(f)²)` (MathStructure-differentiate.cc:518).
+        if self.unc.is_some() {
+            return self.uncertain_unary(
+                |x| {
+                    let mut d = x.clone();
+                    (d.tanh() && d.square() && d.negate() && d.add(&Number::from_i64(1)))
+                        .then_some(d)
+                },
+                Number::tanh_impl,
+            );
+        }
+        self.tanh_impl()
+    }
+
+    fn tanh_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             return self.tanh_complex();
         }
@@ -367,6 +459,17 @@ impl Number {
 
     /// `asin()` — monotone increasing on [−1,1].
     pub fn asin(&mut self) -> bool {
+        // `asin(f)' = f'/sqrt(1 − f²)` (MathStructure-differentiate.cc:526).
+        if self.unc.is_some() {
+            return self.uncertain_unary(
+                |x| one_over_sqrt_one_minus_square(x),
+                Number::asin_impl,
+            );
+        }
+        self.asin_impl()
+    }
+
+    fn asin_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             return self.asin_complex();
         }
@@ -384,6 +487,20 @@ impl Number {
 
     /// `acos()` — monotone decreasing on [−1,1].
     pub fn acos(&mut self) -> bool {
+        // `acos(f)' = −f'/sqrt(1 − f²)` (MathStructure-differentiate.cc:535).
+        if self.unc.is_some() {
+            return self.uncertain_unary(
+                |x| {
+                    let mut d = one_over_sqrt_one_minus_square(x)?;
+                    d.negate().then_some(d)
+                },
+                Number::acos_impl,
+            );
+        }
+        self.acos_impl()
+    }
+
+    fn acos_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             return self.acos_complex();
         }
@@ -416,6 +533,20 @@ impl Number {
 
     /// `atan()` — monotone increasing.
     pub fn atan(&mut self) -> bool {
+        // `atan(f)' = f'/(1 + f²)` (MathStructure-differentiate.cc:546).
+        if self.unc.is_some() {
+            return self.uncertain_unary(
+                |x| {
+                    let mut d = x.clone();
+                    (d.square() && d.add(&Number::from_i64(1)) && d.recip()).then_some(d)
+                },
+                Number::atan_impl,
+            );
+        }
+        self.atan_impl()
+    }
+
+    fn atan_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             return self.atan_complex();
         }
@@ -440,6 +571,21 @@ impl Number {
 
     /// `asinh()` — monotone increasing.
     pub fn asinh(&mut self) -> bool {
+        // `asinh(f)' = f'/sqrt(1 + f²)` (MathStructure-differentiate.cc:560).
+        if self.unc.is_some() {
+            return self.uncertain_unary(
+                |x| {
+                    let mut d = x.clone();
+                    (d.square() && d.add(&Number::from_i64(1)) && d.sqrt() && d.recip())
+                        .then_some(d)
+                },
+                Number::asinh_impl,
+            );
+        }
+        self.asinh_impl()
+    }
+
+    fn asinh_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             return self.asinh_complex();
         }
@@ -451,6 +597,29 @@ impl Number {
 
     /// `acosh()` — monotone increasing on [1,∞).
     pub fn acosh(&mut self) -> bool {
+        // `acosh(f)' = f'/(sqrt(f − 1)·sqrt(f + 1))`
+        // (MathStructure-differentiate.cc:568) — kept as two square roots
+        // rather than `sqrt(f² − 1)`, which differs on `f < −1`.
+        if self.unc.is_some() {
+            return self.uncertain_unary(
+                |x| {
+                    let mut lo = x.clone();
+                    let mut hi = x.clone();
+                    (lo.add(&Number::from_i64(-1))
+                        && hi.add(&Number::from_i64(1))
+                        && lo.sqrt()
+                        && hi.sqrt()
+                        && lo.multiply(&hi)
+                        && lo.recip())
+                    .then_some(lo)
+                },
+                Number::acosh_impl,
+            );
+        }
+        self.acosh_impl()
+    }
+
+    fn acosh_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             return self.acosh_complex();
         }
@@ -471,6 +640,21 @@ impl Number {
 
     /// `atanh()` — monotone increasing on (−1,1).
     pub fn atanh(&mut self) -> bool {
+        // `atanh(f)' = f'/(1 − f²)` (MathStructure-differentiate.cc:580).
+        if self.unc.is_some() {
+            return self.uncertain_unary(
+                |x| {
+                    let mut d = x.clone();
+                    (d.square() && d.negate() && d.add(&Number::from_i64(1)) && d.recip())
+                        .then_some(d)
+                },
+                Number::atanh_impl,
+            );
+        }
+        self.atanh_impl()
+    }
+
+    fn atanh_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             return self.atanh_complex();
         }
@@ -700,6 +884,67 @@ fn bigfloat_ceil_i(f: &BigFloat) -> BigInt {
     match crate::float::bigfloat_to_ratio(f) {
         Some((n, d)) => num_integer::Integer::div_ceil(&n, &d),
         None => BigInt::zero(),
+    }
+}
+
+#[cfg(test)]
+mod uncertainty_tests {
+    use crate::number::uncertainty_test_support::{plus_minus, uncertain};
+
+    #[test]
+    fn sine_carries_the_cosine() {
+        // Reference: `sin(1+/-0.1)` = `0.841±0.055` — |cos 1|·0.1.
+        let mut n = uncertain("1", "0.1");
+        assert!(n.sin());
+        assert_eq!(plus_minus(&n), "0.841±0.055");
+    }
+
+    #[test]
+    fn cosine_carries_the_sine() {
+        // Reference: `cos(1+/-0.1)` = `0.540±0.084` — |−sin 1|·0.1.
+        let mut n = uncertain("1", "0.1");
+        assert!(n.cos());
+        assert_eq!(plus_minus(&n), "0.540±0.084");
+    }
+
+    #[test]
+    fn tangent_carries_one_plus_its_square() {
+        // Reference: `tan(1+/-0.1)` = `1.56±0.35` — (1 + tan²1)·0.1.
+        let mut n = uncertain("1", "0.1");
+        assert!(n.tan());
+        assert_eq!(plus_minus(&n), "1.56±0.35");
+    }
+
+    #[test]
+    fn arctangent_carries_the_rational_derivative() {
+        // Reference: `atan(1+/-0.1)` = `0.785±0.050` — 0.1/(1 + 1²).
+        let mut n = uncertain("1", "0.1");
+        assert!(n.atan());
+        assert_eq!(plus_minus(&n), "0.785±0.050");
+    }
+
+    #[test]
+    fn arcsine_carries_the_inverse_root() {
+        // Reference: `asin(0.5+/-0.1)` = `0.52±0.12` — 0.1/sqrt(1 − 0.25).
+        let mut n = uncertain("0.5", "0.1");
+        assert!(n.asin());
+        assert_eq!(plus_minus(&n), "0.52±0.12");
+    }
+
+    #[test]
+    fn hyperbolic_sine_carries_the_hyperbolic_cosine() {
+        // Reference: `sinh(1+/-0.1)` = `1.18±0.16` — cosh(1)·0.1.
+        let mut n = uncertain("1", "0.1");
+        assert!(n.sinh());
+        assert_eq!(plus_minus(&n), "1.18±0.16");
+    }
+
+    #[test]
+    fn hyperbolic_tangent_carries_one_minus_its_square() {
+        // Reference: `tanh(1+/-0.1)` = `0.762±0.042` — (1 − tanh²1)·0.1.
+        let mut n = uncertain("1", "0.1");
+        assert!(n.tanh());
+        assert_eq!(plus_minus(&n), "0.762±0.042");
     }
 }
 

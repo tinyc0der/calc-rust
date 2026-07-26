@@ -369,6 +369,24 @@ impl Number {
 
     /// `square()`: self = self².
     pub fn square(&mut self) -> bool {
+        // d(x²)/dx = 2x, taken here rather than left to the `multiply` below.
+        // `x·x` has one variable, but `uncertain_binary` assumes its two
+        // operands are independent, so routing an uncertain value through it
+        // would combine the same contribution with itself in quadrature and
+        // return |2x|·u/√2 instead of |2x|·u.
+        if self.unc.is_some() {
+            return self.uncertain_unary(
+                |x| {
+                    let mut d = x.clone();
+                    d.multiply(&Number::from_i64(2)).then_some(d)
+                },
+                Number::square_impl,
+            );
+        }
+        self.square_impl()
+    }
+
+    fn square_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             let o = self.clone();
             return self.multiply(&o);
@@ -556,6 +574,33 @@ fn interval_mul(
         }
     }
     (lo, hi)
+}
+
+#[cfg(test)]
+mod uncertainty_tests {
+    use crate::number::uncertainty_test_support::{plus_minus, uncertain};
+
+    #[test]
+    fn cancelling_subtraction_still_adds_in_quadrature() {
+        // Reference: `(1+/-0.1)-(1+/-0.1)` = `0.00±0.14`. Both operands are
+        // independent, so the uncertainties combine as sqrt(0.1²+0.1²) even
+        // though the values cancel — and a zero midpoint has to take its
+        // digits from the uncertainty, which is what used to print `0±0.1`.
+        let mut a = uncertain("1", "0.1");
+        let b = uncertain("1", "0.1");
+        assert!(a.subtract(&b));
+        assert_eq!(plus_minus(&a), "0.00±0.14");
+    }
+
+    #[test]
+    fn squaring_is_one_variable_not_two() {
+        // `x²` is not `x·y`: the reference's `2x` derivative gives
+        // `square(4+/-0.1)` = `16.00±0.80`, where multiplying a clone in
+        // would treat the two factors as independent and return 0.57.
+        let mut n = uncertain("4", "0.1");
+        assert!(n.square());
+        assert_eq!(plus_minus(&n), "16.00±0.80");
+    }
 }
 
 #[cfg(test)]

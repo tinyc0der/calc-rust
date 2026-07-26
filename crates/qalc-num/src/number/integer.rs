@@ -34,6 +34,32 @@ impl Number {
 
     /// `factorial()` — non-negative integers.
     pub fn factorial(&mut self) -> bool {
+        // The reference differentiates `f!` as `(f+1)!·digamma(f+1)`
+        // (MathStructure-differentiate.cc:307). Its comment says
+        // `gamma(f+1)' = (f+1)'·digamma(f+1)`, i.e. `f!·digamma(f+1)`, but the
+        // code increments the argument of the factorial *before* copying it,
+        // so the factor it actually builds is `(f+1)!`. Reproduced here on
+        // purpose: it is what makes `(1+/-0.1)!` come out as `1.000±0.085`
+        // (2!·ψ(2)·0.1) rather than `1.000±0.043` (1!·ψ(2)·0.1).
+        if self.unc.is_some() {
+            return self.uncertain_unary(
+                |x| {
+                    let mut d = x.clone();
+                    let mut psi = x.clone();
+                    (d.add(&Number::from_i64(1))
+                        && psi.add(&Number::from_i64(1))
+                        && d.factorial()
+                        && psi.digamma()
+                        && d.multiply(&psi))
+                    .then_some(d)
+                },
+                Number::factorial_impl,
+            );
+        }
+        self.factorial_impl()
+    }
+
+    fn factorial_impl(&mut self) -> bool {
         let Some(n) = self.to_i64() else {
             return false;
         };
@@ -636,6 +662,21 @@ fn binomial_bigint(m: &BigInt, k: &BigInt) -> Option<BigInt> {
     let numerator = falling_factorial(m, k_eff);
     let denominator = descending_product(k_eff as i64, 1);
     Some(numerator / denominator)
+}
+
+#[cfg(test)]
+mod uncertainty_tests {
+    use crate::number::uncertainty_test_support::{plus_minus, uncertain};
+
+    #[test]
+    fn factorial_carries_the_reference_derivative() {
+        // Reference: `(1+/-0.1)!` = `1.000±0.085` — `(1+1)!·ψ(1+1)·0.1`,
+        // the off-by-one derivative the reference actually builds. The
+        // textbook `1!·ψ(2)·0.1` would print `1.000±0.043`.
+        let mut n = uncertain("1", "0.1");
+        assert!(n.factorial());
+        assert_eq!(plus_minus(&n), "1.000±0.085");
+    }
 }
 
 #[cfg(test)]

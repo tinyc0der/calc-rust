@@ -677,6 +677,19 @@ fn ci_float(x: &BigFloat, wp: usize, cc: &mut Consts) -> BigFloat {
 // Number-level plumbing
 // ----------------------------------------------------------------------
 
+/// `c·e^(∓f²)/sqrt(pi)` — the derivative shared by the erf family, with
+/// `c` the leading coefficient and `negate_exponent` selecting `erf`/`erfc`'s
+/// `e^(−f²)` over `erfi`'s `e^(f²)`.
+fn gaussian_derivative(x: &Number, c: i64, negate_exponent: bool) -> Option<Number> {
+    let mut d = x.clone();
+    if !d.square() || (negate_exponent && !d.negate()) || !d.exp() {
+        return None;
+    }
+    let mut root_pi = Number::new();
+    root_pi.pi();
+    (root_pi.sqrt() && d.multiply(&Number::from_i64(c)) && d.divide(&root_pi)).then_some(d)
+}
+
 impl Number {
     /// Evaluate a real special function.  `wp` is the internal working
     /// precision; the value is rounded outwards to `bit_precision()` at the
@@ -767,6 +780,22 @@ impl Number {
     /// with a shifted argument otherwise, plus the reflection formula for
     /// negative arguments.  Poles (0, −1, −2, …) return false.
     pub fn gamma(&mut self) -> bool {
+        // `gamma(f)' = f'·gamma(f)·digamma(f)`
+        // (MathStructure-differentiate.cc:286).
+        if self.unc.is_some() {
+            return self.uncertain_unary(
+                |x| {
+                    let mut d = x.clone();
+                    let mut psi = x.clone();
+                    (d.gamma() && psi.digamma() && d.multiply(&psi)).then_some(d)
+                },
+                Number::gamma_impl,
+            );
+        }
+        self.gamma_impl()
+    }
+
+    fn gamma_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             return false; // TODO(port): complex gamma (Lanczos on the complex plane)
         }
@@ -812,7 +841,14 @@ impl Number {
     }
 
     /// `digamma()` — ψ(x) = Γ′(x)/Γ(x).
+    ///
+    /// Not in `function_differentiable`'s list
+    /// (MathStructure-differentiate.cc:30), so the reference propagates an
+    /// uncertainty through it with plain interval arithmetic rather than the
+    /// variance formula: `digamma(3+/-0.1)` is `0.922±0.040`, the enclosure of
+    /// ψ over [2.9, 3.1], not `|ψ'(3)|·0.1 = 0.0395`.
     pub fn digamma(&mut self) -> bool {
+        self.resolve_variance_uncertainty();
         if !self.is_real() {
             return false;
         }
@@ -829,6 +865,15 @@ impl Number {
 
     /// `erf()` — the error function.
     pub fn erf(&mut self) -> bool {
+        // `erf(f)' = f'·2/(e^(f²)·sqrt(pi))`
+        // (MathStructure-differentiate.cc:336).
+        if self.unc.is_some() {
+            return self.uncertain_unary(|x| gaussian_derivative(x, 2, true), Number::erf_impl);
+        }
+        self.erf_impl()
+    }
+
+    fn erf_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             return false; // TODO(port): complex erf
         }
@@ -852,6 +897,15 @@ impl Number {
     /// `erfc()` — the complementary error function, computed directly (not as
     /// `1 − erf`) once cancellation would bite.
     pub fn erfc(&mut self) -> bool {
+        // `erfc(f)' = f'·−2/(e^(f²)·sqrt(pi))`
+        // (MathStructure-differentiate.cc:361).
+        if self.unc.is_some() {
+            return self.uncertain_unary(|x| gaussian_derivative(x, -2, true), Number::erfc_impl);
+        }
+        self.erfc_impl()
+    }
+
+    fn erfc_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             return false; // TODO(port): complex erfc
         }
@@ -875,6 +929,15 @@ impl Number {
 
     /// `erfi()` — the imaginary error function, `erfi(x) = −i·erf(ix)`.
     pub fn erfi(&mut self) -> bool {
+        // `erfi(f)' = f'·2·e^(f²)/sqrt(pi)`
+        // (MathStructure-differentiate.cc:349).
+        if self.unc.is_some() {
+            return self.uncertain_unary(|x| gaussian_derivative(x, 2, false), Number::erfi_impl);
+        }
+        self.erfi_impl()
+    }
+
+    fn erfi_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             return false; // TODO(port): complex erfi
         }
@@ -901,7 +964,15 @@ impl Number {
     /// Exact for `s = 0`, non-positive integers (`−B_{n+1}/(n+1)`) and even
     /// positive integers (rational multiple of `π^n`); Borwein's alternating
     /// series for `s ≥ ½` and the functional equation below that.
+    ///
+    /// Like [`Number::digamma`], zeta is missing from
+    /// `function_differentiable` (MathStructure-differentiate.cc:30), so an
+    /// uncertain argument is widened to an interval and enclosed rather than
+    /// pushed through ζ′. That is why `zeta(2+/-0.1)` is `1.655±0.095` — the
+    /// midpoint of `[ζ(2.1), ζ(1.9)]`, which is *not* ζ(2) — and not
+    /// `1.645±0.094`.
     pub fn zeta(&mut self) -> bool {
+        self.resolve_variance_uncertainty();
         if self.has_imaginary_part() {
             return false; // TODO(port): complex zeta
         }
@@ -1158,6 +1229,21 @@ impl Number {
 
     /// `sinint()` — the sine integral `Si(x)`.
     pub fn sinint(&mut self) -> bool {
+        // `Si(f)' = f'·sinc(f) = f'·sin(f)/f`
+        // (MathStructure-differentiate.cc:417).
+        if self.unc.is_some() {
+            return self.uncertain_unary(
+                |x| {
+                    let mut d = x.clone();
+                    (d.sin() && d.divide(x)).then_some(d)
+                },
+                Number::sinint_impl,
+            );
+        }
+        self.sinint_impl()
+    }
+
+    fn sinint_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             return false; // TODO(port): complex Si
         }
@@ -1187,6 +1273,20 @@ impl Number {
 
     /// `cosint()` — the cosine integral `Ci(x)`, real for x > 0.
     pub fn cosint(&mut self) -> bool {
+        // `Ci(f)' = f'·cos(f)/f` (MathStructure-differentiate.cc:425).
+        if self.unc.is_some() {
+            return self.uncertain_unary(
+                |x| {
+                    let mut d = x.clone();
+                    (d.cos() && d.divide(x)).then_some(d)
+                },
+                Number::cosint_impl,
+            );
+        }
+        self.cosint_impl()
+    }
+
+    fn cosint_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
             return false; // TODO(port): complex Ci
         }
@@ -1302,6 +1402,41 @@ fn half_integer_gamma_coeff(r: &BigRational) -> Option<BigRational> {
             num = -num;
         }
         Some(BigRational::new(num, fact_bigint(2 * n)))
+    }
+}
+
+#[cfg(test)]
+mod uncertainty_tests {
+    use crate::number::uncertainty_test_support::{plus_minus, uncertain};
+
+    #[test]
+    fn error_function_carries_the_gaussian() {
+        // Reference: `erf(1+/-0.1)` = `0.843±0.042` — 2/(e·sqrt(pi))·0.1.
+        let mut n = uncertain("1", "0.1");
+        assert!(n.erf());
+        assert_eq!(plus_minus(&n), "0.843±0.042");
+    }
+
+    #[test]
+    fn gamma_carries_gamma_times_digamma() {
+        // Reference: `gamma(3+/-0.1)` = `2.00±0.18` — Γ(3)·ψ(3)·0.1. The
+        // uncertainty used to be dropped outright: the exact-integer branch
+        // replaces the value through `take_keeping_flags`, which keeps the
+        // approximation flags but not `unc`.
+        let mut n = uncertain("3", "0.1");
+        assert!(n.gamma());
+        assert_eq!(plus_minus(&n), "2.00±0.18");
+    }
+
+    #[test]
+    fn zeta_falls_back_to_interval_arithmetic() {
+        // Reference: `zeta(2+/-0.1)` = `1.655±0.095`. Not the variance
+        // formula — zeta is not in `function_differentiable`'s list — so the
+        // answer is the enclosure of ζ over [1.9, 2.1], whose midpoint is not
+        // ζ(2) = 1.6449.
+        let mut n = uncertain("2", "0.1");
+        assert!(n.zeta());
+        assert_eq!(plus_minus(&n), "1.655±0.095");
     }
 }
 

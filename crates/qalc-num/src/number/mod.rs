@@ -937,6 +937,31 @@ impl Number {
     }
 }
 
+/// Helpers shared by the uncertainty-propagation tests in this module's
+/// siblings, so each operation's test can sit next to the operation.
+#[cfg(test)]
+pub(crate) mod uncertainty_test_support {
+    use super::Number;
+    use crate::options::{IntervalDisplay, ParseOptions, PrintOptions};
+
+    /// `value+/-unc`, carried the way the parser leaves it: as a variance
+    /// uncertainty on the value, not as a widened interval.
+    pub(crate) fn uncertain(value: &str, unc: &str) -> Number {
+        let po = ParseOptions::default();
+        let mut n = Number::parse(value, &po);
+        n.add_variance_uncertainty(&Number::parse(unc, &po));
+        n
+    }
+
+    /// What the CLI prints for it, so a test can name the reference's own
+    /// output rather than a tolerance on the uncertainty.
+    pub(crate) fn plus_minus(n: &Number) -> String {
+        let mut po = PrintOptions::default();
+        po.interval_display = IntervalDisplay::PlusMinus;
+        n.print(&po)
+    }
+}
+
 /// Helper: construct a `Number` from integer literal in expressions/tests.
 impl From<i64> for Number {
     fn from(i: i64) -> Self {
