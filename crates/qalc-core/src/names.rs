@@ -14,7 +14,13 @@
 //! | `s`  | suffix |
 //! | `c`  | case sensitive |
 //! | `i`  | avoid input |
-//! | `-`  | negates the flags that follow it |
+//! | `o`  | completion only |
+//! | `-`  | negates the **single** flag that follows it |
+//!
+//! The negation is not sticky: the C++ loop
+//! (`Calculator-definitions.cc:298`) sets `b = false` on `-` and every flag
+//! case restores `b = true` afterwards. So in `a-cr:USD` the name is an
+//! abbreviation, is *not* case-sensitive, and *is* a reference name.
 
 /// One name of an expression item, with its flags.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -31,8 +37,9 @@ pub struct ExpressionName {
 }
 
 impl ExpressionName {
-    /// A plain name with default flags. Single-character names are
-    /// case-sensitive by default, matching `ExpressionName::setDefaults`.
+    /// A plain name with default flags. With no explicit `c` flag, a name is
+    /// case-sensitive when it is an abbreviation or a single character
+    /// (`Calculator-definitions.cc:319`).
     pub fn new(name: impl Into<String>) -> Self {
         let name = name.into();
         let case_sensitive = name.chars().count() == 1;
@@ -69,24 +76,42 @@ fn parse_name_entry(entry: &str) -> ExpressionName {
     };
     let (flags, rest) = entry.split_at(colon);
     let rest = &rest[1..];
-    if flags.is_empty() || !flags.chars().all(|c| matches!(c, 'a' | 'r' | 'p' | 'u' | 's' | 'c' | 'i' | 'b' | '-')) {
+    if flags.is_empty()
+        || !flags
+            .chars()
+            .all(|c| matches!(c, 'a' | 'r' | 'p' | 'u' | 's' | 'c' | 'i' | 'o' | '-'))
+    {
         return ExpressionName::new(entry);
     }
     let mut n = ExpressionName::new(rest);
+    n.case_sensitive = false;
+    let mut case_set = false;
+    // `-` clears the flag value for exactly the next flag character; every
+    // flag restores it (Calculator-definitions.cc:300-309).
     let mut value = true;
     for c in flags.chars() {
         match c {
-            '-' => value = false,
+            '-' => {
+                value = false;
+                continue;
+            }
             'a' => n.abbreviation = value,
             'r' => n.reference = value,
             'p' => n.plural = value,
             'u' => n.unicode = value,
             's' => n.suffix = value,
-            'c' => n.case_sensitive = value,
+            'c' => {
+                n.case_sensitive = value;
+                case_set = true;
+            }
             'i' => n.avoid_input = value,
-            'b' => n.completion_only = value,
+            'o' => n.completion_only = value,
             _ => {}
         }
+        value = true;
+    }
+    if !case_set {
+        n.case_sensitive = n.abbreviation || n.name.chars().count() == 1;
     }
     n
 }
@@ -208,15 +233,32 @@ mod tests {
     }
 
     #[test]
-    fn negating_flags() {
-        // From currencies.xml: `a-cr:USD,au:€`
+    fn negation_applies_to_one_flag_only() {
+        // From currencies.xml: `a-cr:USD,au:€`. The `-` suppresses only `c`,
+        // so `r` is still set (Calculator-definitions.cc:300-309).
         let n = parse_names("a-cr:USD,au:€");
         assert_eq!(n[0].name, "USD");
         assert!(n[0].abbreviation, "a precedes the -");
-        assert!(!n[0].case_sensitive, "c is negated");
-        assert!(!n[0].reference, "r is negated");
+        assert!(!n[0].case_sensitive, "c is the negated flag");
+        assert!(n[0].reference, "r follows c and is not negated");
         assert_eq!(n[1].name, "€");
         assert!(n[1].abbreviation && n[1].unicode);
+    }
+
+    #[test]
+    fn completion_only_flag() {
+        // `o` is a real flag; treating it as unknown would make the whole
+        // prefix part of the name and lose the unit (e.g. `aor:US_ft`).
+        let n = parse_names("aor:US_ft");
+        assert_eq!(n[0].name, "US_ft");
+        assert!(n[0].abbreviation && n[0].completion_only && n[0].reference);
+    }
+
+    #[test]
+    fn abbreviations_default_to_case_sensitive() {
+        let n = parse_names("a:kB,kilobyte");
+        assert!(n[0].case_sensitive, "abbreviation implies case sensitive");
+        assert!(!n[1].case_sensitive, "a plain long name does not");
     }
 
     #[test]
@@ -251,5 +293,13 @@ mod tests {
     fn reference_name_is_the_flagged_one() {
         let s = NameSet::from_spec("a:km_c,r:kilometer");
         assert_eq!(s.reference_name(), Some("kilometer"));
+    }
+
+    #[test]
+    fn meter_case_sensitivity_matches_reference() {
+        // `m` is an abbreviation and one character: case sensitive both ways.
+        let s = NameSet::from_spec("ar:m,meter,p:meters,metre,p:metres");
+        assert!(s.matches("m") && !s.matches("M"));
+        assert!(s.matches("METER"), "long names are case insensitive");
     }
 }

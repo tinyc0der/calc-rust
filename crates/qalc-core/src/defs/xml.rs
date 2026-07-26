@@ -48,7 +48,7 @@ use super::{
     UnitKind, Variable, VariableValue,
 };
 use crate::ids::{FunctionId, UnitId, VariableId};
-use crate::names::{parse_names, NameSet};
+use crate::names::NameSet;
 use qalc_num::{Number, ParseOptions};
 
 /// Environment variable naming the directory holding the definition files,
@@ -385,7 +385,7 @@ fn read_meta(node: Node) -> ItemMeta {
         }
         match child.tag_name().name() {
             "names" if m.names.is_empty() => {
-                m.names = names_from_spec(&node_text(child));
+                m.names = NameSet::from_spec(&node_text(child));
             }
             "title" if m.title.is_empty() => m.title = strip_context(&node_text(child)),
             "description" if m.description.is_empty() => m.description = node_text(child),
@@ -394,64 +394,6 @@ fn read_meta(node: Node) -> ItemMeta {
         }
     }
     m
-}
-
-/// Parse a `<names>` spec, working around a gap in [`crate::names`].
-///
-/// `ExpressionItem.h` defines nine name flags; `names::parse_names` currently
-/// implements eight of them and does not know `o` (`completion_only`). Because
-/// an unrecognised flag character makes the whole prefix be treated as part of
-/// the name, real entries such as `aor:US_ft` and `ro:ata_point` in units.xml
-/// come back as literal names and the units that reference them cannot be
-/// resolved — fourteen alias units and two composites are lost.
-///
-/// Rather than reimplement the flag syntax here, strip an `o` out of the flag
-/// prefix, hand the rest to `parse_names`, and set `completion_only`
-/// afterwards. Delete this once `names.rs` grows an `'o'` match arm.
-fn names_from_spec(spec: &str) -> NameSet {
-    let mut set = NameSet::default();
-    for entry in spec.split(',') {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            continue;
-        }
-        let (normalized, completion_only) = strip_completion_only_flag(entry);
-        for mut n in parse_names(&normalized) {
-            n.completion_only |= completion_only;
-            set.names.push(n);
-        }
-    }
-    set
-}
-
-fn strip_completion_only_flag(entry: &str) -> (String, bool) {
-    let Some(colon) = entry.find(':') else {
-        return (entry.to_string(), false);
-    };
-    let (flags, rest) = entry.split_at(colon);
-    let rest = &rest[1..];
-    let is_flags = !flags.is_empty()
-        && flags
-            .chars()
-            .all(|c| matches!(c, 'a' | 'r' | 'p' | 'u' | 's' | 'c' | 'i' | 'o' | 'b' | '-'));
-    if !is_flags || !flags.contains('o') {
-        return (entry.to_string(), false);
-    }
-    let mut completion_only = false;
-    let mut value = true;
-    for c in flags.chars() {
-        match c {
-            '-' => value = false,
-            'o' => completion_only = value,
-            _ => {}
-        }
-    }
-    let stripped: String = flags.chars().filter(|c| *c != 'o').collect();
-    if stripped.is_empty() || stripped.chars().all(|c| c == '-') {
-        (rest.to_string(), completion_only)
-    } else {
-        (format!("{stripped}:{rest}"), completion_only)
-    }
 }
 
 fn node_text(node: Node) -> String {

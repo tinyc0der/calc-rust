@@ -8,10 +8,7 @@ fn po() -> PrintOptions {
 }
 
 fn parse(s: &str) -> Number {
-    let mut n = Number::new();
-    let po = qalc_num::ParseOptions::default();
-    n.parse(s, &po);
-    n
+    Number::parse(s, &qalc_num::ParseOptions::default())
 }
 
 #[test]
