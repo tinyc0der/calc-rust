@@ -407,9 +407,14 @@ impl UnitStore {
             .find_unit_id_case_sensitive(name)
             .or_else(|| self.reg.find_unit_id(name))?;
         let u = self.reg.unit(id);
-        // Composite units are internal plumbing (`m_kg_p_sqs`); they are
-        // reachable by name but never hidden ones.
-        if u.hidden || !u.active {
+        // `<hidden>` (`ExpressionItem::isHidden`) only keeps an item out of
+        // menus and listings: the C++ tests it in `qalc.cc`'s `-u`/`--list`
+        // output, in `defs2doc`, and when picking a composite unit to display
+        // a result in (`Calculator-convert.cc`), never in name lookup
+        // (`Calculator::getUnit`/`getActiveUnit`). So `kph`, `cc`, `mHg`,
+        // `cumec`, ... must still resolve here; only `<active>false</active>`
+        // takes a name out of circulation.
+        if !u.active {
             return None;
         }
         Some(id)
@@ -1371,6 +1376,49 @@ mod tests {
         // `min` is the minute, not milli-inch; `mi` is the mile.
         assert_eq!(ev("2 min to s"), "120 s");
         assert_eq!(ev("1 mi to yd"), "1760 yd");
+    }
+
+    /// `<hidden>` keeps an item out of menus and listings (`qalc -u`,
+    /// `defs2doc`, the composite-unit search behind `convertToOptimalUnit`);
+    /// `Calculator::getUnit`/`getActiveUnit` never look at it, so a hidden
+    /// name still resolves.
+    ///
+    /// While `lookup_unit` rejected them, the prefix-split fallback took over
+    /// and produced answers wrong in *dimension*: `kph` became kilo-phot,
+    /// `cc` the speed of light squared, `mHg` an `H*g*m` product.
+    #[test]
+    fn hidden_units_still_resolve_by_name() {
+        need_units!();
+        assert_eq!(ev("1 kph to km/h"), "1 km/h");
+        assert_eq!(ev("1 kph to m/s"), "0.2777777778 m/s");
+        assert_eq!(ev("100 kph to mph"), "62.13711922 mph");
+        assert_eq!(ev("60 kmph to km/h"), "60 km/h");
+        assert_eq!(ev("1 cc to cm^3"), "1 cm^3");
+        assert_eq!(ev("1 cc to mm^3"), "1000 mm^3");
+        assert_eq!(ev("1 CC to mm^3"), "1000 mm^3");
+        assert_eq!(ev("5 cc to mL"), "5 mL");
+        assert_eq!(ev("1 mHg to kPa"), "133.3223684 kPa");
+        assert_eq!(ev("1 mHg to Pa"), "133322.3684 Pa");
+        assert_eq!(ev("1 mHg to mmHg"), "1000 mmHg");
+        assert_eq!(ev("1 cumec"), "1 m^3/s");
+        assert_eq!(ev("1 cumec to L/s"), "1000 L/s");
+        assert_eq!(ev("1 cal_IUNS"), "4.182 J");
+        assert_eq!(ev("1 cal_IUNS to J"), "4.182 J");
+    }
+
+    /// The bare forms of the same units. What still separates these from the
+    /// reference (`1 km/h`, `1000 mm^3`, `133.3223684 kPa`) is the unported
+    /// optimal-unit and optimal-prefix search, which treats the spelled-out
+    /// spelling in exactly the same way: `1 knot` and `1 cm^3` are off by the
+    /// same step without a hidden unit anywhere in sight.
+    #[test]
+    fn hidden_unit_names_behave_like_their_spelled_out_form() {
+        need_units!();
+        assert_eq!(ev("1 kph"), ev("1 km/h"));
+        assert_eq!(ev("60 kmph"), ev("60 km/h"));
+        assert_eq!(ev("1 cc"), ev("1 cm^3"));
+        assert_eq!(ev("1 CC"), ev("1 cm^3"));
+        assert_eq!(ev("1 mHg"), ev("1000 mmHg"));
     }
 
     #[test]
