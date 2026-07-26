@@ -15,6 +15,7 @@ mod parse;
 mod pow;
 mod print;
 mod transcendental;
+pub mod ieee;
 mod integer;
 mod special;
 

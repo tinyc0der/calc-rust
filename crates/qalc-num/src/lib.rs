@@ -9,6 +9,6 @@ pub mod float;
 pub mod number;
 pub mod options;
 
-pub use number::{Number, RealValue};
+pub use number::{ieee, Number, RealValue};
 pub use options::{ComparisonResult, ParseOptions, PrintOptions};
 
