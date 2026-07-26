@@ -27,6 +27,8 @@ use std::cmp::Ordering;
 
 use qalc_num::options::TimeZoneMode;
 use qalc_num::{Number, PrintOptions};
+pub mod astro;
+
 
 /// `SECONDS_PER_DAY`
 pub const SECONDS_PER_DAY: i64 = 86400;

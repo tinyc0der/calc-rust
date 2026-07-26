@@ -35,6 +35,8 @@ pub mod id {
     pub const WEEKDAY: u32 = 2609;
     pub const WEEK: u32 = 2610;
     pub const YEARDAY: u32 = 2611;
+    pub const LUNAR_PHASE: u32 = 2612;
+    pub const NEXT_LUNAR_PHASE: u32 = 2613;
 }
 
 /// Resolve a builtin date function name to its id.
@@ -52,6 +54,8 @@ pub fn function_id_for_name(name: &str) -> Option<FunctionId> {
         "weekday" => id::WEEKDAY,
         "week" => id::WEEK,
         "yearday" => id::YEARDAY,
+        "lunarphase" => id::LUNAR_PHASE,
+        "nextlunarphase" => id::NEXT_LUNAR_PHASE,
         _ => return None,
     };
     Some(FunctionId(id))
@@ -72,6 +76,8 @@ pub fn function_name(id: u32) -> Option<&'static str> {
         id::WEEKDAY => "weekday",
         id::WEEK => "week",
         id::YEARDAY => "yearday",
+        id::LUNAR_PHASE => "lunarphase",
+        id::NEXT_LUNAR_PHASE => "nextlunarphase",
         _ => return None,
     })
 }
@@ -89,6 +95,8 @@ pub fn date_arg_indices(fid: u32) -> Option<&'static [usize]> {
         id::ADD_DAYS | id::ADD_MONTHS | id::ADD_YEARS => &[0],
         id::DAYS_BETWEEN => &[0, 1],
         id::YEAR | id::MONTH | id::DAY | id::WEEKDAY | id::WEEK | id::YEARDAY => &[0],
+        id::LUNAR_PHASE => &[0],
+        id::NEXT_LUNAR_PHASE => &[1],
         _ => return None,
     })
 }
@@ -192,6 +200,19 @@ fn apply_builtin(fid: u32, args: &[MathStructure]) -> Option<MathStructure> {
         id::YEARDAY => Some(MathStructure::Number(Number::from_i64(
             arg_date(args, 0)?.yearday() as i64,
         ))),
+        id::LUNAR_PHASE => Some(MathStructure::Number(
+            qalc_datetime::astro::lunar_phase_of(&arg_date(args, 0)?),
+        )),
+        id::NEXT_LUNAR_PHASE => {
+            // `NextLunarPhaseFunction::calculate`: a phase above one is taken
+            // to be degrees rather than a fraction of a cycle.
+            let mut phase = arg_number(args, 0)?;
+            if phase.is_greater_than(&Number::from_i64(1)) {
+                phase.divide(&Number::from_i64(360));
+            }
+            let date = arg_date(args, 1)?;
+            qalc_datetime::astro::next_lunar_phase(&date, &phase).map(date_structure)
+        }
         _ => None,
     }
 }
