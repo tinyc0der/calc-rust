@@ -47,6 +47,59 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// How deeply the recursive-descent ladder may nest before the parser gives
+/// up with a [`ParseError`] instead of running the stack out.
+///
+/// The C++ parser rewrites strings and keeps its pending groups on the heap,
+/// so it happily swallows tens of thousands of nested parentheses. This port
+/// descends the precedence ladder recursively, which trades that headroom for
+/// speed: one `(…)` level costs about eighteen frames (~9 KB in release,
+/// ~50 KB in a debug build), so a few thousand parentheses overflow an 8 MiB
+/// stack and abort the process — a crash no `Result` can catch.
+///
+/// The counter is bumped at the three points where the ladder can re-enter
+/// itself — [`Parser::parse_expression`] (grouping: `(`, `[`, `|…|`, call
+/// arguments), [`Parser::parse_power`] (right-associative `^`) and
+/// [`Parser::parse_unary`] (leading `-`/`+`/`~`/`!`) — so a parenthesis level
+/// counts three, a `^` level two and a sign one.
+///
+/// 300 therefore allows ~100 nested parentheses, ~150 nested exponents and
+/// 300 leading signs. Reaching the limit costs ~0.9 MB of stack in release
+/// and ~5 MB in a debug build, both of which fit the 8 MiB main thread with
+/// room left for the evaluation pass over the tree that was just built.
+pub const MAX_PARSE_DEPTH: u32 = 300;
+
+thread_local! {
+    /// Current nesting depth. A thread-local rather than a `Parser` field
+    /// because `[…]` elements and text arguments are re-parsed by a *fresh*
+    /// `Parser` ([`Parser::parse_sub`]), which would otherwise restart the
+    /// count at every bracket level.
+    static PARSE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Holds one level of [`PARSE_DEPTH`], releasing it on every exit path
+/// (including the `?` of a parse error further down).
+struct DepthGuard;
+
+impl DepthGuard {
+    fn enter() -> Option<DepthGuard> {
+        PARSE_DEPTH.with(|d| {
+            let depth = d.get();
+            if depth >= MAX_PARSE_DEPTH {
+                return None;
+            }
+            d.set(depth + 1);
+            Some(DepthGuard)
+        })
+    }
+}
+
+impl Drop for DepthGuard {
+    fn drop(&mut self) {
+        PARSE_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
 /// Resolves identifiers to variables, units and functions.
 ///
 /// The C++ parser consults the `CALCULATOR` singleton's `ufv` name buckets;
@@ -157,6 +210,20 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Take one level of recursion budget, or fail with a [`ParseError`].
+    ///
+    /// The returned guard must be kept alive for the whole of the recursive
+    /// call it protects; dropping it gives the level back.
+    fn enter(&self) -> Result<DepthGuard, ParseError> {
+        match DepthGuard::enter() {
+            Some(g) => Ok(g),
+            None => Err(ParseError {
+                message: format!("expression nested deeper than {MAX_PARSE_DEPTH} levels"),
+                pos: self.pos(),
+            }),
+        }
+    }
+
     fn err<T>(&self, msg: impl Into<String>) -> Result<T, ParseError> {
         Err(ParseError {
             message: msg.into(),
@@ -206,6 +273,9 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expression(&mut self) -> Result<MathStructure, ParseError> {
+        // Every grouping construct — `(…)`, `[…]`, `|…|`, a call argument —
+        // re-enters the ladder here, so this is where nesting is counted.
+        let _depth = self.enter()?;
         let left = self.parse_dot()?;
         // `expr to <target>` — the conversion operator binds loosest of all
         // (`Calculator::separateToExpression` splits it off before parsing).
@@ -660,6 +730,8 @@ impl<'a> Parser<'a> {
 
     /// `^` — right-associative, binds tighter than implicit multiplication.
     fn parse_power(&mut self) -> Result<MathStructure, ParseError> {
+        // Right-associative, so `2^2^2^…` recurses once per operator.
+        let _depth = self.enter()?;
         let base = self.parse_unary()?;
         if *self.peek() == Tok::ElementPower {
             self.bump();
@@ -682,6 +754,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_unary(&mut self) -> Result<MathStructure, ParseError> {
+        // A run of leading signs (`----…1`) recurses once per sign.
+        let _depth = self.enter()?;
         match self.peek().clone() {
             Tok::Minus => {
                 self.bump();
@@ -1390,6 +1464,62 @@ mod tests {
 
     fn render(m: &MathStructure) -> String {
         format!("{m}")
+    }
+
+    /// Run `f` on a thread with a stack big enough for the deepest nesting
+    /// the parser accepts.
+    ///
+    /// Reaching [`MAX_PARSE_DEPTH`] costs about 0.9 MB of stack in release and
+    /// about 5 MB in a debug build — more than the 2 MiB the test harness
+    /// gives a test thread, and these tests run in debug.
+    fn with_deep_stack(f: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(32 << 20)
+            .spawn(f)
+            .expect("spawn")
+            .join()
+            .expect("no stack overflow, and no panic");
+    }
+
+    /// Each of these aborted the process with a fatal stack overflow: the
+    /// ladder is one mutually-recursive cycle that descends ~18 frames per
+    /// `(`, and the abort happens at parse time, so no `Result` could catch
+    /// it. They must now come back as ordinary parse errors.
+    #[test]
+    fn nesting_past_the_limit_is_an_error_not_a_stack_overflow() {
+        with_deep_stack(|| {
+            let cases = [
+                "(".repeat(2000) + "1" + &")".repeat(2000),
+                "[".repeat(500) + "1" + &"]".repeat(500),
+                "-".repeat(100_000) + "1",
+                "sin(".repeat(200) + "x" + &")".repeat(200),
+                "2^".repeat(2000) + "2",
+            ];
+            for expr in cases {
+                let err = parse(&expr, &ParseOptions::default())
+                    .expect_err("nesting past the limit is refused");
+                assert!(
+                    err.message.contains("nested deeper"),
+                    "expected a depth error, got {err}"
+                );
+            }
+        });
+    }
+
+    /// The guard is released on the way back out, so nesting that fits keeps
+    /// parsing — including the same expression repeatedly, which would fail if
+    /// the depth counter leaked across a parse.
+    #[test]
+    fn nesting_within_the_limit_still_parses() {
+        with_deep_stack(|| {
+            let expr = "(".repeat(90) + "1+2" + &")".repeat(90);
+            for _ in 0..3 {
+                assert_eq!(render(&p(&expr)), "(1 + 2)");
+            }
+            // A parse that failed on depth must give its levels back too.
+            assert!(parse(&"(".repeat(5000), &ParseOptions::default()).is_err());
+            assert_eq!(render(&p(&expr)), "(1 + 2)");
+        });
     }
 
     #[test]

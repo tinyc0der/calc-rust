@@ -1273,7 +1273,6 @@ pub fn calculate_function(m: &mut MathStructure) -> bool {
     // `SqrtFunction::calculate` returns `x^(1/2)` rather than a function call
     // (BuiltinFunctions-exponents.cc), which is what makes a radical sort
     // before the constant term of a sum and lets `merge_power` combine it.
-    let _ = &fid;
     if fid == crate::builtins::id::SQRT && args.len() == 1 && !args[0].is_number() {
         let arg = args[0].clone();
         *m = MathStructure::Power {
@@ -1281,6 +1280,15 @@ pub fn calculate_function(m: &mut MathStructure) -> bool {
             exponent: Box::new(MathStructure::Number(Number::from_ints(1, 2, 0))),
         };
         return true;
+    }
+    // Everything below belongs to a polynomial builtin. Bail out first for
+    // anything else: this dispatcher runs for *every* `Function` node, and
+    // the argument normalisation just below deep-clones the argument and runs
+    // the whole evaluator over it. Without this gate that work happened once
+    // per enclosing call as well as once for the call itself, so a nested
+    // `sin(sin(…))` cost 2^depth evaluations of the innermost argument.
+    if function_name(fid).is_none() {
+        return false;
     }
     // The C++ `MathFunction::calculate` receives fully evaluated arguments
     // (`vargs`); this port's function dispatch runs before the merge engine,

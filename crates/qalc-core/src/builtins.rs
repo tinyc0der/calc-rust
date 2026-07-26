@@ -617,6 +617,29 @@ mod tests {
         evaluate_to_string(s).expect("evaluates")
     }
 
+    /// Nesting a symbolic call must cost linear time, not `2^depth`.
+    ///
+    /// [`calculate_function_exact`] dispatches every `Function` node through
+    /// `polynomial::calculate_function`, which used to deep-clone its first
+    /// argument and run the whole evaluator over it *before* checking whether
+    /// the id was a polynomial builtin at all — so every nesting level paid
+    /// for a second full evaluation of everything below it. `sin^22` took 10 s
+    /// and `sin^24` 44 s in release, doubling per level; in this debug build
+    /// depth 25 would have run for well over an hour. It is now milliseconds,
+    /// so a budget this generous still fails loudly if the blowup returns.
+    #[test]
+    fn nested_calls_do_not_blow_up_exponentially() {
+        let expr = "sin(".repeat(25) + "x" + &")".repeat(25);
+        let start = std::time::Instant::now();
+        let out = ev(&expr);
+        let elapsed = start.elapsed();
+        assert!(out.starts_with("sin(sin("), "got {out}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "25 nested calls took {elapsed:?}"
+        );
+    }
+
     #[test]
     fn modulo_and_remainder() {
         // Values from tests/operators.batch, verified against the reference.
