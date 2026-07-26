@@ -45,6 +45,13 @@ pub mod id {
     pub const ERF: u32 = 1403;
     pub const ERFC: u32 = 1404;
     pub const ZETA: u32 = 1405;
+    pub const DIGAMMA: u32 = 1406;
+    pub const ERFI: u32 = 1407;
+    pub const BERNOULLI: u32 = 1408;
+    pub const EXPINT: u32 = 1409;
+    pub const LOGINT: u32 = 1410;
+    pub const SININT: u32 = 1411;
+    pub const COSINT: u32 = 1412;
 
     pub const FACTORIAL: u32 = 1500;
     pub const DOUBLE_FACTORIAL: u32 = 1501;
@@ -66,11 +73,22 @@ pub mod id {
     pub const INT: u32 = 1713;
     pub const BITWISE_NOT: u32 = 1714;
     pub const PERCENT: u32 = 1720;
+    /// Read a literal written in a given base: `hex(34)` is 52.
+    pub const BASE_HEX: u32 = 1721;
+    pub const BASE_BIN: u32 = 1722;
+    pub const BASE_OCT: u32 = 1723;
+    pub const BASE_DEC: u32 = 1724;
+    pub const BASE_N: u32 = 1725;
 }
 
 /// Evaluate a function call in place. Returns true if it was replaced by a
 /// value.
 pub fn calculate_function(m: &mut MathStructure) -> bool {
+    // Matrix/vector builtins take structured (non-numeric) arguments, so
+    // they are dispatched before the numeric fast path below.
+    if crate::matrix::calculate_function(m) {
+        return true;
+    }
     let MathStructure::Function { id, args } = m else {
         return false;
     };
@@ -121,6 +139,19 @@ fn apply(id: u32, args: &[Number]) -> Option<Number> {
         (id::FRAC, 1) => unary(args, |n| n.frac()),
         (id::ROUND, 1) => unary(args, |n| n.round(RoundingMode::HalfAwayFromZero)),
         (id::BITWISE_NOT, 1) => unary(args, |n| n.bit_not()),
+        // Special functions (hand-rolled in qalc-num; MPFR has no pure-Rust
+        // equivalent).
+        (id::GAMMA, 1) => unary(args, |n| n.gamma()),
+        (id::DIGAMMA, 1) => unary(args, |n| n.digamma()),
+        (id::ERF, 1) => unary(args, |n| n.erf()),
+        (id::ERFC, 1) => unary(args, |n| n.erfc()),
+        (id::ERFI, 1) => unary(args, |n| n.erfi()),
+        (id::ZETA, 1) => unary(args, |n| n.zeta()),
+        (id::BERNOULLI, 1) => unary(args, |n| n.bernoulli()),
+        (id::EXPINT, 1) => unary(args, |n| n.expint()),
+        (id::LOGINT, 1) => unary(args, |n| n.logint()),
+        (id::SININT, 1) => unary(args, |n| n.sinint()),
+        (id::COSINT, 1) => unary(args, |n| n.cosint()),
         (id::PERCENT, 1) => binary_with(args, &Number::from_i64(100), |n, d| n.divide(d)),
 
         // --- logarithms ---
@@ -139,12 +170,38 @@ fn apply(id: u32, args: &[Number]) -> Option<Number> {
         (id::SHIFT_RIGHT, 2) => binary(args, |n, o| n.shift_right(o)),
         (id::GCD, 2) => binary(args, |n, o| n.gcd(o)),
         (id::LCM, 2) => binary(args, |n, o| n.lcm(o)),
+        // `hex(34)` re-reads the digits of its argument in another base.
+        (id::BASE_HEX, 1) => reinterpret_in_base(&args[0], 16),
+        (id::BASE_BIN, 1) => reinterpret_in_base(&args[0], 2),
+        (id::BASE_OCT, 1) => reinterpret_in_base(&args[0], 8),
+        (id::BASE_DEC, 1) => reinterpret_in_base(&args[0], 10),
+        (id::BASE_N, 2) => {
+            let b = args[1].to_i64()?;
+            if !(2..=36).contains(&b) {
+                return None;
+            }
+            reinterpret_in_base(&args[0], b as u32)
+        }
         (id::BINOMIAL, 2) => {
             let mut r = Number::new();
             r.binomial(&args[0], &args[1]).then_some(r)
         }
         _ => None,
     }
+}
+
+/// Re-read a number's decimal digits as if written in `base`.
+///
+/// `hex(34)` is 52: the argument is parsed normally (as decimal 34) and the
+/// digit string "34" is then interpreted in base 16.
+fn reinterpret_in_base(n: &Number, base: u32) -> Option<Number> {
+    let mut po = qalc_num::PrintOptions::default();
+    po.base = 10;
+    let digits = n.print(&po);
+    let mut parse = qalc_num::ParseOptions::default();
+    parse.base = base as i32;
+    let v = Number::parse(&digits, &parse);
+    Some(v)
 }
 
 fn unary(args: &[Number], f: impl FnOnce(&mut Number) -> bool) -> Option<Number> {
@@ -333,6 +390,13 @@ pub fn function_id_for_name(name: &str) -> Option<FunctionId> {
         "erf" => id::ERF,
         "erfc" => id::ERFC,
         "zeta" => id::ZETA,
+        "digamma" => id::DIGAMMA,
+        "erfi" => id::ERFI,
+        "bernoulli" => id::BERNOULLI,
+        "Ei" => id::EXPINT,
+        "li" => id::LOGINT,
+        "Si" => id::SININT,
+        "Ci" => id::COSINT,
         "factorial" => id::FACTORIAL,
         "factorial2" => id::DOUBLE_FACTORIAL,
         "binomial" | "comb" => id::BINOMIAL,
@@ -347,7 +411,12 @@ pub fn function_id_for_name(name: &str) -> Option<FunctionId> {
         "round" => id::ROUND,
         "frac" => id::FRAC,
         "int" => id::INT,
-        _ => return None,
+        "hex" => id::BASE_HEX,
+        "bin" => id::BASE_BIN,
+        "oct" => id::BASE_OCT,
+        "dec" => id::BASE_DEC,
+        "base" => id::BASE_N,
+        _ => return crate::matrix::function_id_for_name(name),
     };
     Some(FunctionId(id))
 }

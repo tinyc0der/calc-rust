@@ -233,7 +233,9 @@ fn lex_number(chars: &[char], i: &mut usize, join_digit_groups: bool) -> String 
         let continues = join_digit_groups
             && j < chars.len()
             && (chars[j].is_ascii_digit()
-                || (chars[j] == '.' && !is_element_wise_op(chars, j)));
+                || (chars[j] == '.'
+                    && !is_element_wise_op(chars, j)
+                    && !dot_is_operator(chars, j)));
         if !continues {
             break;
         }
@@ -440,10 +442,28 @@ fn is_element_wise_op(chars: &[char], i: usize) -> bool {
     matches!(chars.get(i + 1), Some('^') | Some('*') | Some('/') | Some('\''))
 }
 
-/// Does the `.` at `i` begin a numeric literal (`.5`)? A `.` that is not
-/// followed by a digit is an operator, not a decimal point.
+/// Does the `.` at `i` begin a numeric literal rather than the dot-product
+/// operator?
+///
+/// A `.` is the dot product only when an operand follows that is not a
+/// digit — `(1;2).(3;4)`, `a.b`. A `.` followed by a digit is a decimal
+/// point (`.5`, and `1 . 5` through the space-skipping continuation), and a
+/// trailing or lone `.` is the number zero, which is what the reference
+/// binary yields for `.` and `-.`.
 fn dot_starts_number(chars: &[char], i: usize) -> bool {
-    matches!(chars.get(i + 1), Some(c) if c.is_ascii_digit())
+    !is_element_wise_op(chars, i) && !dot_is_operator(chars, i)
+}
+
+/// Is the `.` at `i` the binary dot-product operator?
+fn dot_is_operator(chars: &[char], i: usize) -> bool {
+    let mut j = i + 1;
+    while j < chars.len() && is_space(chars[j]) {
+        j += 1;
+    }
+    match chars.get(j) {
+        Some(c) => is_ident_start(*c) || matches!(c, '(' | '[' | '{'),
+        None => false,
+    }
 }
 
 fn is_space(c: char) -> bool {

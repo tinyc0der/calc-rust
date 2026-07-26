@@ -33,7 +33,12 @@ enum MulSign {
 
 /// Print `m` using `po`.
 pub fn print(m: &MathStructure, po: &PrintOptions) -> String {
-    print_sub(m, po, 0)
+    // `MathStructure::format` runs before printing; the only formatting this
+    // port needs so far is the vector collapse (`[[1  2]]` → `[1  2]`,
+    // `[1]` → `1`).
+    let mut formatted = m.clone();
+    crate::matrix::format_for_print(&mut formatted, false);
+    print_sub(&formatted, po, 0)
 }
 
 fn print_sub(m: &MathStructure, po: &PrintOptions, depth: usize) -> String {
@@ -149,10 +154,82 @@ fn is_negative_number(m: &MathStructure) -> bool {
     }
 }
 
+/// Port of the `STRUCT_VECTOR` case of `MathStructure::print`
+/// (MathStructure-print.cc:5273).
+///
+/// In matlab-matrix mode a flat vector prints as `[1  2  3]` and a matrix as
+/// `[1  2; 4  5]`. A vector whose children are vectors of *differing*
+/// lengths is not a matrix and falls back to the tuple form
+/// `([1  2  3], [4  5])`.
 fn print_vector(items: &[MathStructure], po: &PrintOptions, depth: usize) -> String {
-    // The reference prints `[1  2  3]` — two spaces between elements.
+    let sep = if po.spacious { "  " } else { " " };
+    let row_sep = if po.spacious { "; " } else { ";" };
+    // Decide between the bracket ("new") style and the tuple style.
+    let mut newstyle = !items.is_empty();
+    let mut matrix = true;
+    let mut cols = 0usize;
+    for item in items {
+        if item.is_vector() {
+            if cols == 0 {
+                cols = item.size();
+                if cols == 0 {
+                    newstyle = false;
+                    break;
+                }
+            } else if cols != item.size() {
+                newstyle = false;
+                break;
+            }
+            if crate::matrix::is_matrix(item) {
+                newstyle = false;
+                break;
+            }
+        } else if cols > 1 {
+            newstyle = false;
+            break;
+        } else {
+            cols = 1;
+            matrix = false;
+        }
+    }
+    if newstyle {
+        let cell = |m: &MathStructure| wrap_vector_element(m, po, depth);
+        if matrix {
+            let rows: Vec<String> = items
+                .iter()
+                .map(|r| r.children().map(cell).collect::<Vec<_>>().join(sep))
+                .collect();
+            return format!("[{}]", rows.join(row_sep));
+        }
+        let cells: Vec<String> = items.iter().map(cell).collect();
+        return format!("[{}]", cells.join(sep));
+    }
     let inner: Vec<String> = items.iter().map(|i| print_sub(i, po, depth + 1)).collect();
-    format!("[{}]", inner.join("  "))
+    if items.len() <= 1 {
+        format!("[{}]", inner.join(", "))
+    } else {
+        format!("({})", inner.join(if po.spacious { ", " } else { "," }))
+    }
+}
+
+/// `needsParenthesis` for a vector element (MathStructure-print.cc:3319): an
+/// element is parenthesized when its printed form contains a top-level
+/// space, comma or semicolon, which would otherwise read as a separator.
+fn wrap_vector_element(m: &MathStructure, po: &PrintOptions, depth: usize) -> String {
+    let s = print_sub(m, po, depth + 1);
+    let mut brackets = 0i32;
+    let mut pars = 0i32;
+    for c in s.chars() {
+        match c {
+            '[' => brackets += 1,
+            ']' => brackets = (brackets - 1).max(0),
+            '(' if brackets == 0 => pars += 1,
+            ')' if brackets == 0 && pars > 0 => pars -= 1,
+            ' ' | ';' | ',' if brackets == 0 && pars == 0 => return format!("({s})"),
+            _ => {}
+        }
+    }
+    s
 }
 
 /// Addition, rendering negative terms as subtraction (`x - y`, not
@@ -454,6 +531,13 @@ fn function_name(id: crate::ids::FunctionId) -> &'static str {
         f::ERF => "erf",
         f::ERFC => "erfc",
         f::ZETA => "zeta",
+        f::DIGAMMA => "digamma",
+        f::ERFI => "erfi",
+        f::BERNOULLI => "bernoulli",
+        f::EXPINT => "Ei",
+        f::LOGINT => "li",
+        f::SININT => "Si",
+        f::COSINT => "Ci",
         f::FACTORIAL => "factorial",
         f::DOUBLE_FACTORIAL => "factorial2",
         f::BINOMIAL => "binomial",
@@ -472,7 +556,7 @@ fn function_name(id: crate::ids::FunctionId) -> &'static str {
         f::INT => "int",
         f::BITWISE_NOT => "bitnot",
         f::PERCENT => "percent",
-        _ => "f",
+        other => crate::matrix::function_name(other).unwrap_or("f"),
     }
 }
 

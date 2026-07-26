@@ -81,13 +81,17 @@ pub fn parse_with(
 ) -> Result<MathStructure, ParseError> {
     let tokens = tokenize(expr);
     let mut p = Parser {
+        src: expr,
         toks: tokens,
         i: 0,
         po: po.clone(),
         resolver,
         abs_depth: 0,
     };
-    let m = p.parse_expression()?;
+    // A comma (or, outside brackets, a semicolon) at the top level builds a
+    // vector: `Calculator::parse` wraps the enclosing parenthesis group in
+    // `vector()` (Calculator-parse.cc:3930).
+    let m = p.parse_vector_list(&[Tok::Eof])?;
     p.expect_eof()?;
     Ok(m)
 }
@@ -98,6 +102,10 @@ pub fn parse(expr: &str, po: &ParseOptions) -> Result<MathStructure, ParseError>
 }
 
 struct Parser<'a> {
+    /// The source text, needed by the `[…]` parser: libqalculate splits a
+    /// bracket group into element *substrings* and re-parses each one, which
+    /// is what makes `[1 2]` two elements while `1 2` is the number 12.
+    src: &'a str,
     toks: Vec<Token>,
     i: usize,
     po: ParseOptions,
@@ -161,8 +169,34 @@ impl<'a> Parser<'a> {
     // Precedence ladder
     // ---------------------------------------------------------------
 
+    /// A comma/semicolon separated list terminated by one of `enders`.
+    ///
+    /// Outside `[…]` libqalculate rewrites `;` to `,` (Calculator-parse.cc:1388)
+    /// and then wraps every remaining comma group in `vector()`
+    /// (Calculator-parse.cc:3930), so `1,2`, `(1;2)` and `(1,)` are all
+    /// vectors. An empty element parses as zero.
+    fn parse_vector_list(&mut self, enders: &[Tok]) -> Result<MathStructure, ParseError> {
+        let ends = |p: &Self| enders.iter().any(|e| p.peek() == e);
+        let element = |p: &mut Self| -> Result<MathStructure, ParseError> {
+            if ends(p) || matches!(p.peek(), Tok::Comma | Tok::Semicolon) {
+                return Ok(MathStructure::Number(Number::new()));
+            }
+            p.parse_expression()
+        };
+        let first = element(self)?;
+        if !matches!(self.peek(), Tok::Comma | Tok::Semicolon) {
+            return Ok(first);
+        }
+        let mut items = vec![first];
+        while matches!(self.peek(), Tok::Comma | Tok::Semicolon) {
+            self.bump();
+            items.push(element(self)?);
+        }
+        Ok(MathStructure::Vector(items))
+    }
+
     fn parse_expression(&mut self) -> Result<MathStructure, ParseError> {
-        let left = self.parse_logical_and()?;
+        let left = self.parse_dot()?;
         // `expr to <target>` — the conversion operator binds loosest of all
         // (`Calculator::separateToExpression` splits it off before parsing).
         if *self.peek() == Tok::To {
@@ -194,6 +228,21 @@ impl<'a> Parser<'a> {
         // Anything else is a unit expression.
         let m = self.parse_logical_and()?;
         Ok(ConversionTarget::Unit(Box::new(m)))
+    }
+
+    /// The `.` dot-product operator (`Calculator::parseAdd`'s internal
+    /// `\x16`, Calculator-parse.cc:5985). It binds looser than `+`/`-`.
+    fn parse_dot(&mut self) -> Result<MathStructure, ParseError> {
+        let mut left = self.parse_logical_and()?;
+        while *self.peek() == Tok::Dot {
+            self.bump();
+            let right = self.parse_logical_and()?;
+            left = MathStructure::Function {
+                id: FunctionId(crate::matrix::id::DOT_PRODUCT),
+                args: vec![left, right],
+            };
+        }
+        Ok(left)
     }
 
     fn parse_logical_and(&mut self) -> Result<MathStructure, ParseError> {
@@ -323,7 +372,7 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_implicit_product()?;
         loop {
             match self.peek() {
-                Tok::Times | Tok::ElementTimes => {
+                Tok::Times => {
                     self.bump();
                     let right = self.parse_implicit_product()?;
                     left = match left {
@@ -332,6 +381,23 @@ impl<'a> Parser<'a> {
                             MathStructure::Multiplication(v)
                         }
                         other => MathStructure::Multiplication(vec![other, right]),
+                    };
+                }
+                // `.*` and `./` are the entrywise product/quotient functions,
+                // not plain multiplication: they broadcast row against column
+                // vectors (`[1; 2].*[3 4]` = `[3  4; 6  8]`).
+                Tok::ElementTimes | Tok::ElementDivide => {
+                    let div = *self.peek() == Tok::ElementDivide;
+                    self.bump();
+                    let right = self.parse_implicit_product()?;
+                    let fid = if div {
+                        crate::matrix::id::ENTRYWISE_DIVISION
+                    } else {
+                        crate::matrix::id::ENTRYWISE_MULTIPLICATION
+                    };
+                    left = MathStructure::Function {
+                        id: FunctionId(fid),
+                        args: vec![left, right],
                     };
                 }
                 Tok::Divide => {
@@ -416,7 +482,15 @@ impl<'a> Parser<'a> {
     /// `^` — right-associative, binds tighter than implicit multiplication.
     fn parse_power(&mut self) -> Result<MathStructure, ParseError> {
         let base = self.parse_unary()?;
-        if matches!(self.peek(), Tok::Power | Tok::ElementPower) {
+        if *self.peek() == Tok::ElementPower {
+            self.bump();
+            let exp = self.parse_power()?;
+            return Ok(MathStructure::Function {
+                id: FunctionId(crate::matrix::id::ENTRYWISE_POWER),
+                args: vec![base, exp],
+            });
+        }
+        if *self.peek() == Tok::Power {
             self.bump();
             // Right-associative: 2^3^2 = 2^(3^2). The exponent is parsed at
             // unary level so `2^-1` works and `2^3x` is `(2^3)x`.
@@ -465,6 +539,14 @@ impl<'a> Parser<'a> {
         let mut m = self.parse_primary()?;
         loop {
             match self.peek() {
+                // Postfix `.'` — matrix transpose (Calculator-parse.cc:6268).
+                Tok::Transpose => {
+                    self.bump();
+                    m = MathStructure::Function {
+                        id: FunctionId(crate::matrix::id::TRANSPOSE),
+                        args: vec![m],
+                    };
+                }
                 Tok::LogicalNot => {
                     // Postfix position: factorial. `n!!` is double factorial.
                     self.bump();
@@ -527,39 +609,24 @@ impl<'a> Parser<'a> {
                 self.bump();
                 Ok(MathStructure::symbolic(s.clone()))
             }
-            Tok::LParen => {
-                self.bump();
-                if self.eat(&Tok::RParen) {
-                    // "Empty expression in parentheses interpreted as zero."
-                    return Ok(MathStructure::Number(Number::new()));
-                }
-                let m = self.parse_expression()?;
-                if !self.eat(&Tok::RParen) {
-                    // The C++ appends a missing right parenthesis rather than
-                    // failing; mirror that leniency.
-                    return Ok(m);
-                }
-                Ok(m)
-            }
-            Tok::LBracket | Tok::LBrace => {
-                let close = if tok.tok == Tok::LBracket {
-                    Tok::RBracket
+            Tok::LParen | Tok::LBrace => {
+                let close = if tok.tok == Tok::LParen {
+                    Tok::RParen
                 } else {
                     Tok::RBrace
                 };
                 self.bump();
-                let mut items = Vec::new();
-                if self.peek() != &close {
-                    loop {
-                        items.push(self.parse_expression()?);
-                        if !self.eat(&Tok::Comma) && !self.eat(&Tok::Semicolon) {
-                            break;
-                        }
-                    }
+                if self.eat(&close) {
+                    // "Empty expression in parentheses interpreted as zero."
+                    return Ok(MathStructure::Number(Number::new()));
                 }
+                let m = self.parse_vector_list(&[close.clone(), Tok::Eof])?;
+                // The C++ appends a missing right parenthesis rather than
+                // failing; mirror that leniency.
                 self.eat(&close);
-                Ok(MathStructure::Vector(items))
+                Ok(m)
             }
+            Tok::LBracket => self.parse_bracket_vector(),
             Tok::BitOr => {
                 // |x| absolute value.
                 self.bump();
@@ -582,9 +649,145 @@ impl<'a> Parser<'a> {
                 let args = self.parse_call_args()?;
                 Ok(MathStructure::Function { id: fid, args })
             }
+            // A `.` with nothing to its left is a misplaced operator, which
+            // the C++ drops with a warning — leaving the empty expression 0.
+            Tok::Dot => {
+                self.bump();
+                Ok(MathStructure::Number(Number::new()))
+            }
             Tok::Eof => self.err("unexpected end of expression"),
             ref t => self.err(format!("unexpected token {t:?}")),
         }
+    }
+
+    /// `[…]` — the matlab-style matrix / vector literal
+    /// (Calculator-parse.cc:2056).
+    ///
+    /// libqalculate first decides whether the group is written in the *old*
+    /// nested style (`[[1,2],[4,5]]`) or the matlab style (`[1 2; 4 5]`). In
+    /// matlab style `;` separates rows and `,` — or, when the group contains
+    /// no comma at all, a space — separates columns. Elements are then
+    /// re-parsed as independent substrings, which is why a space inside
+    /// brackets is a separator while `1 2` on its own is the number 12.
+    fn parse_bracket_vector(&mut self) -> Result<MathStructure, ParseError> {
+        let open = self.peek_token().pos;
+        let close = matching_bracket(self.src, open);
+        let content = &self.src[open + 1..close];
+        // Skip the tokens the substring parse consumes.
+        self.i = self
+            .toks
+            .iter()
+            .position(|t| t.pos > close)
+            .unwrap_or(self.toks.len() - 1);
+
+        let (b_comma, old_style) = analyse_bracket(content);
+        let base = open + 1;
+        if old_style {
+            let parts = split_top_level(content, |c| c == b',' || c == b';');
+            let mut items = Vec::with_capacity(parts.len());
+            for (s, e) in parts {
+                items.push(self.parse_sub(&content[s..e], base + s)?);
+            }
+            return Ok(MathStructure::Vector(items));
+        }
+        self.parse_matlab_matrix(content, base, b_comma)
+    }
+
+    /// The matlab-style body of [`Self::parse_bracket_vector`].
+    fn parse_matlab_matrix(
+        &mut self,
+        content: &str,
+        base: usize,
+        b_comma: bool,
+    ) -> Result<MathStructure, ParseError> {
+        let b: Vec<u8> = content.bytes().collect();
+        let n = b.len();
+        let mut result: Vec<MathStructure> = Vec::new();
+        let mut row: Option<Vec<MathStructure>> = None;
+        let mut col_index = 0usize;
+        let mut brackets = 0i32;
+        let mut pars = 0i32;
+        let (mut cit1, mut cit2) = (false, false);
+
+        let mut i = 0usize;
+        while i <= n {
+            let mut b_row = false;
+            let mut b_col = false;
+            if i == n {
+                b_row = true;
+                b_col = true;
+            } else {
+                match b[i] {
+                    b'[' if !cit1 && !cit2 => brackets += 1,
+                    b']' if !cit1 && !cit2 && brackets > 0 => brackets -= 1,
+                    b'(' if !cit1 && !cit2 && brackets == 0 => pars += 1,
+                    b')' if !cit1 && !cit2 && brackets == 0 && pars > 0 => pars -= 1,
+                    b'"' if !cit2 => cit1 = !cit1,
+                    b'\'' if !cit1 => cit2 = !cit2,
+                    b';' if brackets == 0 && pars == 0 && !cit1 && !cit2 => {
+                        b_row = true;
+                        b_col = true;
+                    }
+                    b',' if brackets == 0 && pars == 0 && !cit1 && !cit2 => b_col = true,
+                    b' ' if !b_comma && brackets == 0 && pars == 0 && !cit1 && !cit2 => {
+                        b_col = space_is_separator(&b, i);
+                    }
+                    _ => {}
+                }
+            }
+            if b_col {
+                let text = content[col_index..i].trim();
+                let offset = col_index + content[col_index..i].len()
+                    - content[col_index..i].trim_start().len();
+                let mcol = if b_comma || !text.is_empty() {
+                    Some(self.parse_sub(text, base + offset)?)
+                } else {
+                    None
+                };
+                col_index = i + 1;
+                let had_row = row.is_some();
+                if let Some(r) = row.as_mut() {
+                    if let Some(c) = mcol {
+                        r.push(c);
+                    }
+                    if b_row {
+                        result.push(MathStructure::Vector(row.take().expect("row")));
+                    }
+                } else if let Some(c) = mcol {
+                    result.push(c);
+                }
+                if i < n && b_row {
+                    if !had_row {
+                        // The first `;` turns the columns collected so far
+                        // into the matrix's first row.
+                        result = vec![MathStructure::Vector(std::mem::take(&mut result))];
+                    }
+                    row = Some(Vec::new());
+                }
+            }
+            i += 1;
+        }
+        // `while(mstruct2->isVector() && mstruct2->size() == 1) setToChild(1)`
+        let mut m = MathStructure::Vector(result);
+        while m.is_vector() && m.size() == 1 {
+            m = match m {
+                MathStructure::Vector(mut v) => v.remove(0),
+                _ => unreachable!(),
+            };
+        }
+        Ok(m)
+    }
+
+    /// Parse an element substring of a `[…]` group, reporting errors at the
+    /// substring's offset in the original source.
+    fn parse_sub(&self, text: &str, offset: usize) -> Result<MathStructure, ParseError> {
+        if text.trim().is_empty() {
+            return Ok(MathStructure::Number(Number::new()));
+        }
+        parse_with(text, &self.po, self.resolver).map_err(|e| ParseError {
+            message: e.message,
+            pos: offset + e.pos,
+        })
     }
 
     fn parse_call_args(&mut self) -> Result<Vec<MathStructure>, ParseError> {
@@ -592,7 +795,14 @@ impl<'a> Parser<'a> {
         let mut args = Vec::new();
         if *self.peek() != Tok::RParen {
             loop {
-                args.push(self.parse_expression()?);
+                // `MathFunction::args` splits the argument string on commas
+                // and parses each part, so an omitted argument is zero
+                // (`vector(,)` = `[0  0]`).
+                if matches!(self.peek(), Tok::Comma | Tok::Semicolon | Tok::RParen | Tok::Eof) {
+                    args.push(MathStructure::Number(Number::new()));
+                } else {
+                    args.push(self.parse_expression()?);
+                }
                 // libqalculate accepts both `,` and `;` as argument separators.
                 if !self.eat(&Tok::Comma) && !self.eat(&Tok::Semicolon) {
                     break;
@@ -602,6 +812,154 @@ impl<'a> Parser<'a> {
         self.eat(&Tok::RParen);
         Ok(args)
     }
+}
+
+/// The characters libqalculate treats as operators when deciding whether a
+/// space inside `[…]` separates columns (`OPERATORS` in includes.h:921 plus
+/// the internal `%`).
+const BRACKET_OPERATORS: &[u8] = b"~+-*/^&|!<>=%";
+
+/// Byte offset of the `]` matching the `[` at `open`, or `src.len()`.
+fn matching_bracket(src: &str, open: usize) -> usize {
+    let b = src.as_bytes();
+    let mut depth = 0i32;
+    let (mut cit1, mut cit2) = (false, false);
+    for i in open..b.len() {
+        match b[i] {
+            b'"' if !cit2 => cit1 = !cit1,
+            b'\'' if !cit1 => cit2 = !cit2,
+            b'[' if !cit1 && !cit2 => depth += 1,
+            b']' if !cit1 && !cit2 => {
+                depth -= 1;
+                if depth == 0 {
+                    return i;
+                }
+            }
+            _ => {}
+        }
+    }
+    src.len()
+}
+
+/// Is the space at `i` a column separator? Port of the guards in the matlab
+/// branch (Calculator-parse.cc:2219): a space adjacent to an operator
+/// belongs to that operator's expression rather than separating columns.
+fn space_is_separator(b: &[u8], i: usize) -> bool {
+    if i == 0 || i + 1 >= b.len() {
+        return false;
+    }
+    let prev = b[i - 1];
+    if prev == b';' || (BRACKET_OPERATORS.contains(&prev) && prev != b'!') {
+        return false;
+    }
+    let next = b[i + 1];
+    if BRACKET_OPERATORS.contains(&next) {
+        if next == b'+' || next == b'-' {
+            if i + 2 >= b.len() || b[i + 2] == b' ' {
+                return false;
+            }
+        } else if next != b'~' && next != b'!' {
+            return false;
+        }
+    }
+    true
+}
+
+/// Split `content` at top-level (no brackets, parentheses or quotes)
+/// separators, returning byte ranges.
+fn split_top_level(content: &str, is_sep: impl Fn(u8) -> bool) -> Vec<(usize, usize)> {
+    let b = content.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0i32;
+    let (mut cit1, mut cit2) = (false, false);
+    for i in 0..b.len() {
+        match b[i] {
+            b'"' if !cit2 => cit1 = !cit1,
+            b'\'' if !cit1 => cit2 = !cit2,
+            b'[' | b'(' if !cit1 && !cit2 => depth += 1,
+            b']' | b')' if !cit1 && !cit2 && depth > 0 => depth -= 1,
+            c if depth == 0 && !cit1 && !cit2 && is_sep(c) => {
+                out.push((start, i));
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push((start, b.len()));
+    out
+}
+
+/// Classify a `[…]` group: `(contains a top-level comma, is old nested
+/// style)`. Port of the `matlab_matrices` pre-scan (Calculator-parse.cc:2062).
+fn analyse_bracket(content: &str) -> (bool, bool) {
+    let b: Vec<u8> = content.bytes().collect();
+    let n = b.len();
+    let mut b_old_matrix = -1i32;
+    let mut b_comma = false;
+    let mut brackets = 1i32;
+    let mut pars = 0i32;
+    let (mut cit1, mut cit2) = (false, false);
+    let is_num = |c: u8| c.is_ascii_digit() || c == b'.';
+    let mut i = 0usize;
+    while i < n && brackets > 0 && (b_old_matrix != 0 || !b_comma) {
+        match b[i] {
+            b'"' if !cit2 => cit1 = !cit1,
+            b'\'' if !cit1 => cit2 = !cit2,
+            b'[' if !cit1 && !cit2 => brackets += 1,
+            b']' if !cit1 && !cit2 && brackets > 0 => {
+                if b_old_matrix != 0 && brackets == 2 {
+                    // A closing inner bracket followed (possibly across a
+                    // separator) by another `[` means old nested style.
+                    let mut j = i + 1;
+                    while j < n && b[j] == b' ' {
+                        j += 1;
+                    }
+                    if j < n && (b[j] == b',' || b[j] == b';') {
+                        j += 1;
+                        while j < n && b[j] == b' ' {
+                            j += 1;
+                        }
+                    }
+                    let nc = if j < n { b[j] } else { b']' };
+                    if nc == b'[' {
+                        b_old_matrix = 1;
+                    } else if nc != b']' {
+                        b_old_matrix = 0;
+                    }
+                }
+                brackets -= 1;
+            }
+            b'(' if !cit1 && !cit2 && brackets == 1 => pars += 1,
+            b')' if !cit1 && !cit2 && brackets == 1 && pars > 0 => pars -= 1,
+            b' ' if !cit1 && !cit2 && pars == 0 && b_old_matrix != 0 => {
+                let prev = if i > 0 { b[i - 1] } else { b'[' };
+                let next = if i + 1 < n { b[i + 1] } else { b']' };
+                let positional = (brackets == 1 && i != 0)
+                    || (brackets == 2 && is_num(prev) && is_num(next));
+                if positional
+                    && prev != b','
+                    && prev != b';'
+                    && next != b','
+                    && next != b';'
+                {
+                    b_old_matrix = 0;
+                }
+            }
+            c @ (b',' | b';') if !cit1 && !cit2 && brackets == 1 && pars == 0 => {
+                if c == b',' {
+                    b_comma = true;
+                }
+                let prev = b[..i].iter().rposition(|&x| x != b' ').map(|p| b[p]);
+                if prev != Some(b']') {
+                    b_old_matrix = 0;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    (b_comma, b_old_matrix >= 1)
 }
 
 /// Recognize a base name after `to`: `bin`, `bin16`, `oct`, `hex`, `dec`,

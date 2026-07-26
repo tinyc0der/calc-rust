@@ -10,6 +10,7 @@ pub mod defs;
 pub mod eval;
 pub mod ids;
 pub mod lexer;
+pub mod matrix;
 pub mod names;
 pub mod options;
 pub mod parser;

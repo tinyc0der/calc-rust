@@ -547,10 +547,10 @@ impl MathStructure {
             return Failed;
         }
 
-        // TODO(port): STRUCT_VECTOR (element-wise addition, matrices) and
-        // STRUCT_DATETIME arithmetic.
-        if self.is_vector() {
-            return if other.is_addition() { TryReversed } else { Failed };
+        // STRUCT_VECTOR: element-wise addition and matrix broadcasting live
+        // in `crate::matrix`. (TODO(port): STRUCT_DATETIME arithmetic.)
+        if self.is_vector() || (other.is_vector() && !self.is_addition()) {
+            return crate::matrix::merge_addition_vector(self, other, eo);
         }
 
         if self.is_addition() {
@@ -747,9 +747,9 @@ impl MathStructure {
 
         // TODO(port): eo.reduce_divisions — cancelling common factors of a
         // numerator against a polynomial denominator.
-        // TODO(port): STRUCT_VECTOR (dot/matrix products).
-        if self.is_vector() {
-            return Failed;
+        // STRUCT_VECTOR: scalar broadcasting and matrix products.
+        if self.is_vector() || (other.is_vector() && !self.is_addition()) {
+            return crate::matrix::merge_multiplication_vector(self, other, eo);
         }
 
         if self.is_addition() {
@@ -1084,6 +1084,11 @@ impl MathStructure {
 
         if represents::undefined(self) || represents::undefined(other) {
             return Failed;
+        }
+
+        // STRUCT_VECTOR: integer matrix powers (a negative exponent inverts).
+        if self.is_vector() {
+            return crate::matrix::merge_power_vector(self, other, eo);
         }
 
         // 0^a=0 if a is positive
