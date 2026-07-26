@@ -118,13 +118,19 @@ pub fn to_float(n: &Number, bits: u32, expbits: u32) -> Option<String> {
 
     // significand = q / 2^exp, in [1,2) when normal.
     let sig = scale_pow2(&q, -exp);
-    // Round the significand to `mbits` fractional bits, half to even.
-    let total_bits = if explicit_leading { mbits + 1 } else { mbits };
-    let scaled = scale_pow2(&sig, total_bits as i64);
+    // Round the significand to `mbits` *fractional* bits, half to even. This
+    // is the same count at every width, including the 80-bit format: the C++
+    // prints the significand with `bits - expbits - (bits == 80 ? 2 : 1)`
+    // binary decimals (Number.cc:10551) and, for 80 bits only, then prepends
+    // the integer digit it printed (Number.cc:10597). So the 80-bit field is
+    // 1 explicit integer bit + `mbits` fraction bits, not `mbits + 1`
+    // fraction bits — rounding to one bit more and masking the result back to
+    // the field width would drop the integer bit the format exists to store.
+    let scaled = scale_pow2(&sig, mbits as i64);
     let mut int_val = round_half_even(&scaled);
 
     // Rounding can carry into the next binade (e.g. 1.111… -> 10.000…).
-    let limit = BigInt::one() << (total_bits + 1) as usize;
+    let limit = BigInt::one() << (mbits + 1) as usize;
     if !subnormal && int_val >= limit {
         int_val >>= 1u32;
         stored_exp += 1;
@@ -145,13 +151,11 @@ pub fn to_float(n: &Number, bits: u32, expbits: u32) -> Option<String> {
         s.push(if (stored_exp >> i) & 1 == 1 { '1' } else { '0' });
     }
     // Mantissa field: drop the implicit leading bit unless it is explicit.
+    // `int_val` is at most `mbits + 1` bits wide, so the 80-bit mask keeps it
+    // whole (integer bit included) and the narrower one trims the leading 1.
     let mant_field_bits = if explicit_leading { mbits + 1 } else { mbits };
     let mask = (BigInt::one() << mant_field_bits as usize) - BigInt::one();
-    let field = if explicit_leading {
-        int_val.clone() & ((BigInt::one() << (mbits + 1) as usize) - BigInt::one())
-    } else {
-        int_val.clone() & mask
-    };
+    let field = int_val.clone() & mask;
     for i in (0..mant_field_bits).rev() {
         let bit = (&field >> i as usize) & BigInt::one();
         s.push(if bit.is_one() { '1' } else { '0' });
@@ -414,6 +418,44 @@ mod tests {
         assert_eq!(&bits[..12], "001111111111");
         let back = from_float(&bits, 64, 0).unwrap();
         assert!(back.equals(&parse("1"), true, false));
+    }
+
+    /// The x87 80-bit format keeps the leading `1` of a normal significand in
+    /// the field instead of implying it, so the 64 bits after the exponent are
+    /// `1` followed by the 63 fraction bits — not the 64 fraction bits every
+    /// other width would have. Each expectation here is the reference
+    /// binary's output for `<value> to fp80`, blanks removed.
+    #[test]
+    fn eighty_bit_keeps_its_explicit_integer_bit() {
+        for (value, want) in [
+            ("1", "00111111111111111000000000000000000000000000000000000000000000000000000000000000"),
+            ("2", "01000000000000001000000000000000000000000000000000000000000000000000000000000000"),
+            ("1024", "01000000000010011000000000000000000000000000000000000000000000000000000000000000"),
+            ("52.345", "01000000000001001101000101100001010001111010111000010100011110101110000101001000"),
+            ("0.1", "00111111111110111100110011001100110011001100110011001100110011001100110011001101"),
+        ] {
+            let bits = to_float(&parse(value), 80, 0).unwrap();
+            assert_eq!(bits.len(), 80);
+            // The exponent field is 15 bits, so the explicit integer bit is
+            // at index 16 and must be set for any normal value.
+            assert_eq!(&bits[16..17], "1", "{value}: integer bit not stored");
+            assert_eq!(bits, want, "{value} at fp80");
+        }
+    }
+
+    /// Encoding then decoding at 80 bits returns to the same bit string. This
+    /// is what the explicit-integer-bit defect broke: `from_float` was already
+    /// correct, so an encoder that shifted the significand left by one decoded
+    /// to a different value — `0` whenever the leading bit was the only one set.
+    #[test]
+    fn eighty_bit_round_trips() {
+        for s in ["1", "2", "1024", "-3", "0.5", "52.345", "0.1", "-0.1"] {
+            let bits = to_float(&parse(s), 80, 0).unwrap();
+            let back = from_float(&bits, 80, 0).unwrap();
+            assert!(!back.is_zero(), "{s} decoded to zero from {bits}");
+            let again = to_float(&back, 80, 0).unwrap();
+            assert_eq!(again, bits, "{s} did not round trip at fp80");
+        }
     }
 
     #[test]

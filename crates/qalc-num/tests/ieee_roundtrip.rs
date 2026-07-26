@@ -51,20 +51,31 @@
 //! 55 955 `(value, width)` pairs — 186 values across five widths, plus five of
 //! them scaled by every power of two in `[-1100, 1100]`:
 //!
-//! | | count |
-//! |---|---|
-//! | held | 42 686 |
-//! | failed | 11 180 — every one of them FP80 |
-//! | out of scope (negative zero, the C++'s own exception) | 2 089 |
+//! | | first run | now |
+//! |---|---|---|
+//! | held | 42 686 | 53 865 |
+//! | failed | 11 180 — every one of them FP80 | 0 |
+//! | out of scope (negative zero, the C++'s own exception) | 2 089 | 2 090 |
 //!
-//! **`to_float` is wrong for the whole 80-bit x87 format**: it drops the
+//! **`to_float` was wrong for the whole 80-bit x87 format**: it dropped the
 //! explicit integer bit the format exists to store, so every finite non-zero
-//! value encodes one bit to the left of where it belongs. The reference says
-//! `1 to fp80` is `0011 1111 1111 1111 1000 …`; this port says `0011 1111 1111
-//! 1111 0000 …`. `from_float`'s 80-bit branch is the correct half, which is
-//! why the round trip catches it: decoding the port's own FP80 output for
-//! `1`, `2`, `1024` — any value whose leading significand bit was the only one
-//! set — gives `0`. The other four widths are clean across the whole corpus.
+//! value encoded one bit to the left of where it belonged. The reference says
+//! `1 to fp80` is `0011 1111 1111 1111 1000 …`; this port said `0011 1111 1111
+//! 1111 0000 …`. `from_float`'s 80-bit branch was the correct half, which is
+//! why the round trip caught it: decoding the port's own FP80 output for `1`,
+//! `2`, `1024` — any value whose leading significand bit was the only one set
+//! — gave `0`. The other four widths were clean across the whole corpus.
+//!
+//! The cause was in the encoder's *fractional* bit count. `to_float` rounded
+//! the significand to `mbits + 1 = 64` fractional bits at 80 bits wide and
+//! then masked the result back to the 64-bit field, which shifted the value
+//! one place left and threw the integer bit away. The C++ rounds to
+//! `bits - expbits - (bits == 80 ? 2 : 1)` fractional bits at *every* width —
+//! 63 for FP80 (`Number.cc:10551-10552`) — and, for 80 bits only, prepends the
+//! integer digit it printed (`Number.cc:10597`), giving a field of 1 integer
+//! bit + 63 fraction bits. The fix rounds to `mbits` fractional bits
+//! unconditionally and lets the 80-bit mask keep the whole result;
+//! 11 179 pairs moved to `held` and one to the negative-zero exception.
 //!
 //! Nothing in `libqalculate/tests` mentions `fp16`, `fp80` or `fp128`; the
 //! only float the 656 transcript assertions exercise is FP32. That is why a
@@ -375,35 +386,24 @@ mod fp_roundtrip {
 /// diagnosis)`.
 ///
 /// The glob is either a literal `"<value> @ <width>"` label, as
-/// [`fp_roundtrip::plan`] generates, or a `*`-prefixed suffix match. The
-/// wildcard exists because the one defect this suite finds is not a scattering
-/// of awkward values — it is an entire format, and writing out 11 180
+/// [`fp_roundtrip::plan`] generates, or a `*`-prefixed suffix match. A
+/// wildcard is allowed because a defect can be a whole format rather than a
+/// scattering of awkward values, and writing out eleven thousand
 /// identically-diagnosed labels would bury the diagnosis rather than record
 /// it. The `count` is what keeps that from being a blanket exemption: it is
-/// checked for **exact** equality, so a twelfth-thousandth fp80 pair breaking
-/// fails the test just as loudly as an fp64 one would, and a repair that fixes
-/// half the class fails it too until the number comes down. Same contract as
-/// `interval_closure.rs`, expressed per class instead of per row.
-const KNOWN_FAILURES: &[(&str, usize, &str)] = &[(
-    "* @ fp80",
-    11_180,
-    "`to_float` drops the x87 80-bit format's explicit integer bit. \
-     `ieee.rs:145` scales the significand by `total_bits = mbits + 1 = 64` \
-     — one bit too many, since the 64-bit significand field is 1 integer bit \
-     plus 63 fraction bits — and then `ieee.rs:150` masks the 65-bit result \
-     back down to 64, which discards exactly the leading bit the format \
-     exists to store and shifts the rest left by one. Confirmed against the \
-     reference: `1 to fp80` is `0011 1111 1111 1111 1000 …` there and \
-     `0011 1111 1111 1111 0000 …` here, and `52.345 to fp80` differs by the \
-     same one-bit shift. `from_float`'s 80-bit branch is the correct half — \
-     it seeds `step` at 1 rather than 1/2, i.e. it expects the explicit bit — \
-     so decoding the port's own output yields 0 for every value whose leading \
-     significand bit was the only one set. Every finite non-zero value at \
-     fp80 is affected; the 9 that hold are zero, ±infinity and the values \
-     that overflow or underflow to them. Invisible to the 656 transcript \
-     assertions, which only ever ask for `to float` (FP32): `grep -r fp80 \
-     libqalculate/tests` finds nothing.",
-)];
+/// checked for **exact** equality, so one more pair breaking under a wildcard
+/// fails the test just as loudly as an unglobbed one would, and a repair that
+/// fixes half the class fails it too until the number comes down. Same
+/// contract as `interval_closure.rs`, expressed per class instead of per row.
+///
+/// Empty: the one class this suite ever recorded — the entire FP80 format,
+/// 11 180 pairs — was the encoder rounding the significand to `mbits + 1`
+/// fractional bits instead of `mbits` and then masking the x87 explicit
+/// integer bit off the front of the result. Fixed in
+/// `qalc-num/src/number/ieee.rs`; see the module header above for the
+/// before/after counts. The list can only shrink, so it stays empty unless a
+/// genuinely new failure is diagnosed into it.
+const KNOWN_FAILURES: &[(&str, usize, &str)] = &[];
 
 /// True when `label` is covered by a [`KNOWN_FAILURES`] glob. `*` is only
 /// meaningful as the first character, and means "any prefix".

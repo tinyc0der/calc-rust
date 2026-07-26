@@ -1423,9 +1423,35 @@ fn analyse_bracket(content: &str) -> (bool, bool) {
 
 
 /// Recognize a base name after `to`: `bin`, `bin16`, `oct`, `hex`, `dec`,
-/// `roman`, `sexa`, `float`, and the `binN`/`hexN` bit-width forms.
+/// `roman`, `sexa`, the floating-point formats, and the `binN`/`hexN`
+/// bit-width forms.
+///
+/// The named forms are matched first, because `binary16` and `binary128` are
+/// IEEE widths (`Calculator-calculate.cc:2775-2783`) while `bin16` is plain
+/// binary padded to sixteen bits — the `binN` prefix rule would otherwise
+/// swallow every name that merely starts with `bin`.
 fn base_target_from_name(lower: &str) -> Option<ConversionTarget> {
     use qalc_num::options::base;
+    let named = match lower {
+        "binary" => Some(2),
+        "octal" => Some(8),
+        "dec" | "decimal" => Some(10),
+        "duo" | "duodecimal" => Some(12),
+        "hexadecimal" => Some(16),
+        "unicode" => Some(base::UNICODE),
+        "roman" => Some(base::ROMAN_NUMERALS),
+        "sexa" | "sexagesimal" => Some(base::SEXAGESIMAL),
+        "time" => Some(base::TIME),
+        "binary16" | "fp16" => Some(base::FP16),
+        "binary32" | "float" | "fp32" => Some(base::FP32),
+        "binary64" | "double" | "fp64" => Some(base::FP64),
+        "fp80" => Some(base::FP80),
+        "binary128" | "fp128" => Some(base::FP128),
+        _ => None,
+    };
+    if let Some(b) = named {
+        return Some(ConversionTarget::NumberBase { base: b, bits: 0 });
+    }
     // `binN` / `hexN` carry an explicit bit width.
     for (prefix, b) in [("bin", 2i32), ("hex", 16i32), ("oct", 8i32)] {
         if let Some(rest) = lower.strip_prefix(prefix) {
@@ -1438,21 +1464,7 @@ fn base_target_from_name(lower: &str) -> Option<ConversionTarget> {
             return None;
         }
     }
-    let b = match lower {
-        "binary" => 2,
-        "octal" => 8,
-        "dec" | "decimal" => 10,
-        "duo" | "duodecimal" => 12,
-        "hexadecimal" => 16,
-        "unicode" => base::UNICODE,
-        "roman" => base::ROMAN_NUMERALS,
-        "sexa" | "sexagesimal" => base::SEXAGESIMAL,
-        "time" => base::TIME,
-        "float" => base::FP32,
-        "double" => base::FP64,
-        _ => return None,
-    };
-    Some(ConversionTarget::NumberBase { base: b, bits: 0 })
+    None
 }
 
 /// Builtin operations the parser desugars into function calls. The ids are the
