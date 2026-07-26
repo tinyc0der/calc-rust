@@ -173,7 +173,7 @@ mod tests {
         let three = BigInt::from(3);
         let lo = bigfloat_from_ratio(&one, &three, 128, RoundingMode::Down);
         let hi = bigfloat_from_ratio(&one, &three, 128, RoundingMode::Up);
-        assert_eq!(lo.cmp(&hi), Some(-1));
+        assert_eq!(bigfloat_cmp(&lo, &hi), Some(-1));
         assert!(!bigfloat_is_integer(&lo));
     }
 
@@ -189,4 +189,12 @@ mod tests {
         let (n, d) = bigfloat_to_ratio(&f).unwrap();
         assert_eq!(n.clone() * 4, d.clone() * 25, "6.25 = {n}/{d}");
     }
+}
+
+/// Sign-normalized `BigFloat` comparison: `Some(-1|0|1)`, `None` on NaN.
+///
+/// astro-float's `cmp` returns a `SignedWord` whose *sign* carries the
+/// result but whose magnitude is unspecified — never compare it to ±1.
+pub fn bigfloat_cmp(a: &BigFloat, b: &BigFloat) -> Option<i8> {
+    a.cmp(b).map(|c| c.signum() as i8)
 }

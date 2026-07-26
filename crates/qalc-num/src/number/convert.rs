@@ -2,7 +2,7 @@
 
 use super::{Number, RealValue};
 use num_bigint::BigInt;
-use num_traits::{Signed, ToPrimitive, Zero};
+use num_traits::{One, Signed, ToPrimitive, Zero};
 
 impl Number {
     /// Integer value if this is an exact integer that fits i64.

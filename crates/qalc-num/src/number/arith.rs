@@ -7,6 +7,7 @@
 
 use super::{Number, RealValue};
 use crate::context;
+use crate::float::bigfloat_cmp;
 use astro_float::{BigFloat, RoundingMode, Sign};
 use num_rational::BigRational;
 use num_traits::{Signed, Zero};
@@ -349,7 +350,7 @@ impl Number {
                         // spans zero: [0, max(l², u²)]
                         let l2 = lower.mul(lower, p, rnd(false));
                         let u2 = upper.mul(upper, p, rnd(false));
-                        let m = if l2.cmp(&u2) == Some(1) { l2 } else { u2 };
+                        let m = if bigfloat_cmp(&l2, &u2) == Some(1) { l2 } else { u2 };
                         (BigFloat::from_i8(0, p), m)
                     }
                 } else {
@@ -394,7 +395,7 @@ impl Number {
                     let p = context::bit_precision();
                     if let RealValue::Float { lower, upper } = &self.value {
                         let nl = lower.neg();
-                        let m = if nl.cmp(upper) == Some(1) { nl } else { upper.clone() };
+                        let m = if bigfloat_cmp(&nl, upper) == Some(1) { nl } else { upper.clone() };
                         self.value = RealValue::Float { lower: BigFloat::from_i8(0, p), upper: m };
                     }
                 }
@@ -497,13 +498,13 @@ fn interval_mul(
     ];
     let mut lo = candidates_lo[0].clone();
     for c in &candidates_lo[1..] {
-        if c.cmp(&lo) == Some(-1) || lo.is_nan() {
+        if bigfloat_cmp(&c, &lo) == Some(-1) || lo.is_nan() {
             lo = c.clone();
         }
     }
     let mut hi = candidates_hi[0].clone();
     for c in &candidates_hi[1..] {
-        if c.cmp(&hi) == Some(1) || hi.is_nan() {
+        if bigfloat_cmp(&c, &hi) == Some(1) || hi.is_nan() {
             hi = c.clone();
         }
     }

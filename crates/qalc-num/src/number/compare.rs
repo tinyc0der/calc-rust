@@ -3,6 +3,7 @@
 
 use super::{Number, RealValue};
 use crate::context;
+use crate::float::bigfloat_cmp;
 use crate::options::ComparisonResult;
 use num_traits::Zero;
 
@@ -94,8 +95,8 @@ impl Number {
         let p = context::bit_precision();
         let (al, au) = (self.lower_bound_float(p), self.upper_bound_float(p));
         let (bl, bu) = (o.lower_bound_float(p), o.upper_bound_float(p));
-        let au_bl = au.cmp(&bl);
-        let al_bu = al.cmp(&bu);
+        let au_bl = bigfloat_cmp(&au, &bl);
+        let al_bu = bigfloat_cmp(&al, &bu);
         if au_bl == Some(-1) {
             return ComparisonResult::Less;
         }
@@ -114,8 +115,8 @@ impl Number {
         if al_bu == Some(0) && au_bl != Some(0) {
             return ComparisonResult::EqualOrGreater;
         }
-        let al_bl = al.cmp(&bl);
-        let au_bu = au.cmp(&bu);
+        let al_bl = bigfloat_cmp(&al, &bl);
+        let au_bu = bigfloat_cmp(&au, &bu);
         match (al_bl, au_bu) {
             (Some(x), Some(y)) if x <= 0 && y >= 0 => ComparisonResult::Contains,
             (Some(x), Some(y)) if x >= 0 && y <= 0 => ComparisonResult::IsContained,

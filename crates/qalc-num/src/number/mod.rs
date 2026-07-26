@@ -11,6 +11,7 @@
 mod arith;
 mod compare;
 mod convert;
+mod pow;
 
 use crate::context;
 use crate::float::{
