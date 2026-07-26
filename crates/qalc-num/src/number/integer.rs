@@ -43,10 +43,7 @@ impl Number {
         if n > 1_000_000 {
             return false; // matches libqalculate's practical bound behaviour
         }
-        let mut acc = BigInt::one();
-        for i in 2..=n {
-            acc *= i;
-        }
+        let acc = descending_product(n, 1);
         self.value = RealValue::Rational(BigRational::from_integer(acc));
         true
     }
@@ -62,12 +59,7 @@ impl Number {
         if n > 1_000_000 {
             return false;
         }
-        let mut acc = BigInt::one();
-        let mut i = n;
-        while i > 1 {
-            acc *= i;
-            i -= 2;
-        }
+        let acc = descending_product(n, 2);
         self.value = RealValue::Rational(BigRational::from_integer(acc));
         true
     }
@@ -80,32 +72,23 @@ impl Number {
         if n < 0 || k <= 0 || n > 1_000_000 {
             return false;
         }
-        let mut acc = BigInt::one();
-        let mut i = n;
-        while i > 1 {
-            acc *= i;
-            i -= k;
-        }
+        let acc = descending_product(n, k);
         self.value = RealValue::Rational(BigRational::from_integer(acc));
         true
     }
 
-    /// `binomial(m, k)` — self = C(m, k).
+    /// `binomial(m, k)` — self = C(m, k).  Port of `Number::binomial`
+    /// (Number.cc:10137): the trivial identities are taken first, a negative
+    /// `m` is reflected onto a positive one, and the same size guard the C++
+    /// applies before `mpz_bin_ui` decides which arguments are refused.
     pub fn binomial(&mut self, m: &Number, k: &Number) -> bool {
-        let (Some(m), Some(k)) = (m.to_bigint(), k.to_i64()) else {
+        let (Some(m), Some(k)) = (m.to_bigint(), k.to_bigint()) else {
             return false;
         };
-        if k < 0 {
+        let Some(result) = binomial_bigint(m, k) else {
             return false;
-        }
-        let mut acc = BigInt::one();
-        let mut m_i = m.clone();
-        for i in 1..=k {
-            acc *= &m_i;
-            acc /= i;
-            m_i -= 1;
-        }
-        self.value = RealValue::Rational(BigRational::from_integer(acc));
+        };
+        self.value = RealValue::Rational(BigRational::from_integer(result));
         true
     }
 
@@ -536,6 +519,125 @@ impl Number {
     }
 }
 
+// ----------------------------------------------------------------------
+// Big-product helpers
+//
+// A factorial built as `for i in 2..=n { acc *= i }` multiplies a huge
+// accumulator by a one-word factor n times, which is quadratic in the size of
+// the result: 100000! spent most of its six seconds here.  Binary splitting
+// turns the same product into balanced big-by-big multiplications, which
+// num-bigint's Karatsuba/Toom-3 paths handle in sub-quadratic time.
+// ----------------------------------------------------------------------
+
+/// Product of `values` by binary splitting (a balanced product tree).
+fn product_tree(values: &[u64]) -> BigInt {
+    match values.len() {
+        0 => BigInt::one(),
+        1 => BigInt::from(values[0]),
+        2 => BigInt::from(values[0] as u128 * values[1] as u128),
+        n => {
+            let mid = n / 2;
+            product_tree(&values[..mid]) * product_tree(&values[mid..])
+        }
+    }
+}
+
+/// Product of `n · (n−step) · (n−2·step) · …` down to the last term above 1.
+///
+/// Consecutive factors are first accumulated into single-word chunks so the
+/// leaves of the product tree are already 64 bits wide; the tree itself then
+/// only ever multiplies operands of comparable size.
+fn descending_product(n: i64, step: i64) -> BigInt {
+    debug_assert!(step >= 1);
+    let mut chunks: Vec<u64> = Vec::new();
+    let mut acc: u128 = 1;
+    let mut i = n;
+    while i > 1 {
+        // `acc` < 2^64 and `i` < 2^63, so the product cannot overflow u128.
+        let next = acc * i as u128;
+        if next > u64::MAX as u128 {
+            chunks.push(acc as u64);
+            acc = i as u128;
+        } else {
+            acc = next;
+        }
+        i -= step;
+    }
+    if acc > 1 {
+        chunks.push(acc as u64);
+    }
+    product_tree(&chunks)
+}
+
+/// Product of the `count` consecutive integers ending at `top`, i.e. the
+/// falling factorial `top · (top−1) · … · (top−count+1)`.
+fn falling_factorial(top: &BigInt, count: u64) -> BigInt {
+    fn go(top: &BigInt, lo: u64, hi: u64) -> BigInt {
+        // Terms are `top - lo` … `top - (hi - 1)`.
+        match hi - lo {
+            0 => BigInt::one(),
+            1 => top - lo,
+            n => {
+                let mid = lo + n / 2;
+                go(top, lo, mid) * go(top, mid, hi)
+            }
+        }
+    }
+    go(top, 0, count)
+}
+
+/// `C(m, k)` following `Number::binomial` (Number.cc:10137).
+///
+/// Returns `None` for the argument shapes the C++ refuses, so the caller
+/// leaves the expression unevaluated exactly where libqalculate does.
+fn binomial_bigint(m: &BigInt, k: &BigInt) -> Option<BigInt> {
+    if m.is_negative() {
+        // C(m, k) = (−1)^k · C(k − m − 1, k) for negative m.
+        if k.is_negative() {
+            return None;
+        }
+        let m2 = k - m - 1;
+        let mut r = binomial_bigint(&m2, k)?;
+        if k.is_odd() {
+            r = -r;
+        }
+        return Some(r);
+    }
+    if k.is_negative() || k > m {
+        return Some(BigInt::zero());
+    }
+    if m == k || k.is_zero() {
+        return Some(BigInt::one());
+    }
+    // `k` must fit a machine word (C++: mpz_fits_ulong_p).
+    let k_small = k.to_u64()?;
+
+    // Number.cc:10155 — refuse arguments whose binomial coefficient would be
+    // hopelessly large.  `integerLength()` is the bit length of the value.
+    let k_bits = k.bits();
+    let m_bits = m.bits();
+    let too_big = k_bits > 21 || m_bits > 22 * (1u64 << (21 - k_bits));
+    if too_big && *m > k + BigInt::from(1_000_000) {
+        return None;
+    }
+
+    // C(m, k) = C(m, m − k); GMP's mpz_bin_ui does the same reduction, and it
+    // is what keeps `binomial(1e10, 9999999999)` cheap.
+    let k_eff = {
+        let complement = m - k;
+        match complement.to_u64() {
+            Some(c) if c < k_small => c,
+            _ => k_small,
+        }
+    };
+    if k_eff == 0 {
+        return Some(BigInt::one());
+    }
+    let numerator = falling_factorial(m, k_eff);
+    let denominator = descending_product(k_eff as i64, 1);
+    Some(numerator / denominator)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,6 +663,94 @@ mod tests {
         let mut b = Number::new();
         assert!(b.binomial(&Number::from_i64(10), &Number::from_i64(3)));
         assert_eq!(b.to_i64(), Some(120));
+    }
+
+    #[test]
+    fn large_factorial_value() {
+        // Guards the binary-splitting fast path: a wrong product tree would
+        // still be fast, so the value itself has to be pinned down.
+        let mut n = Number::from_i64(10000);
+        assert!(n.factorial());
+        let fast = n.to_bigint().expect("10000! is an integer").clone();
+
+        // Reference: the straightforward accumulator loop.
+        let mut naive = BigInt::one();
+        for i in 2..=10000i64 {
+            naive *= i;
+        }
+        assert_eq!(fast, naive, "10000! by product tree must equal the naive product");
+
+        let s = fast.to_str_radix(10);
+        assert_eq!(s.len(), 35660, "10000! has 35660 decimal digits");
+        assert!(
+            s.starts_with("284625968091705451890641"),
+            "leading digits of 10000!, got {}",
+            &s[..24]
+        );
+        // Legendre: 2000 + 400 + 80 + 16 + 3 trailing zeroes.
+        assert_eq!(s.len() - s.trim_end_matches('0').len(), 2499);
+    }
+
+    #[test]
+    fn multi_and_double_factorial_agree_with_naive() {
+        for n in [0i64, 1, 2, 3, 25, 40, 41, 300] {
+            let mut d = Number::from_i64(n);
+            assert!(d.double_factorial());
+            let mut naive = BigInt::one();
+            let mut i = n;
+            while i > 1 {
+                naive *= i;
+                i -= 2;
+            }
+            assert_eq!(d.to_bigint().unwrap(), &naive, "{n}!!");
+
+            for k in 1i64..=4 {
+                let mut m = Number::from_i64(n);
+                assert!(m.multi_factorial(&Number::from_i64(k)));
+                let mut naive = BigInt::one();
+                let mut i = n;
+                while i > 1 {
+                    naive *= i;
+                    i -= k;
+                }
+                assert_eq!(m.to_bigint().unwrap(), &naive, "{n}!^({k})");
+            }
+        }
+        let mut neg = Number::from_i64(-1);
+        assert!(neg.double_factorial());
+        assert_eq!(neg.to_i64(), Some(1), "(-1)!! = 1");
+    }
+
+    #[test]
+    fn binomial_identities_and_bounds() {
+        let c = |m: &str, k: &str| {
+            let mut b = Number::new();
+            let mi = Number::from_bigint(m.parse::<BigInt>().unwrap());
+            let ki = Number::from_bigint(k.parse::<BigInt>().unwrap());
+            if b.binomial(&mi, &ki) {
+                Some(b.to_bigint().unwrap().to_str_radix(10))
+            } else {
+                None
+            }
+        };
+        // Trivial identities are taken before any loop runs.
+        assert_eq!(c("10000000000", "10000000000").as_deref(), Some("1"));
+        assert_eq!(c("10000000000", "0").as_deref(), Some("1"));
+        assert_eq!(c("10000000000", "1").as_deref(), Some("10000000000"));
+        assert_eq!(c("10000000000", "2").as_deref(), Some("49999999995000000000"));
+        assert_eq!(c("10000000000", "-1").as_deref(), Some("0"));
+        // C(m, m−1) = m via the k → m−k symmetry.
+        assert_eq!(c("10000000000", "9999999999").as_deref(), Some("10000000000"));
+        // Refused by the same size guard the C++ applies (Number.cc:10155).
+        assert_eq!(c("10000000000", "5000000000"), None);
+        assert_eq!(c("10000000000", "1100000"), None);
+        // Ordinary values, including the negative-m reflection.
+        assert_eq!(c("10", "3").as_deref(), Some("120"));
+        assert_eq!(c("5", "7").as_deref(), Some("0"));
+        assert_eq!(c("-5", "3").as_deref(), Some("-35"));
+        let big = c("1000", "500").unwrap();
+        assert_eq!(big.len(), 300);
+        assert!(big.starts_with("27028824094543656951"));
     }
 
     #[test]
