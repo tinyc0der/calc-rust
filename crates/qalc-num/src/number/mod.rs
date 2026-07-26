@@ -15,6 +15,7 @@ mod parse;
 mod pow;
 mod print;
 mod transcendental;
+mod integer;
 
 use crate::context;
 use crate::float::{

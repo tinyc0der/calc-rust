@@ -628,7 +628,7 @@ impl Number {
         let mut expo: i64 = 0;
         let mut precision2 = precision_base;
         let num_sign = if num.is_zero() { 0 } else { 1 };
-        let mut applied_expo = false;
+        let applied_expo = false;
 
         if num_sign != 0 {
             let str = num.to_str_radix(base as u32);
