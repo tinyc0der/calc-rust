@@ -259,7 +259,7 @@ fn addition_compare(a: &MathStructure, b: &MathStructure, minus_last: bool) -> s
 /// compare as `y`.
 fn numeric_prefix(v: &[MathStructure]) -> usize {
     let mut start = 0;
-    while v[start].is_number() && v.len() > start + 1 {
+    while v.len() > start + 1 && v[start].is_number() {
         start += 1;
     }
     start
@@ -320,13 +320,6 @@ fn eval_type_rank_in(m: &MathStructure, parent: EvalParent) -> i16 {
 pub(crate) enum EvalParent {
     Addition,
     Multiplication,
-}
-
-/// [`eval_compare_in`] under an addition parent — the ordering
-/// [`eval_order`] and [`crate::absolute::has_predominately_negative_sign`]
-/// want.
-fn eval_compare(a: &MathStructure, b: &MathStructure) -> std::cmp::Ordering {
-    eval_compare_in(a, b, EvalParent::Addition)
 }
 
 /// `evalSortCompare` (MathStructure-calculate.cc:7415). `Less` means `a` is
@@ -755,9 +748,9 @@ mod tests {
     // named in each test. `p`/`q`/`r` there are genuine `STRUCT_SYMBOLIC`,
     // which is what this port's `Symbolic` is — the reference's `x`/`y`/`z`
     // are unknown *variables*, ordered by object address (see
-    // `eval_compare`), and are the one case this port cannot reproduce.
+    // `eval_compare_in`), and are the one case this port cannot reproduce.
 
-    use super::eval_order;
+    use super::{eval_order, numeric_prefix};
     use crate::structure::MathStructure;
 
     fn neg(m: MathStructure) -> MathStructure {
@@ -766,6 +759,11 @@ mod tests {
 
     fn sym(s: &str) -> MathStructure {
         MathStructure::symbolic(s)
+    }
+
+    #[test]
+    fn an_empty_product_has_no_numeric_prefix() {
+        assert_eq!(numeric_prefix(&[]), 0);
     }
 
     /// `p - 1` is stored as `[p, -1]` and `1 - p` as `[-p, 1]`: a number is

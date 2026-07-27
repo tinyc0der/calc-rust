@@ -482,7 +482,7 @@ fn int_power(
     x: &MathStructure,
     depth: usize,
     parts: usize,
-    subst: usize,
+    _subst: usize,
     parents: &mut Vec<MathStructure>,
 ) -> Option<MathStructure> {
     let g = pow(base.clone(), exponent.clone());
