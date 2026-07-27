@@ -564,6 +564,59 @@ fn number_pair(a: &MathStructure, b: &MathStructure) -> Option<(Number, Number)>
 }
 
 impl MathStructure {
+    /// Apply one `where`-clause substitution recursively.
+    ///
+    /// A zero-argument function on the left is a function placeholder. When
+    /// its replacement is another zero-argument function, matching calls
+    /// keep their existing arguments: `f(x) where f()=g()` becomes `g(x)`.
+    pub(crate) fn replace_where(&mut self, from: &MathStructure, to: &MathStructure) {
+        if let MathStructure::Function { id, args } = from {
+            if args.is_empty() {
+                self.replace_where_function(*id, to);
+                return;
+            }
+        }
+        self.replace_where_structure(from, to);
+    }
+
+    fn replace_where_structure(&mut self, from: &MathStructure, to: &MathStructure) {
+        if self.equals(from) {
+            *self = to.clone();
+            return;
+        }
+        for index in 0..self.size() {
+            if let Some(child) = self.get_mut(index) {
+                child.replace_where_structure(from, to);
+            }
+        }
+    }
+
+    fn replace_where_function(&mut self, from: crate::ids::FunctionId, to: &MathStructure) {
+        for index in 0..self.size() {
+            if let Some(child) = self.get_mut(index) {
+                child.replace_where_function(from, to);
+            }
+        }
+
+        let MathStructure::Function { id, .. } = self else {
+            return;
+        };
+        if *id != from {
+            return;
+        }
+        if let MathStructure::Function {
+            id: replacement,
+            args,
+        } = to
+        {
+            if args.is_empty() {
+                *id = *replacement;
+                return;
+            }
+        }
+        *self = to.clone();
+    }
+
     // ------------------------------------------------------------------
     // merge_addition
     // ------------------------------------------------------------------
@@ -1501,6 +1554,27 @@ impl MathStructure {
     /// `calculatesub` with the C++ `recursive` flag.
     pub fn calculatesub_opt(&mut self, eo: &EvaluationOptions, recursive: bool) -> bool {
         let mut b = false;
+
+        // Keep the exact identities used by libqalculate when a `where`
+        // replacement inserts pi into a trigonometric call. Numerifying pi
+        // first would make `cos(pi)` merely close to -1, and the approximate
+        // residue would survive into otherwise exact arithmetic.
+        if let MathStructure::Function { id, args } = self {
+            if args.len() == 1 && matches!(&args[0], MathStructure::Symbolic(name) if name == "pi")
+            {
+                match id.0 {
+                    crate::builtins::id::SIN => {
+                        *self = MathStructure::Number(Number::new());
+                        return true;
+                    }
+                    crate::builtins::id::COS => {
+                        *self = MathStructure::Number(Number::from_i64(-1));
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         if self.is_power() {
             if recursive {
