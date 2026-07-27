@@ -191,6 +191,51 @@ impl NameResolver for SymbolicResolver {
     }
 }
 
+/// CLI-only operations accepted after a trailing `to` conversion operator.
+///
+/// These options change how an evaluated result is structured or printed;
+/// they are not unit conversions and therefore do not belong in
+/// [`ConversionTarget`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetConversionOption {
+    Factors,
+    Fraction,
+}
+
+/// Split a trailing, top-level `to factors` or `to fraction` option.
+///
+/// The CLI owns these two operations, but token-aware splitting belongs here:
+/// a textual suffix check would incorrectly claim conversions inside function
+/// arguments or quoted strings. Other `to` targets stay in the ordinary
+/// parser/evaluator conversion path.
+pub fn split_target_conversion_option(expr: &str) -> Option<(&str, TargetConversionOption)> {
+    let tokens = crate::lexer::tokenize(expr);
+    let mut depth = 0usize;
+    let mut candidate = None;
+    for (index, token) in tokens.iter().enumerate() {
+        match token.tok {
+            Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
+            Tok::RParen | Tok::RBracket | Tok::RBrace => depth = depth.saturating_sub(1),
+            Tok::To if depth == 0 => candidate = Some(index),
+            _ => {}
+        }
+    }
+    let index = candidate?;
+    let Tok::Ident(name) = &tokens.get(index + 1)?.tok else {
+        return None;
+    };
+    if !matches!(tokens.get(index + 2).map(|token| &token.tok), Some(Tok::Eof)) {
+        return None;
+    }
+    let target = match name.to_ascii_lowercase().as_str() {
+        "factors" => TargetConversionOption::Factors,
+        "fraction" => TargetConversionOption::Fraction,
+        _ => return None,
+    };
+    let value = expr[..tokens[index].pos].trim_end();
+    (!value.is_empty()).then_some((value, target))
+}
+
 /// Parse `expr` into a `MathStructure` using `resolver` for names.
 ///
 /// Deep input is parsed on a thread of its own. The recursive ladder costs
@@ -1745,6 +1790,30 @@ mod tests {
 
     fn render(m: &MathStructure) -> String {
         format!("{m}")
+    }
+
+    #[test]
+    fn splits_cli_target_conversion_options() {
+        assert_eq!(
+            split_target_conversion_option("52 to factors"),
+            Some(("52", TargetConversionOption::Factors))
+        );
+        assert_eq!(
+            split_target_conversion_option("25/4 * 3/5 -> fraction"),
+            Some(("25/4 * 3/5", TargetConversionOption::Fraction))
+        );
+        assert_eq!(
+            split_target_conversion_option("x^2 to FACTORS"),
+            Some(("x^2", TargetConversionOption::Factors))
+        );
+    }
+
+    #[test]
+    fn target_conversion_options_must_be_trailing_and_top_level() {
+        assert_eq!(split_target_conversion_option("52 to hex"), None);
+        assert_eq!(split_target_conversion_option("f(52 to factors)"), None);
+        assert_eq!(split_target_conversion_option("52 to factors + 1"), None);
+        assert_eq!(split_target_conversion_option("\"52 to factors\""), None);
     }
 
     /// The reference binary answers `3` to `(((…1+2…)))` with 50000
