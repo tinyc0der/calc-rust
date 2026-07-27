@@ -15,25 +15,40 @@ use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-
     let mut test_file: Option<String> = None;
     let mut expression: Vec<String> = Vec::new();
     let mut terse = false;
+    let mut args = std::env::args().skip(1);
+    let mut options_enabled = true;
 
-    for arg in &args {
-        if let Some(path) = arg.strip_prefix("--test-file=") {
+    while let Some(arg) = args.next() {
+        if options_enabled && arg == "--" {
+            options_enabled = false;
+            continue;
+        }
+        if options_enabled && arg.starts_with("--test-file=") {
+            let path = &arg["--test-file=".len()..];
+            if path.is_empty() {
+                return usage_error("--test-file requires a file path");
+            }
             test_file = Some(path.to_string());
-        } else if arg == "-t" || arg == "--terse" {
+        } else if options_enabled && arg == "--test-file" {
+            let Some(path) = args.next() else {
+                return usage_error("--test-file requires a file path");
+            };
+            test_file = Some(path);
+        } else if options_enabled && (arg == "-t" || arg == "--terse") {
             terse = true;
-        } else if arg == "-h" || arg == "--help" {
-            print_usage();
+        } else if options_enabled && (arg == "-h" || arg == "--help") {
+            write_usage(&mut io::stdout());
             return ExitCode::SUCCESS;
-        } else if arg == "-v" || arg == "--version" {
+        } else if options_enabled && (arg == "-v" || arg == "--version") {
             println!("qalc (rust-calc) {}", env!("CARGO_PKG_VERSION"));
             return ExitCode::SUCCESS;
+        } else if options_enabled && arg.starts_with('-') && arg != "-" {
+            return usage_error(&format!("unknown option: {arg}"));
         } else {
-            expression.push(arg.clone());
+            expression.push(arg);
         }
     }
     if terse {
@@ -62,13 +77,25 @@ fn main() -> ExitCode {
     repl()
 }
 
-fn print_usage() {
-    println!("Usage: qalc [options] [expression]");
-    println!();
-    println!("  --test-file=FILE   run a .batch transcript and report results");
-    println!("  -t, --terse        print results only");
-    println!("  -v, --version      print version");
-    println!("  -h, --help         show this help");
+fn write_usage(out: &mut impl Write) {
+    let _ = writeln!(out, "Usage: qalc [options] [expression]");
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "  --test-file FILE   run a .batch transcript and report results"
+    );
+    let _ = writeln!(out, "  --test-file=FILE   same as above");
+    let _ = writeln!(out, "  --                  stop processing options");
+    let _ = writeln!(out, "  -t, --terse        print results only");
+    let _ = writeln!(out, "  -v, --version      print version");
+    let _ = writeln!(out, "  -h, --help         show this help");
+}
+
+fn usage_error(message: &str) -> ExitCode {
+    let mut err = io::stderr();
+    let _ = writeln!(err, "error: {message}");
+    write_usage(&mut err);
+    ExitCode::FAILURE
 }
 
 /// Read-eval-print loop over stdin.

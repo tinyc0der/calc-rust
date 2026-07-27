@@ -52,7 +52,7 @@ pub fn new_session() -> Session {
 pub fn evaluate_cli_line(session: &mut Session, line: &str) -> Result<String, String> {
     let trimmed = line.trim();
     if let Some(rest) = trimmed.strip_prefix('/') {
-        if let Some(out) = set_cli_option(session, rest) {
+        if let Some(out) = set_cli_option(session, rest)? {
             return Ok(out);
         }
     }
@@ -78,22 +78,28 @@ pub fn evaluate_cli_line(session: &mut Session, line: &str) -> Result<String, St
 }
 
 /// The `/set` options `src/qalc.cc` owns rather than `Calculator`.
-/// Returns `None` when the option is not one of them, so the session can try.
-fn set_cli_option(session: &mut Session, cmd: &str) -> Option<String> {
+/// Returns `Ok(None)` when the option is not one of them, so the session can
+/// try it. Recognized but malformed CLI options return an error instead of
+/// being reinterpreted by the expression/session path.
+fn set_cli_option(session: &mut Session, cmd: &str) -> Result<Option<String>, String> {
     let mut words = cmd.split_whitespace();
-    if words.next()? != "set" {
-        return None;
+    if words.next() != Some("set") {
+        return Ok(None);
     }
-    let raw_option = words.next()?;
+    let Some(raw_option) = words.next() else {
+        return Err("missing /set option".to_string());
+    };
     let (option, value) = match raw_option {
         "interval" => match words.next() {
             Some("display") => ("ivdisp", words.next().unwrap_or("1")),
             Some("calculation") => ("ic", words.next().unwrap_or("1")),
-            _ => return None,
+            Some(name) => return Err(format!("unknown /set interval option: {name}")),
+            None => return Err("missing /set interval option".to_string()),
         },
         "uncertainty" => match words.next() {
             Some("propagation") => ("up", words.next().unwrap_or("1")),
-            _ => return None,
+            Some(name) => return Err(format!("unknown /set uncertainty option: {name}")),
+            None => return Err("missing /set uncertainty option".to_string()),
         },
         _ => (raw_option, words.next().unwrap_or("1")),
     };
@@ -106,11 +112,14 @@ fn set_cli_option(session: &mut Session, cmd: &str) -> Option<String> {
                 "variance" | "variance formula" => 1,
                 "iv" | "interval" | "interval arithmetic" => 2,
                 "simple" | "simple interval arithmetic" => 3,
-                _ => value.parse::<i32>().ok()?,
+                _ => value
+                    .parse::<i32>()
+                    .map_err(|_| format!("invalid value for /set {raw_option}: {value}"))?,
             };
-            let mode = qalc_num::context::IntervalCalculation::from_i32(v)?;
+            let mode = qalc_num::context::IntervalCalculation::from_i32(v)
+                .ok_or_else(|| format!("invalid value for /set {raw_option}: {value}"))?;
             qalc_num::context::set_interval_calculation(mode);
-            Some(String::new())
+            Ok(Some(String::new()))
         }
         // `/set approximation`: "try exact" means "an exact pass, then an
         // approximate one" in the C++ (`MathStructure::eval`,
@@ -118,17 +127,19 @@ fn set_cli_option(session: &mut Session, cmd: &str) -> Option<String> {
         // pass, so the approximate one is the one to run — otherwise every
         // irrational result stays unevaluated. `exact` still reaches the
         // session unchanged.
-        "approximation" | "appr" | "approx"
-            if !matches!(value, "exact" | "0") =>
-        {
-            session.eval_options.approximation = qalc_core::ApproximationMode::Approximate;
-            Some(String::new())
-        }
+        "approximation" | "appr" | "approx" => match value {
+            "exact" | "0" => Ok(None),
+            "approximate" | "2" | "try" | "1" => {
+                session.eval_options.approximation = qalc_core::ApproximationMode::Approximate;
+                Ok(Some(String::new()))
+            }
+            _ => Err(format!("invalid value for /set {raw_option}: {value}")),
+        },
         // `/set interval display | ivdisp` (src/qalc.cc).
         "ivdisp" => {
             if matches!(value, "0" | "adaptive") {
                 ADAPTIVE_INTERVAL_DISPLAY.with(|a| a.set(true));
-                return Some(String::new());
+                return Ok(Some(String::new()));
             }
             session.print_options.interval_display = match value {
                 "1" | "significant" => IntervalDisplay::SignificantDigits,
@@ -139,18 +150,22 @@ fn set_cli_option(session: &mut Session, cmd: &str) -> Option<String> {
                 "6" | "upper" => IntervalDisplay::Upper,
                 "7" | "concise" => IntervalDisplay::Concise,
                 "8" | "relative" => IntervalDisplay::Relative,
-                _ => return None,
+                _ => return Err(format!("invalid value for /set {raw_option}: {value}")),
             };
             ADAPTIVE_INTERVAL_DISPLAY.with(|a| a.set(false));
-            Some(String::new())
+            Ok(Some(String::new()))
         }
         // `/set terse | t`
         "terse" | "t" => {
-            let enabled = !matches!(value, "0" | "off" | "false" | "no");
+            let enabled = match value {
+                "1" | "on" | "true" | "yes" => true,
+                "0" | "off" | "false" | "no" => false,
+                _ => return Err(format!("invalid value for /set {raw_option}: {value}")),
+            };
             set_terse(enabled);
-            Some(String::new())
+            Ok(Some(String::new()))
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
@@ -343,5 +358,27 @@ mod tests {
 
         set_terse(false);
     }
-}
 
+    #[test]
+    fn malformed_cli_set_options_return_errors() {
+        let mut session = new_session();
+
+        for command in [
+            "/set",
+            "/set ic invalid",
+            "/set up 9",
+            "/set approx invalid",
+            "/set ivdisp invalid",
+            "/set terse invalid",
+            "/set interval display invalid",
+            "/set interval invalid",
+            "/set uncertainty propagation invalid",
+            "/set uncertainty invalid",
+        ] {
+            assert!(
+                evaluate_cli_line(&mut session, command).is_err(),
+                "{command} should be rejected"
+            );
+        }
+    }
+}

@@ -255,8 +255,29 @@ mod tests {
 
     #[test]
     fn parses_a_real_transcript() {
-        let path = "/root/Project/libqalculate/tests/operators.batch";
-        let Ok(src) = std::fs::read_to_string(path) else {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let configured = std::env::var_os("QALCULATE_TESTS_DIR")
+            .map(std::path::PathBuf::from)
+            .map(|path| {
+                if path.is_absolute() {
+                    path
+                } else {
+                    manifest_dir.join(path)
+                }
+            });
+        let fallback_dirs = [
+            std::path::PathBuf::from("/root/Project/libqalculate/tests"),
+            manifest_dir.join("../libqalculate/tests"),
+            manifest_dir.join("../../libqalculate/tests"),
+            manifest_dir.join("../../../libqalculate/tests"),
+            manifest_dir.join("../../../../libqalculate/tests"),
+            manifest_dir.join("../../../../../libqalculate/tests"),
+        ];
+        let Some(src) = configured
+            .into_iter()
+            .chain(fallback_dirs)
+            .find_map(|dir| std::fs::read_to_string(dir.join("operators.batch")).ok())
+        else {
             return; // reference checkout not present
         };
         let t = parse_transcript(&src);
