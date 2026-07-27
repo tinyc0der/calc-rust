@@ -36,7 +36,9 @@ fn main() -> ExitCode {
             expression.push(arg.clone());
         }
     }
-    let _ = terse;
+    if terse {
+        qalc::cli::set_terse(true);
+    }
 
     if let Some(path) = test_file {
         return run_test_file(&path);

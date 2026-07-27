@@ -105,7 +105,22 @@ impl std::error::Error for LoadError {}
 /// if set, else `None` (the C++ falls back to a compiled-in `PKGDATADIR`,
 /// which a library port has no business guessing).
 pub fn definitions_dir() -> Option<PathBuf> {
-    std::env::var_os(DEFINITIONS_DIR_ENV).map(PathBuf::from)
+    if let Some(dir) = std::env::var_os(DEFINITIONS_DIR_ENV) {
+        return Some(PathBuf::from(dir));
+    }
+    for candidate in [
+        "../libqalculate/data",
+        "../../libqalculate/data",
+        "../../../libqalculate/data",
+        "/usr/share/qalculate",
+        "/usr/local/share/qalculate",
+    ] {
+        let p = PathBuf::from(candidate);
+        if p.join("prefixes.xml.in").is_file() || p.join("prefixes.xml").is_file() {
+            return Some(p);
+        }
+    }
+    None
 }
 
 /// Port of `Calculator::loadGlobalDefinitions`.

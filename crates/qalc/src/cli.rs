@@ -15,6 +15,19 @@ thread_local! {
     /// `/set ivdisp` picks a display explicitly — the CLI clears it at
     /// src/qalc.cc:2211 and restores it at :2203 for the `0`/adaptive value.
     static ADAPTIVE_INTERVAL_DISPLAY: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+
+    /// Terse output formatting flag (set by `-t` / `--terse` or `/set terse`).
+    static TERSE_OUTPUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Set terse output formatting in the CLI context.
+pub fn set_terse(terse: bool) {
+    TERSE_OUTPUT.with(|t| t.set(terse));
+}
+
+/// Check if terse output formatting is enabled in the CLI context.
+pub fn is_terse() -> bool {
+    TERSE_OUTPUT.with(|t| t.get())
 }
 
 /// A fresh session with the calculator's own predefined variables installed.
@@ -56,7 +69,12 @@ pub fn evaluate_cli_line(session: &mut Session, line: &str) -> Result<String, St
             IntervalDisplay::SignificantDigits
         };
     }
-    session.evaluate_line(trimmed)
+    let res = session.evaluate_line(trimmed)?;
+    if is_terse() {
+        Ok(res.trim().to_string())
+    } else {
+        Ok(res)
+    }
 }
 
 /// The `/set` options `src/qalc.cc` owns rather than `Calculator`.
@@ -66,15 +84,28 @@ fn set_cli_option(session: &mut Session, cmd: &str) -> Option<String> {
     if words.next()? != "set" {
         return None;
     }
-    let option = words.next()?;
-    let value = words.next().unwrap_or("1");
+    let raw_option = words.next()?;
+    let (option, value) = match raw_option {
+        "interval" => match words.next() {
+            Some("display") => ("ivdisp", words.next().unwrap_or("1")),
+            Some("calculation") => ("ic", words.next().unwrap_or("1")),
+            _ => return None,
+        },
+        "uncertainty" => match words.next() {
+            Some("propagation") => ("up", words.next().unwrap_or("1")),
+            _ => return None,
+        },
+        _ => (raw_option, words.next().unwrap_or("1")),
+    };
     match option {
         // `/set interval calculation | ic | uncertainty propagation | up`
         // (src/qalc.cc:1967).
         "ic" | "up" => {
             let v = match value {
+                "none" => 0,
                 "variance" | "variance formula" => 1,
                 "iv" | "interval" | "interval arithmetic" => 2,
+                "simple" | "simple interval arithmetic" => 3,
                 _ => value.parse::<i32>().ok()?,
             };
             let mode = qalc_num::context::IntervalCalculation::from_i32(v)?;
@@ -95,6 +126,10 @@ fn set_cli_option(session: &mut Session, cmd: &str) -> Option<String> {
         }
         // `/set interval display | ivdisp` (src/qalc.cc).
         "ivdisp" => {
+            if matches!(value, "0" | "adaptive") {
+                ADAPTIVE_INTERVAL_DISPLAY.with(|a| a.set(true));
+                return Some(String::new());
+            }
             session.print_options.interval_display = match value {
                 "1" | "significant" => IntervalDisplay::SignificantDigits,
                 "2" | "interval" => IntervalDisplay::Interval,
@@ -107,6 +142,12 @@ fn set_cli_option(session: &mut Session, cmd: &str) -> Option<String> {
                 _ => return None,
             };
             ADAPTIVE_INTERVAL_DISPLAY.with(|a| a.set(false));
+            Some(String::new())
+        }
+        // `/set terse | t`
+        "terse" | "t" => {
+            let enabled = !matches!(value, "0" | "off" | "false" | "no");
+            set_terse(enabled);
             Some(String::new())
         }
         _ => None,
@@ -136,3 +177,171 @@ pub fn run_transcript_file(path: &std::path::Path) -> std::io::Result<crate::bat
         |expression| evaluate_cli_line(&mut session, expression),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qalc_core::ApproximationMode;
+    use qalc_num::context::{interval_calculation, IntervalCalculation};
+    use qalc_num::options::IntervalDisplay;
+
+    #[test]
+    fn test_set_ic_and_up() {
+        let mut session = new_session();
+
+        // /set ic variance
+        let res = evaluate_cli_line(&mut session, "/set ic variance");
+        assert!(res.is_ok());
+        assert_eq!(interval_calculation(), IntervalCalculation::VarianceFormula);
+
+        // /set ic interval
+        let res = evaluate_cli_line(&mut session, "/set ic interval");
+        assert!(res.is_ok());
+        assert_eq!(interval_calculation(), IntervalCalculation::IntervalArithmetic);
+
+        // /set up 1 (alias for ic)
+        let res = evaluate_cli_line(&mut session, "/set up 1");
+        assert!(res.is_ok());
+        assert_eq!(interval_calculation(), IntervalCalculation::VarianceFormula);
+
+        // /set interval calculation 2 (multi-word alias)
+        let res = evaluate_cli_line(&mut session, "/set interval calculation 2");
+        assert!(res.is_ok());
+        assert_eq!(interval_calculation(), IntervalCalculation::IntervalArithmetic);
+
+        // /set uncertainty propagation variance
+        let res = evaluate_cli_line(&mut session, "/set uncertainty propagation variance");
+        assert!(res.is_ok());
+        assert_eq!(interval_calculation(), IntervalCalculation::VarianceFormula);
+    }
+
+    #[test]
+    fn test_set_appr() {
+        let mut session = new_session();
+        assert_eq!(session.eval_options.approximation, ApproximationMode::Approximate);
+
+        // /set appr exact
+        let res = evaluate_cli_line(&mut session, "/set appr exact");
+        assert!(res.is_ok());
+        assert_eq!(session.eval_options.approximation, ApproximationMode::Exact);
+
+        // /set appr approximate
+        let res = evaluate_cli_line(&mut session, "/set appr approximate");
+        assert!(res.is_ok());
+        assert_eq!(session.eval_options.approximation, ApproximationMode::Approximate);
+
+        // /set approximation exact
+        let res = evaluate_cli_line(&mut session, "/set approximation exact");
+        assert!(res.is_ok());
+        assert_eq!(session.eval_options.approximation, ApproximationMode::Exact);
+
+        // /set approx 2
+        let res = evaluate_cli_line(&mut session, "/set approx 2");
+        assert!(res.is_ok());
+        assert_eq!(session.eval_options.approximation, ApproximationMode::Approximate);
+    }
+
+    #[test]
+    fn test_set_ivdisp() {
+        let mut session = new_session();
+
+        let cases = [
+            ("1", IntervalDisplay::SignificantDigits),
+            ("significant", IntervalDisplay::SignificantDigits),
+            ("2", IntervalDisplay::Interval),
+            ("interval", IntervalDisplay::Interval),
+            ("3", IntervalDisplay::PlusMinus),
+            ("plusminus", IntervalDisplay::PlusMinus),
+            ("+/-", IntervalDisplay::PlusMinus),
+            ("4", IntervalDisplay::Midpoint),
+            ("midpoint", IntervalDisplay::Midpoint),
+            ("5", IntervalDisplay::Lower),
+            ("lower", IntervalDisplay::Lower),
+            ("6", IntervalDisplay::Upper),
+            ("upper", IntervalDisplay::Upper),
+            ("7", IntervalDisplay::Concise),
+            ("concise", IntervalDisplay::Concise),
+            ("8", IntervalDisplay::Relative),
+            ("relative", IntervalDisplay::Relative),
+        ];
+
+        for (val, expected) in cases {
+            let cmd = format!("/set ivdisp {val}");
+            let res = evaluate_cli_line(&mut session, &cmd);
+            assert!(res.is_ok(), "failed for command: {cmd}");
+            assert_eq!(session.print_options.interval_display, expected, "failed for: {cmd}");
+        }
+
+        // Test multi-word option `/set interval display 4`
+        let res = evaluate_cli_line(&mut session, "/set interval display 4");
+        assert!(res.is_ok());
+        assert_eq!(session.print_options.interval_display, IntervalDisplay::Midpoint);
+    }
+
+    #[test]
+    fn test_adaptive_interval_display_behavior() {
+        let mut session = new_session();
+
+        // Enable adaptive display explicitly
+        evaluate_cli_line(&mut session, "/set ivdisp 0").unwrap();
+
+        // Expression without +/- should default to SignificantDigits
+        let res = evaluate_cli_line(&mut session, "2 + 2");
+        assert!(res.is_ok());
+        assert_eq!(session.print_options.interval_display, IntervalDisplay::SignificantDigits);
+
+        // Expression with +/- should trigger PlusMinus adaptive display
+        let _ = evaluate_cli_line(&mut session, "5 +/- 1");
+        assert_eq!(session.print_options.interval_display, IntervalDisplay::PlusMinus);
+
+        // Expression with unicode ±
+        let _ = evaluate_cli_line(&mut session, "5 \u{00B1} 1");
+        assert_eq!(session.print_options.interval_display, IntervalDisplay::PlusMinus);
+
+        // Expression with uncertainty(...)
+        let _ = evaluate_cli_line(&mut session, "uncertainty(5)");
+        assert_eq!(session.print_options.interval_display, IntervalDisplay::PlusMinus);
+
+        // Disabling adaptive mode via explicit ivdisp selection (e.g., Interval = 2)
+        evaluate_cli_line(&mut session, "/set ivdisp 2").unwrap();
+        assert_eq!(session.print_options.interval_display, IntervalDisplay::Interval);
+
+        // Subsequent +/- expression should NOT override explicit setting
+        let _ = evaluate_cli_line(&mut session, "5 +/- 1");
+        assert_eq!(session.print_options.interval_display, IntervalDisplay::Interval);
+
+        // Restoring adaptive display via /set ivdisp 0 or /set ivdisp adaptive
+        evaluate_cli_line(&mut session, "/set ivdisp adaptive").unwrap();
+        let _ = evaluate_cli_line(&mut session, "2 + 2");
+        assert_eq!(session.print_options.interval_display, IntervalDisplay::SignificantDigits);
+        let _ = evaluate_cli_line(&mut session, "5 +/- 1");
+        assert_eq!(session.print_options.interval_display, IntervalDisplay::PlusMinus);
+    }
+
+    #[test]
+    fn test_terse_mode() {
+        let mut session = new_session();
+
+        set_terse(false);
+        assert!(!is_terse());
+
+        set_terse(true);
+        assert!(is_terse());
+
+        let res = evaluate_cli_line(&mut session, " 10 + 20 \n");
+        assert_eq!(res.unwrap(), "30");
+
+        // Test /set terse command
+        evaluate_cli_line(&mut session, "/set terse 0").unwrap();
+        assert!(!is_terse());
+
+        evaluate_cli_line(&mut session, "/set terse on").unwrap();
+        assert!(is_terse());
+
+        evaluate_cli_line(&mut session, "/set t off").unwrap();
+        assert!(!is_terse());
+
+        set_terse(false);
+    }
+}
+

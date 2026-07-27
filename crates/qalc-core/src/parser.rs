@@ -246,6 +246,11 @@ impl DepthBound {
                 _ => {}
             }
         }
+        for window in expr.as_bytes().windows(3) {
+            if window.eq_ignore_ascii_case(b"not") {
+                b.signs += 1;
+            }
+        }
         b
     }
 
@@ -728,7 +733,10 @@ impl<'a> Parser<'a> {
                     self.bump();
                     let right = self.parse_multiplicative()?;
                     let left = if terms.len() == 1 {
-                        terms.pop().unwrap()
+                        terms.pop().ok_or_else(|| ParseError {
+                            message: "malformed expression".into(),
+                            pos: self.pos(),
+                        })?
                     } else {
                         MathStructure::Addition(std::mem::take(&mut terms))
                     };
@@ -738,7 +746,10 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(if terms.len() == 1 {
-            terms.pop().unwrap()
+            terms.pop().ok_or_else(|| ParseError {
+                message: "malformed expression".into(),
+                pos: self.pos(),
+            })?
         } else {
             MathStructure::Addition(terms)
         })
@@ -874,7 +885,10 @@ impl<'a> Parser<'a> {
             factors.push(self.parse_binary_exponent()?);
         }
         if factors.len() == 1 {
-            return Ok(factors.pop().unwrap());
+            return Ok(factors.pop().ok_or_else(|| ParseError {
+                message: "malformed expression".into(),
+                pos: self.pos(),
+            })?);
         }
         // A run of quantities in decreasing units is a sum: `10h 31min` is
         // 10 h + 31 min, not 310 h*min.
@@ -1778,6 +1792,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_parser_deep_unary_not() {
+        let expr = "not ".repeat(200) + "1";
+        let res = parse(&expr, &ParseOptions::default());
+        assert!(res.is_ok(), "200 consecutive 'not' operators should be parsed via parse_deep without stack overflow");
+
+        let over_limit_expr = "not ".repeat(50001) + "1";
+        let err = parse(&over_limit_expr, &ParseOptions::default())
+            .expect_err("nesting past MAX_PARSE_DEPTH should return ParseError");
+        assert!(
+            err.message.contains("nested deeper"),
+            "expected a depth error, got {err}"
+        );
+    }
+
     /// The same for grouping, which is the expensive kind of nesting — 440 MB
     /// of stack is reached before the limit refuses the rest, so this one runs
     /// in release only.
@@ -2093,5 +2122,10 @@ mod tests {
     fn errors_have_positions() {
         let e = parse("1+", &ParseOptions::default()).unwrap_err();
         assert_eq!(e.pos, 2);
+    }
+
+    #[test]
+    fn malformed_expression_returns_error() {
+        assert!(parse("1+±", &ParseOptions::default()).is_err());
     }
 }

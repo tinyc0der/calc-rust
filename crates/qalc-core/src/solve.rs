@@ -301,12 +301,15 @@ fn solve_exponential(expr: &MathStructure, xvar: &MathStructure) -> Option<Vec<M
 /// x = -2`), so the rational roots are sorted and the leading coefficient is
 /// normalized positive before the quadratic formula runs.
 pub fn solve_polynomial(dense: &[Number]) -> Option<Vec<MathStructure>> {
-    let deg = dense.len().saturating_sub(1);
+    let mut rest = dense.to_vec();
+    while rest.len() > 1 && rest.last().is_some_and(Number::is_zero) {
+        rest.pop();
+    }
+    let deg = rest.len().saturating_sub(1);
     if deg == 0 {
         return None;
     }
     let mut out: Vec<MathStructure> = Vec::new();
-    let mut rest = dense.to_vec();
     if rest[deg].is_negative() {
         for c in rest.iter_mut() {
             c.negate();
@@ -383,6 +386,16 @@ pub fn solve_polynomial(dense: &[Number]) -> Option<Vec<MathStructure>> {
 /// The exact quadratic formula for `a x^2 + b x + c = 0`, in the shape the
 /// reference prints: `(sqrt(D) - b) / (2a)` and `-b/(2a) - sqrt(D)/(2a)`.
 fn quadratic_roots(a: &Number, b: &Number, c: &Number) -> Option<Vec<MathStructure>> {
+    if a.is_zero() {
+        if b.is_zero() {
+            return None;
+        }
+        let mut r = c.clone();
+        if !r.divide(b) || !r.negate() {
+            return None;
+        }
+        return Some(vec![MathStructure::Number(r)]);
+    }
     // D = b^2 - 4ac
     let mut disc = b.clone();
     if !disc.square() {
@@ -2499,5 +2512,16 @@ mod tests {
             ap("secantsolve(Ei(x) = 3i, 1, 2)"),
             "\u{2212}1.160849461 + 1.034283360i"
         );
+    }
+
+    #[test]
+    fn test_solve_zero_coefficient_quadratic() {
+        assert_eq!(ex("solve(0*x^2 + 2*x - 4 = 0)"), "x = 2");
+        let a = crate::Number::from_i64(0);
+        let b = crate::Number::from_i64(2);
+        let c = crate::Number::from_i64(-4);
+        let roots = super::quadratic_roots(&a, &b, &c).expect("quadratic_roots with a=0 should succeed");
+        assert_eq!(roots.len(), 1);
+        assert_eq!(format!("{}", roots[0]), "2");
     }
 }
