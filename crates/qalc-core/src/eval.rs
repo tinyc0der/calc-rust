@@ -3,10 +3,10 @@
 //! Mirrors `Calculator::calculateAndPrint` (Calculator-calculate.cc).
 
 use crate::builtins;
+use crate::options::EvaluationOptions;
 use crate::parser::{self, ParseError};
 use crate::print;
 use crate::structure::{ConversionTarget, MathStructure};
-use crate::options::EvaluationOptions;
 use qalc_num::{ParseOptions, PrintOptions};
 
 /// Print options matching `qalc +u8` — the mode `--test-file` runs in.
@@ -208,9 +208,10 @@ pub fn evaluate_calculated_with(m: &mut MathStructure, eo: &EvaluationOptions) {
         crate::limit::resolve_exactly(m);
     }
     for _ in 0..MAX_EVAL_PASSES {
+        let ranges_changed = evaluate_ranges(m);
         let functions_changed = builtins::calculate_functions_eo(m, eo);
         let merged = m.calculatesub(eo);
-        if !functions_changed && !merged {
+        if !ranges_changed && !functions_changed && !merged {
             break;
         }
     }
@@ -242,15 +243,78 @@ pub fn evaluate_calculated_with(m: &mut MathStructure, eo: &EvaluationOptions) {
     let solved = crate::solve::isolate_x_toplevel(m, eo);
     if solved && eo.approximation != crate::options::ApproximationMode::Exact {
         for _ in 0..MAX_EVAL_PASSES {
+            let ranges_changed = evaluate_ranges(m);
             let functions_changed = builtins::calculate_functions_eo(m, eo);
             let merged = m.calculatesub(eo);
-            if !functions_changed && !merged {
+            if !ranges_changed && !functions_changed && !merged {
                 break;
             }
         }
     }
     // Canonical ordering, as the C++ does in evalSort before printing.
     crate::sort::sort(m);
+}
+
+enum RangeOperation {
+    Sum,
+    Product,
+}
+
+/// Expand `sum(term, lower, upper[, index])` and `product(...)` over an
+/// inclusive integer range before ordinary function and arithmetic evaluation.
+fn evaluate_ranges(m: &mut MathStructure) -> bool {
+    let mut changed = false;
+    for index in 0..m.size() {
+        if let Some(child) = m.get_mut(index) {
+            changed |= evaluate_ranges(child);
+        }
+    }
+
+    let MathStructure::Function { id, args } = m else {
+        return changed;
+    };
+    let Some(store) = crate::units::store_if_ready() else {
+        return changed;
+    };
+    let registry = store.registry();
+    let operation = if registry.find_function_id("sum") == Some(*id) {
+        RangeOperation::Sum
+    } else if registry.find_function_id("product") == Some(*id) {
+        RangeOperation::Product
+    } else {
+        return changed;
+    };
+    if !(3..=4).contains(&args.len()) {
+        return changed;
+    }
+
+    let Some(lower) = args[1].number().and_then(|n| n.to_i64()) else {
+        return changed;
+    };
+    let Some(upper) = args[2].number().and_then(|n| n.to_i64()) else {
+        return changed;
+    };
+    if lower > upper {
+        return changed;
+    }
+
+    let term = args[0].clone();
+    let index = args
+        .get(3)
+        .cloned()
+        .unwrap_or_else(|| MathStructure::symbolic("x"));
+    let terms = (lower..=upper)
+        .map(|value| {
+            let mut term = term.clone();
+            crate::matrix::replace(&mut term, &index, &MathStructure::from_i64(value));
+            term
+        })
+        .collect();
+    *m = match operation {
+        RangeOperation::Sum => MathStructure::Addition(terms),
+        RangeOperation::Product => MathStructure::Multiplication(terms),
+    };
+    true
 }
 
 /// Guard against a pathological rewrite cycle.
