@@ -112,6 +112,9 @@ pub fn definitions_dir() -> Option<PathBuf> {
         "../libqalculate/data",
         "../../libqalculate/data",
         "../../../libqalculate/data",
+        "../Demo/libqalculate/data",
+        "../../Demo/libqalculate/data",
+        "/Users/maxwell/Projects/Demo/libqalculate/data",
         "/usr/share/qalculate",
         "/usr/local/share/qalculate",
     ] {
