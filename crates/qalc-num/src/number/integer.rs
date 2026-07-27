@@ -489,7 +489,10 @@ impl Number {
         if s >= 0 {
             self.shift_left(&Number::from_i64(s))
         } else {
-            self.shift_right(&Number::from_i64(-s))
+            let Some(s) = s.checked_neg() else {
+                return false;
+            };
+            self.shift_right(&Number::from_i64(s))
         }
     }
 
@@ -883,6 +886,13 @@ mod tests {
         let mut y = Number::from_i64(0b0101);
         assert!(y.bit_and(&Number::from_i64(0b1001)));
         assert_eq!(y.to_i64(), Some(0b0001));
+    }
+
+    #[test]
+    fn shift_rejects_i64_min_without_mutating_the_value() {
+        let mut n = Number::from_i64(7);
+        assert!(!n.shift(&Number::from_i64(i64::MIN)));
+        assert_eq!(n.to_i64(), Some(7));
     }
 
     #[test]

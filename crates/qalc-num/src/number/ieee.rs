@@ -12,6 +12,10 @@ use num_bigint::BigInt;
 use num_rational::BigRational;
 use num_traits::{One, Signed, Zero};
 
+/// Keep exact power-of-two construction within the same practical bound as
+/// the public integer shift operations.
+const MAX_POW2_SHIFT: u64 = 1_000_000;
+
 /// `standard_expbits(bits)`: the exponent width IEEE-754 pairs with a given
 /// total width.
 pub fn standard_expbits(bits: u32) -> u32 {
@@ -40,19 +44,30 @@ fn mantissa_bits(bits: u32, expbits: u32) -> u32 {
     bits - expbits - if bits == 80 { 2 } else { 1 }
 }
 
+/// Resolve and validate the exponent field before doing width arithmetic or
+/// indexing a bit string. Exponents are represented internally as `i64`, so a
+/// field wider than 64 bits cannot be decoded safely.
+fn resolve_expbits(bits: u32, expbits: u32) -> Option<u32> {
+    let max_expbits = bits.checked_sub(2)?;
+    let expbits = if expbits == 0 {
+        standard_expbits(bits)
+    } else {
+        expbits
+    };
+    (expbits <= max_expbits && expbits <= 64).then_some(expbits)
+}
+
+fn exponent_bias(expbits: u32) -> i128 {
+    (1i128 << (expbits - 1)) - 1
+}
+
 /// `to_float`: encode `n` as a `bits`-wide IEEE-754 bit string.
 ///
 /// Returns the raw bits (no grouping); the caller formats them. `None` if
 /// the width is unusable.
 pub fn to_float(n: &Number, bits: u32, expbits: u32) -> Option<String> {
-    let expbits = if expbits == 0 {
-        standard_expbits(bits)
-    } else if expbits > bits - 2 {
-        return None;
-    } else {
-        expbits
-    };
-    let expbias: i64 = (1i64 << (expbits - 1)) - 1;
+    let expbits = resolve_expbits(bits, expbits)?;
+    let expbias = exponent_bias(expbits);
     let mbits = mantissa_bits(bits, expbits);
     let explicit_leading = bits == 80;
 
@@ -94,9 +109,9 @@ pub fn to_float(n: &Number, bits: u32, expbits: u32) -> Option<String> {
     }
 
     // exp = floor(log2(q))
-    let mut exp: i64 = ilog2_floor(&q);
+    let mut exp: i64 = ilog2_floor(&q)?;
     // 2^exp <= q < 2^(exp+1)
-    if exp > expbias {
+    if i128::from(exp) > expbias {
         // Overflow to infinity.
         for _ in 0..expbits {
             s.push('1');
@@ -108,16 +123,16 @@ pub fn to_float(n: &Number, bits: u32, expbits: u32) -> Option<String> {
         return Some(s);
     }
 
-    let mut stored_exp = exp + expbias;
+    let mut stored_exp = i128::from(exp) + expbias;
     let subnormal = stored_exp <= 0;
     if subnormal {
         // Subnormals share the smallest exponent and drop the implicit 1.
-        exp = 1 - expbias;
+        exp = i64::try_from(1 - expbias).ok()?;
         stored_exp = 0;
     }
 
     // significand = q / 2^exp, in [1,2) when normal.
-    let sig = scale_pow2(&q, -exp);
+    let sig = scale_pow2(&q, exp.checked_neg()?)?;
     // Round the significand to `mbits` *fractional* bits, half to even. This
     // is the same count at every width, including the 80-bit format: the C++
     // prints the significand with `bits - expbits - (bits == 80 ? 2 : 1)`
@@ -126,7 +141,7 @@ pub fn to_float(n: &Number, bits: u32, expbits: u32) -> Option<String> {
     // 1 explicit integer bit + `mbits` fraction bits, not `mbits + 1`
     // fraction bits — rounding to one bit more and masking the result back to
     // the field width would drop the integer bit the format exists to store.
-    let scaled = scale_pow2(&sig, mbits as i64);
+    let scaled = scale_pow2(&sig, mbits as i64)?;
     let mut int_val = round_half_even(&scaled);
 
     // Rounding can carry into the next binade (e.g. 1.111… -> 10.000…).
@@ -166,13 +181,7 @@ pub fn to_float(n: &Number, bits: u32, expbits: u32) -> Option<String> {
 
 /// `from_float`: decode a `bits`-wide IEEE-754 bit string.
 pub fn from_float(sbin: &str, bits: u32, expbits: u32) -> Option<Number> {
-    let expbits = if expbits == 0 {
-        standard_expbits(bits)
-    } else if expbits > bits - 2 {
-        return None;
-    } else {
-        expbits
-    };
+    let expbits = resolve_expbits(bits, expbits)?;
     let mut s: String = sbin.chars().filter(|c| *c == '0' || *c == '1').collect();
     if s.len() < bits as usize {
         let pad = "0".repeat(bits as usize - s.len());
@@ -185,7 +194,7 @@ pub fn from_float(sbin: &str, bits: u32, expbits: u32) -> Option<Number> {
     let neg = b[0] == b'1';
 
     // Exponent field.
-    let mut exp: i64 = 0;
+    let mut exp: i128 = 0;
     let mut all_ones = true;
     for i in 1..=expbits as usize {
         exp = exp * 2 + if b[i] == b'1' { 1 } else { 0 };
@@ -216,11 +225,12 @@ pub fn from_float(sbin: &str, bits: u32, expbits: u32) -> Option<Number> {
     }
 
     let subnormal = exp == 0;
-    let expbias: i64 = (1i64 << (expbits - 1)) - 1;
+    let expbias = exponent_bias(expbits);
     let mut e = exp - expbias;
     if subnormal {
         e += 1;
     }
+    let e = i64::try_from(e).ok()?;
 
     // Significand: implicit leading 1 unless subnormal or 80-bit explicit.
     let mut frac = if subnormal || bits == 80 {
@@ -241,7 +251,7 @@ pub fn from_float(sbin: &str, bits: u32, expbits: u32) -> Option<Number> {
     }
 
     // value = 2^e * frac
-    let mut value = scale_pow2(&frac, e);
+    let mut value = scale_pow2(&frac, e)?;
     if neg {
         value = -value;
     }
@@ -265,28 +275,36 @@ pub fn float_error(n: &Number, bits: u32, expbits: u32) -> Option<Number> {
 }
 
 /// `q * 2^k` for positive or negative `k`.
-fn scale_pow2(q: &BigRational, k: i64) -> BigRational {
+fn scale_pow2(q: &BigRational, k: i64) -> Option<BigRational> {
+    if q.is_zero() {
+        return Some(BigRational::zero());
+    }
+    let magnitude = k.unsigned_abs();
+    if magnitude > MAX_POW2_SHIFT {
+        return None;
+    }
+    let shift = usize::try_from(magnitude).ok()?;
     if k >= 0 {
-        q * BigRational::from_integer(BigInt::one() << k as usize)
+        Some(q * BigRational::from_integer(BigInt::one() << shift))
     } else {
-        q / BigRational::from_integer(BigInt::one() << (-k) as usize)
+        Some(q / BigRational::from_integer(BigInt::one() << shift))
     }
 }
 
 /// floor(log2(q)) for a positive rational.
-fn ilog2_floor(q: &BigRational) -> i64 {
+fn ilog2_floor(q: &BigRational) -> Option<i64> {
     let n = q.numer().magnitude().bits() as i64;
     let d = q.denom().magnitude().bits() as i64;
     // n-1 <= log2(numer) < n, likewise for the denominator.
     let mut e = n - d;
     // Correct the off-by-one by comparing against 2^e.
-    while scale_pow2(q, -e) < BigRational::one() {
+    while scale_pow2(q, e.checked_neg()?)? < BigRational::one() {
         e -= 1;
     }
-    while scale_pow2(q, -(e + 1)) >= BigRational::one() {
+    while scale_pow2(q, e.checked_add(1)?.checked_neg()?)? >= BigRational::one() {
         e += 1;
     }
-    e
+    Some(e)
 }
 
 /// Round a non-negative rational to an integer, ties to even.
@@ -464,5 +482,35 @@ mod tests {
         assert!(bits.starts_with('1'));
         let back = from_float(&bits, 32, 0).unwrap();
         assert!(back.is_negative());
+    }
+
+    #[test]
+    fn invalid_float_widths_are_rejected_before_indexing() {
+        for bits in 0..=6 {
+            assert!(from_float("", bits, 0).is_none(), "bits={bits}");
+        }
+        assert!(from_float("0", 3, 2).is_none());
+    }
+
+    #[test]
+    fn exponent_fields_larger_than_64_bits_are_rejected() {
+        let one = Number::from_i64(1);
+        assert!(to_float(&one, 128, 65).is_none());
+        assert!(from_float("0", 128, 65).is_none());
+    }
+
+    #[test]
+    fn a_64_bit_exponent_field_does_not_overflow() {
+        let one = Number::from_i64(1);
+        let encoded = to_float(&one, 128, 64).expect("64-bit exponent field encodes");
+        let decoded = from_float(&encoded, 128, 64).expect("64-bit exponent field decodes");
+        assert!(decoded.equals(&one, true, false));
+    }
+
+    #[test]
+    fn scaling_zero_by_the_smallest_exponent_stays_zero() {
+        assert!(scale_pow2(&BigRational::zero(), i64::MIN).unwrap().is_zero());
+        assert!(scale_pow2(&BigRational::one(), i64::MIN).is_none());
+        assert!(scale_pow2(&BigRational::one(), MAX_POW2_SHIFT as i64 + 1).is_none());
     }
 }

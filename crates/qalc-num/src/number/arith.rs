@@ -1052,16 +1052,21 @@ fn interval_mul(
         au.mul(bl, p, RoundingMode::Up),
         au.mul(bu, p, RoundingMode::Up),
     ];
-    let mut lo = candidates_lo[0].clone();
-    for c in &candidates_lo[1..] {
-        if matches!(c.cmp(&lo), Some(c) if c < 0) || lo.is_nan() {
-            lo = c.clone();
+    // NaN corners are exactly the indeterminate endpoint products `0 * inf`.
+    // They do not constrain either extremum. If every corner is NaN, one
+    // interval is identically zero, so its product component is zero too.
+    let mut valid_lo = candidates_lo.into_iter().filter(|c| !c.is_nan());
+    let mut lo = valid_lo.next().unwrap_or_else(|| BigFloat::from_i8(0, p));
+    for c in valid_lo {
+        if matches!(c.cmp(&lo), Some(order) if order < 0) {
+            lo = c;
         }
     }
-    let mut hi = candidates_hi[0].clone();
-    for c in &candidates_hi[1..] {
-        if matches!(c.cmp(&hi), Some(c) if c > 0) || hi.is_nan() {
-            hi = c.clone();
+    let mut valid_hi = candidates_hi.into_iter().filter(|c| !c.is_nan());
+    let mut hi = valid_hi.next().unwrap_or_else(|| BigFloat::from_i8(0, p));
+    for c in valid_hi {
+        if matches!(c.cmp(&hi), Some(order) if order > 0) {
+            hi = c;
         }
     }
     (lo, hi)
@@ -1096,6 +1101,25 @@ mod uncertainty_tests {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn interval_multiplication_ignores_all_nan_corners() {
+        let p = crate::context::bit_precision();
+        let zero = BigFloat::from_i8(0, p);
+        let minus_infinity = BigFloat::from_f64(f64::NEG_INFINITY, p);
+        let plus_infinity = BigFloat::from_f64(f64::INFINITY, p);
+
+        let (lower, upper) = interval_mul(
+            &zero,
+            &zero,
+            &minus_infinity,
+            &plus_infinity,
+            p,
+        );
+
+        assert!(lower.is_zero());
+        assert!(upper.is_zero());
+    }
 
     #[test]
     fn interval_multiplication_keeps_both_bounds() {
@@ -1243,4 +1267,3 @@ mod tests {
         assert!(n.internal_rational().unwrap() == &BigRational::from_integer(30000.into()));
     }
 }
-
