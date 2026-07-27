@@ -448,6 +448,38 @@ mod tests {
         assert_eq!(s.evaluate_line("beta:=[1,2,3]").unwrap(), "[1  2  3]");
     }
 
+    /// `name(…)` where nothing declares `name` — no builtin, no entry in the
+    /// definition files — decomposes into a product, which is what the C++
+    /// name loop does with it. Verified against the reference binary.
+    #[test]
+    fn a_call_to_an_undeclared_name_is_a_product() {
+        let mut s = Session::new();
+        // The reference answers `2z^3`.
+        assert_eq!(s.evaluate_line("zzz(2)").unwrap(), "2z^3");
+        // The same product the reference builds for `xyzzy(2)`, which it
+        // prints in a different factor order (`2xy^2 * z^2`) — an ordering
+        // this port already differs on for the explicit product, so that is
+        // what it is compared against.
+        assert_eq!(
+            s.evaluate_line("xyzzy(2)").unwrap(),
+            s.evaluate_line("2*x*y^2*z^2").unwrap()
+        );
+        // `foo(3)` and `qqq(1+2)` are products here too, but over names this
+        // port resolves differently from the reference (which reads `foo` as
+        // femto-octet times octet, and knows a `q`). What they must equal is
+        // the same expression without the call parenthesis — that the
+        // parenthesis is an implicit multiplication and nothing else is the
+        // invariant this pins.
+        assert_eq!(
+            s.evaluate_line("foo(3)").unwrap(),
+            s.evaluate_line("3 foo").unwrap()
+        );
+        assert_eq!(
+            s.evaluate_line("qqq(1+2)").unwrap(),
+            s.evaluate_line("3 qqq").unwrap()
+        );
+    }
+
     #[test]
     fn unassigned_names_stay_symbolic() {
         let mut s = Session::new();

@@ -148,8 +148,7 @@ fn store_cell() -> &'static OnceLock<Option<UnitStore>> {
 }
 
 pub fn store() -> Option<&'static UnitStore> {
-    let STORE = store_cell();
-    STORE
+    store_cell()
         .get_or_init(|| {
             let dir = data_dir()?;
             let mut reg = Registry::new();

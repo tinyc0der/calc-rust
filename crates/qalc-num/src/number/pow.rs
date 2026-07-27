@@ -34,6 +34,21 @@ impl Number {
     }
 
     fn raise_impl(&mut self, o: &Number, try_exact: bool) -> bool {
+        // The reference's first two lines (Number.cc:3822): an exponent of 2
+        // is `square()` and an exponent of -1 is `recip()`, both of which know
+        // their operand appears twice where the general power does not.
+        // `[-0.5:0.5]^2` is `[0:0.25]`, not the `[-0.25:0.25]` that combining
+        // the corners of two independent factors gives.
+        if o.is_two() {
+            return self.square();
+        }
+        if o.is_minus_one() {
+            if !self.recip() {
+                return false;
+            }
+            self.set_precision_and_approximate_from(o);
+            return true;
+        }
         // Infinite base/exponent, *before* the `x^0 = 1` shortcut.
         //
         // The reference orders it this way (Number.cc:3841, whose
@@ -56,8 +71,13 @@ impl Number {
         }
         // Handle x^0 and x^1 quickly.
         if o.is_zero() {
-            if self.is_zero() {
-                return false; // 0^0 handled upstream (evaluates to 1 in qalc via function, but Number fails)
+            // `x^0` is 1 only for an `x` that is *known* non-zero: an interval
+            // straddling zero contains the undefined `0^0`, and an infinite
+            // imaginary part has no finite power either (Number.cc:3926).
+            if !self.is_nonzero()
+                || (self.has_imaginary_part() && self.imaginary_part().includes_infinity())
+            {
+                return false;
             }
             let keep = (self.approx || o.approx, self.precision);
             *self = Number::from_i64(1);
@@ -71,6 +91,14 @@ impl Number {
         }
         if self.has_imaginary_part() || o.has_imaginary_part() {
             return self.raise_complex(o);
+        }
+        // A base that reaches zero raised to an exponent that may be negative
+        // is a division by zero somewhere inside the interval, so there is no
+        // enclosure to give. The reference refuses it twice over — once for a
+        // floating-point exponent (Number.cc:4136) and once for a rational one
+        // (:4208) — and both come to the same test.
+        if !self.is_nonzero() && !o.is_non_negative() {
+            return false;
         }
         // Exact integer exponent on rational base.
         if let (RealValue::Rational(r), Some(exp)) = (&self.value, o.to_i64()) {
@@ -706,29 +734,19 @@ impl Number {
         if n % 2 == 0 && !self.is_non_negative() {
             return false;
         }
-        // An odd root of an interval that *straddles* zero is a real interval
-        // the code below cannot produce: it takes the absolute value of the
-        // whole interval, which only means anything when the interval sits on
-        // one side of zero. For a finite straddling interval the float path
-        // used to fail by way of `pow` returning NaN on the negative bound; an
-        // infinite one produced `root([-infinity:1], 3) = [1:+infinity]`, which
-        // is not even an enclosure. Refuse it explicitly instead.
-        if !self.is_non_negative() && !self.real_part_is_negative() {
-            return false;
-        }
         if self.is_plus_infinity() {
             return true;
         }
         if self.is_minus_infinity() {
             return n % 2 == 1;
         }
-        let neg = self.real_part_is_negative();
-        let mut abs_self = self.clone();
-        if neg && !abs_self.negate() {
-            return false;
-        }
-        if let RealValue::Rational(_) = &abs_self.value {
-            let mut copy = abs_self.clone();
+        // The exact rational root of a point value.
+        if let RealValue::Rational(r) = &self.value {
+            let neg = r.is_negative();
+            let mut copy = self.clone();
+            if neg && !copy.negate() {
+                return false;
+            }
             if copy.exact_root(n) {
                 if neg {
                     copy.negate();
@@ -737,23 +755,46 @@ impl Number {
                 return true;
             }
         }
-        // Float: x^(1/n) via pow with rational exponent 1/n.
+        // Float: each bound independently, with its own sign taken out and put
+        // back. Taking the absolute value of the *interval* only means
+        // anything when the interval sits on one side of zero, which is why
+        // an odd root of `[-1:0.5]` used to be refused outright; the reference
+        // negates each bound on its own (Number.cc:4537) and so gets
+        // `[-1:0.7937]`.
         let p = context::bit_precision();
+        let (al, au) = (self.lower_bound_float(p), self.upper_bound_float(p));
+        let inv_lo = bigfloat_from_ratio(&BigInt::one(), &BigInt::from(n), p, RoundingMode::Down);
+        let inv_hi = bigfloat_from_ratio(&BigInt::one(), &BigInt::from(n), p, RoundingMode::Up);
         let inv_n = bigfloat_from_ratio(&BigInt::one(), &BigInt::from(n), p, RoundingMode::ToEven);
-        let (al, au) = (abs_self.lower_bound_float(p), abs_self.upper_bound_float(p));
+        // `down` asks for the outward end of this bound's own rounding: a
+        // negative bound is negated afterwards, so its magnitude rounds the
+        // other way.
+        let root_bound = |b: &BigFloat, down: bool| -> BigFloat {
+            if b.is_inf() || b.is_zero() {
+                return b.clone();
+            }
+            let neg = matches!(b.sign(), Some(astro_float::Sign::Neg));
+            let mag = if neg { b.neg() } else { b.clone() };
+            let rm = if neg == down { RoundingMode::Up } else { RoundingMode::Down };
+            let a = context::with_consts(|cc| mag.pow(&inv_lo, p, rm, cc));
+            let c = context::with_consts(|cc| mag.pow(&inv_hi, p, rm, cc));
+            let pick_up = rm == RoundingMode::Up;
+            let m = if matches!(a.cmp(&c), Some(k) if (k > 0) == pick_up) { a } else { c };
+            if neg {
+                m.neg()
+            } else {
+                m
+            }
+        };
         let (lower, upper) = if context::create_interval() {
-            // Use slightly widened exponent rounding to keep enclosure sound:
-            let inv_lo = bigfloat_from_ratio(&BigInt::one(), &BigInt::from(n), p, RoundingMode::Down);
-            let inv_hi = bigfloat_from_ratio(&BigInt::one(), &BigInt::from(n), p, RoundingMode::Up);
-            let lo = context::with_consts(|cc| al.pow(&inv_lo, p, RoundingMode::Down, cc));
-            let lo2 = context::with_consts(|cc| al.pow(&inv_hi, p, RoundingMode::Down, cc));
-            let hi = context::with_consts(|cc| au.pow(&inv_lo, p, RoundingMode::Up, cc));
-            let hi2 = context::with_consts(|cc| au.pow(&inv_hi, p, RoundingMode::Up, cc));
-            let lo = if matches!(lo2.cmp(&lo), Some(c) if c < 0) { lo2 } else { lo };
-            let hi = if matches!(hi2.cmp(&hi), Some(c) if c > 0) { hi2 } else { hi };
-            (lo, hi)
+            (root_bound(&al, true), root_bound(&au, false))
         } else {
-            let f = context::with_consts(|cc| al.pow(&inv_n, p, RoundingMode::ToEven, cc));
+            let neg = matches!(al.sign(), Some(astro_float::Sign::Neg));
+            let mag = if neg { al.neg() } else { al.clone() };
+            let mut f = context::with_consts(|cc| mag.pow(&inv_n, p, RoundingMode::ToEven, cc));
+            if neg {
+                f = f.neg();
+            }
             (f.clone(), f)
         };
         if lower.is_nan() || upper.is_nan() {
@@ -762,9 +803,6 @@ impl Number {
         let mut result = Number::new();
         result.value = RealValue::Float { lower, upper };
         result.approx = true;
-        if neg {
-            result.negate();
-        }
         result.set_precision_and_approximate_from(self);
         *self = result;
         self.approx = true;

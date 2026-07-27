@@ -196,6 +196,16 @@ fn diff_function(
                 pow(u.clone(), add(vec![inv(n), num(-1)])),
             ])
         }
+        // d/du |u| = u / |u|. That is the reference's own answer — `diff(abs(x))`
+        // prints `x / |x|` — and it is why it is spelled this way rather than
+        // as `sgn(u)`: `x / |x|` is built out of functions this port already
+        // has, and it cancels against the `1/|u|` that `d/du ln|u|` puts next
+        // to it, which is exactly the shape `integrate.rs`'s
+        // `int dx/(ax+b) = ln|ax+b|/a` rule produces.
+        //
+        // Undefined at `u = 0`, as in the C++ (which does not special-case it
+        // either).
+        bid::ABS => mul(vec![u.clone(), inv(func(bid::ABS, vec![u.clone()]))]),
         bid::EXP => func(bid::EXP, vec![u.clone()]),
         bid::LN => inv(u.clone()),
         bid::LOG if args.len() == 1 => inv(u.clone()),

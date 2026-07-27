@@ -919,6 +919,27 @@ impl Number {
             0
         };
         let neg = z.sign() == Sign::Minus;
+        // Extremely large integers are printed from their significant digits
+        // rather than spelled out — Number.cc:11563, which hands the value to
+        // the floating-point printer. `print_float_significant` applies the
+        // magnitude half of the guard itself and declines when the exact route
+        // is affordable.
+        if pp.approx
+            || (base == 10
+                && po.min_exp != 0
+                && (po.restrict_fraction_length
+                    || matches!(
+                        po.number_fraction_format,
+                        NumberFractionFormat::Decimal | NumberFractionFormat::DecimalExact
+                    )))
+            || size_in_base(z.magnitude(), base.max(2) as u32)
+                > if po.base == 10 { 1_000_000 } else { 100_000 }
+        {
+            let r = BigRational::from_integer(z.clone());
+            if let Some(s) = self.print_float_significant(&r, &pp, po) {
+                return s;
+            }
+        }
         if let Some(s) = self.print_integer_binary_bits(z, po, neg) {
             return s;
         }
@@ -1159,6 +1180,22 @@ impl Number {
         } else {
             0
         };
+        // A ratio whose numerator and denominator are wildly different lengths
+        // is printed from its significant digits — Number.cc:12660. Without
+        // this the long division below walks one digit per iteration through
+        // every leading zero of a value like `2^-10000000`, which is three
+        // million full-width divisions and never finishes.
+        if pp.approx
+            || (po.min_exp != 0 && base == 10)
+            || (size_in_base(r.numer().magnitude(), base as u32)
+                - size_in_base(r.denom().magnitude(), base as u32))
+            .abs()
+                > if po.base == 10 { 1_000_000 } else { 100_000 }
+        {
+            if let Some(s) = self.print_float_significant(r, &pp, po) {
+                return s;
+            }
+        }
         let precision = pp.precision;
         let mut precision_base = pp.precision_base;
         let d = r.denom().magnitude().clone();
@@ -1860,6 +1897,352 @@ fn round_quotient_frac(
     quo
 }
 
+// ---------------------------------------------------------------------------
+// The float-domain significant-digit printer (Number.cc:12340-12654).
+//
+// `print_float` hands the printer the float's *exact* binary rational, and the
+// rational printer then reaches the digits it needs by long division, one digit
+// per iteration. That is fine while the exponent is small and ruinous once it
+// is not: `2^-10000000` has to walk past three million leading zeroes before
+// the first significant digit appears, each step a full-width division by a
+// ten-million-bit denominator, and `2^10000000` has to spell out three million
+// digits only to keep ten of them.
+//
+// The reference never does that. `Number::print` sends a float straight to the
+// block at Number.cc:12340, which asks for `precision` significant digits and
+// nothing else: take `i_log = floor(log_base |v|)`, divide `v` by
+// `base^(i_log − precision + 1)`, round *that* to an integer, and read the
+// decimal exponent off `i_log`. The digit string is `precision` characters long
+// however large the exponent is, and the only work proportional to the exponent
+// is the single power of the base — one `mpz_ui_pow_ui` in the C++, one
+// `BigUint::pow` here.
+//
+// The port keeps its existing exact-rational path for ordinary magnitudes: it
+// is what every passing transcript row was measured against, and for a value
+// whose exponent fits in a few hundred digits the exact route is both cheap and
+// correct. The rewrite takes over exactly where the reference itself gives up
+// on exact digits — `precision_base + min_decimals + 1000 + |min_exp| < length`,
+// the guard the C++ uses to divert huge integers (Number.cc:11563) and huge
+// rationals (Number.cc:12660) into this same float path.
+// ---------------------------------------------------------------------------
+
+/// `mpz_sizeinbase(z, base)` — the digit count of `z` in `base`, GMP's
+/// definition (1 for zero). Approximated from the bit length, which is all the
+/// thousand-digit slack in the guard below needs.
+fn size_in_base(x: &BigUint, base: u32) -> i64 {
+    if x.is_zero() {
+        return 1;
+    }
+    ((x.bits() as f64) / (base as f64).log2()).floor() as i64 + 1
+}
+
+/// `log2` of a positive `BigUint`, to double precision.
+fn log2_biguint(x: &BigUint) -> f64 {
+    let bits = x.bits();
+    if bits == 0 {
+        return f64::NEG_INFINITY;
+    }
+    if bits <= 64 {
+        return (x.to_u64().unwrap() as f64).log2();
+    }
+    let top = (x >> (bits - 64)).to_u64().unwrap();
+    (bits as f64 - 64.0) + (top as f64).log2()
+}
+
+/// `base^n`, reusing `cache = base^cache_exp` when the two exponents are close
+/// enough that scaling by a small power beats recomputing the big one.
+///
+/// The powers this path needs are `base^|i_log|` and `base^|i_log − precision + 1|`,
+/// which differ by at most a precision's worth of digits; recomputing the second
+/// from scratch would double the only expensive step in the whole printer.
+fn base_pow(base: u32, n: u64, cache: Option<(&BigUint, u64)>) -> BigUint {
+    if let Some((c, ce)) = cache {
+        if n == ce {
+            return c.clone();
+        }
+        // `c` is an exact power of `base`, so both adjustments are exact.
+        if n < ce && ce - n <= 100_000 {
+            return c / BigUint::from(base).pow((ce - n) as u32);
+        }
+        if n > ce && n - ce <= 100_000 {
+            return c * BigUint::from(base).pow((n - ce) as u32);
+        }
+    }
+    BigUint::from(base).pow(n as u32)
+}
+
+/// `integer_log(v, base)` (Number.cc:105) for the positive exact rational
+/// `num/den`, together with `base^|i_log|` — the caller needs both and the
+/// power is what determines the answer.
+///
+/// The bit lengths give `floor(log_base v)` to within a digit; the loop then
+/// settles it against the real power, adjusting the cached power by a single
+/// factor of the base each time rather than raising it again.
+fn integer_log_base(num: &BigUint, den: &BigUint, base: u32) -> Option<(i64, BigUint)> {
+    let lg = (log2_biguint(num) - log2_biguint(den)) / (base as f64).log2();
+    if !lg.is_finite() || lg.abs() > 4.0e9 {
+        return None;
+    }
+    let mut e = lg.floor() as i64;
+    let mut p = base_pow(base, e.unsigned_abs(), None);
+    let big_base = BigUint::from(base);
+    for _ in 0..64 {
+        // `lo`/`hi` compare v against base^e and base^(e+1) without dividing.
+        let (below, above) = if e >= 0 {
+            let dp = den * &p;
+            (num < &dp, *num >= &dp * &big_base)
+        } else {
+            let np = num * &p;
+            (np < *den, np >= den * &big_base)
+        };
+        if below {
+            e -= 1;
+            p = if e >= 0 { &p / &big_base } else if e == -1 { big_base.clone() } else { &p * &big_base };
+        } else if above {
+            let old = e;
+            e += 1;
+            p = if old >= 0 { &p * &big_base } else if e == 0 { BigUint::one() } else { &p / &big_base };
+        } else {
+            return Some((e, p));
+        }
+    }
+    None
+}
+
+impl Number {
+    /// The float printer's significant-digit path — Number.cc:12340-12654 for a
+    /// point value.
+    ///
+    /// Returns `None` for anything it does not handle, in which case the caller
+    /// keeps the exact-rational route: a magnitude the exact route can afford,
+    /// a base outside 2..=36, zero, or a `mid` whose logarithm cannot be pinned
+    /// down.
+    fn print_float_significant(
+        &self,
+        mid: &BigRational,
+        pp: &PrintPrecision,
+        po: &PrintOptions,
+    ) -> Option<String> {
+        let base = po.base;
+        if !(2..=36).contains(&base) || mid.is_zero() {
+            return None;
+        }
+        let base_u = base as u32;
+        let min_decimals: i64 = if po.use_min_decimals && po.min_decimals > 0 {
+            po.min_decimals as i64
+        } else {
+            0
+        };
+
+        let neg = mid.is_negative();
+        let num = mid.numer().magnitude().clone();
+        let den = mid.denom().magnitude().clone();
+
+        // The reference's own "too big to spell out" guard (Number.cc:11563,
+        // 12660). Below it the exact path is affordable and is what the port's
+        // measured behaviour is built on.
+        let magnitude = size_in_base(&num, base_u) - size_in_base(&den, base_u);
+        if pp.precision_base + min_decimals + 1000 + (po.min_exp as i64).abs() >= magnitude.abs() {
+            return None;
+        }
+
+        let (i_log_exact, pow_i_log) = integer_log_base(&num, &den, base_u)?;
+        let pow_cache = (&pow_i_log, i_log_exact.unsigned_abs());
+
+        // Number.cc:12307 — the float path counts digits in the output base,
+        // not decimal digits, so ten decimal digits become eight hexadecimal
+        // ones before the loop starts.
+        let mut precision = pp.precision_base;
+        let mut precision_base = pp.precision_base;
+        let mut i_precision_base = pp.i_precision_base;
+        let mut rerun = false;
+        let mut rerun2 = false;
+
+        loop {
+            // `rerun2` re-enters with the exponent bumped, and a `rerun`
+            // supersedes it (Number.cc:12342).
+            if rerun {
+                rerun2 = false;
+            }
+            let i_log = i_log_exact + i64::from(rerun2);
+
+            let mut expo: i64 = 0;
+            if (base == 10 || i_log > 10_000 || i_log < -10_000) && !po.preserve_format {
+                expo = i_log;
+                if po.min_exp == exp_mode::PRECISION
+                    || (po.min_exp == exp_mode::NONE && (expo > 100_000 || expo < -100_000))
+                    || (base != 10 && (expo > 10_000 || expo < -10_000))
+                {
+                    let mut precexp = i_precision_base;
+                    let prec_add: i64 = if po.use_max_decimals && po.max_decimals < -1 {
+                        0
+                    } else if precision < 8 {
+                        2
+                    } else {
+                        3
+                    };
+                    if precexp > precision + prec_add {
+                        precexp = precision + prec_add;
+                    }
+                    if (expo > 0 && expo < precexp) || (expo < 0 && expo > -precision) {
+                        if expo >= i_precision_base {
+                            i_precision_base = expo + 1;
+                        }
+                        if expo >= precision_base {
+                            precision_base = expo + 1;
+                        }
+                        if expo >= precision {
+                            precision = expo + 1;
+                        }
+                        expo = 0;
+                    }
+                } else if po.min_exp < -1 {
+                    if expo < 0 {
+                        let mut expo_rem = (-expo) % (-po.min_exp as i64);
+                        if expo_rem > 0 {
+                            expo_rem = (-po.min_exp as i64) - expo_rem;
+                        }
+                        expo -= expo_rem;
+                        if expo > 0 {
+                            expo = 0;
+                        }
+                    } else if expo > 0 {
+                        expo -= expo % (-po.min_exp as i64);
+                        if expo < 0 {
+                            expo = 0;
+                        }
+                    }
+                } else if po.min_exp != 0 {
+                    if expo > -(po.min_exp as i64) && expo < po.min_exp as i64 {
+                        expo = 0;
+                    }
+                } else {
+                    expo = 0;
+                }
+            }
+
+            if !rerun
+                && i_precision_base > precision_base
+                && min_decimals > 0
+                && min_decimals > precision - 1 - (i_log - expo)
+            {
+                precision = min_decimals + 1 + (i_log - expo);
+                if precision > i_precision_base {
+                    precision = i_precision_base;
+                }
+                rerun = true;
+                continue;
+            }
+            if expo == 0 && i_log > precision {
+                precision = if i_precision_base > i_log + 1 { i_log + 1 } else { i_precision_base };
+            }
+            // Number.cc:12406 — how far below the leading digit the last kept
+            // digit sits, either `precision − 1` digits or wherever
+            // `max_decimals` cuts the value off, whichever is nearer.
+            let drop = if po.use_max_decimals
+                && po.max_decimals >= 0
+                && precision > po.max_decimals as i64 + i_log - expo
+            {
+                po.max_decimals as i64 + i_log - expo
+            } else {
+                precision - 1
+            };
+            let scale_log = i_log - drop;
+            let l10 = expo - scale_log;
+
+            // `ivalue = round(|mid| / base^scale_log)`, exactly — the C++'s
+            // `mpfr_div_z` + `MPFR_ROUND_PO` + `mpfr_get_z`. The quotient is
+            // `precision` digits wide whatever the operands are, so the
+            // division costs one pass over them, not one pass per digit.
+            let pw = base_pow(base_u, scale_log.unsigned_abs(), Some(pow_cache));
+            let (quo, rem, div) = if scale_log >= 0 {
+                let d2 = &den * &pw;
+                let (q, r) = num_integer::Integer::div_rem(&num, &d2);
+                (q, r, d2)
+            } else {
+                let n2 = &num * &pw;
+                let (q, r) = num_integer::Integer::div_rem(&n2, &den);
+                (q, r, den.clone())
+            };
+            let ivalue = if rem.is_zero() {
+                quo
+            } else {
+                round_quotient(quo, &rem, &div, neg, po)
+            };
+
+            let mut str = ivalue.to_str_radix(base_u);
+            if base > 10 && !po.lower_case_numbers {
+                str = str.to_uppercase();
+            }
+            // Rounding carried into a new leading digit ("10" where one digit
+            // was asked for): retry one exponent higher (Number.cc:12447).
+            if !rerun
+                && !rerun2
+                && expo != 0
+                && po.min_exp >= -1
+                && str.len() >= 2
+                && str.len() as i64 - l10 == 2
+                && str.starts_with("10")
+            {
+                rerun2 = true;
+                continue;
+            }
+
+            let point = po.decimalpoint().to_string();
+            let mut l10 = l10;
+            if l10 > 0 {
+                l10 = str.len() as i64 - l10;
+                if l10 < 1 {
+                    str.insert_str(0, &"0".repeat((1 - l10) as usize));
+                    l10 = 1;
+                }
+                str.insert_str(l10 as usize, &point);
+                let mut l2: i64 = 0;
+                {
+                    let bytes = str.as_bytes();
+                    while (l2 as usize) < bytes.len() && bytes[bytes.len() - 1 - l2 as usize] == b'0'
+                    {
+                        l2 += 1;
+                    }
+                }
+                if l2 > 0 && !po.show_ending_zeroes {
+                    if min_decimals > 0 {
+                        let decimals = str.len() as i64 - l10 - point.len() as i64;
+                        if decimals - min_decimals < l2 {
+                            l2 = decimals - min_decimals;
+                        }
+                    }
+                    if l2 > 0 {
+                        str.truncate(str.len() - l2 as usize);
+                    }
+                }
+                if str.ends_with(&point) {
+                    str.truncate(str.len() - point.len());
+                }
+            } else if l10 < 0 {
+                str.push_str(&"0".repeat((-l10) as usize));
+            }
+
+            if str.is_empty() {
+                str = "0".to_string();
+            }
+            if str.ends_with(&point) {
+                str.truncate(str.len() - point.len());
+            }
+
+            let mut out = if base != 10 && expo > 0 {
+                let mut po2 = po.clone();
+                po2.binary_bits = 0;
+                format_number_string(str, base, po.base_display, neg, true, &po2)
+            } else {
+                format_number_string(str, base, po.base_display, neg, true, po)
+            };
+            add_base_exponent(&mut out, expo, base, po);
+            return Some(out);
+        }
+    }
+}
+
 /// floor(log_base(10^prec − 1)): digits available in `base` for `prec`
 /// decimal digits.
 fn digits_in_base(prec: i64, base: i64) -> i64 {
@@ -2219,5 +2602,79 @@ mod plusminus_tests {
         let mut po2 = pm_options();
         po2.spacious = true;
         assert!(re.print(&po2).contains(" - "), "got {}", re.print(&po2));
+    }
+}
+
+/// The float-domain significant-digit path — `print_float_significant`.
+#[cfg(test)]
+mod significant_digit_tests {
+    use crate::options::PrintOptions;
+    use crate::Number;
+
+    /// `b^e`, printed with the given options.
+    fn printed_power(b: i64, e: i64, po: &PrintOptions) -> String {
+        let mut n = Number::from_i64(b);
+        assert!(n.raise(&Number::from_i64(e), true), "{b}^{e} did not evaluate");
+        n.print(po)
+    }
+
+    /// An exponent in the millions costs no more digits than one in the tens.
+    ///
+    /// Every one of these used to be printed by materialising the value's exact
+    /// decimal expansion: `2^10000000` spelled out three million digits to keep
+    /// ten of them, and the two negative exponents walked the long division one
+    /// digit at a time through three million and four hundred thousand leading
+    /// zeroes respectively — quadratic, and `2^-10000000` never returned at
+    /// all. That this test *terminates* is as much the assertion as the values.
+    ///
+    /// Oracle: `qalc -t` on each expression.
+    #[test]
+    fn a_millionfold_exponent_costs_ten_digits_like_any_other() {
+        let po = PrintOptions::default();
+        assert_eq!(printed_power(2, 10_000_000, &po), "9.049817306E3010299");
+        assert_eq!(printed_power(2, -10_000_000, &po), "1.104994682E-3010300");
+        assert_eq!(printed_power(3, 10_000_000, &po), "3.525304411E4771212");
+        assert_eq!(printed_power(7, 20_000, &po), "9.136929736E16901");
+        assert_eq!(printed_power(10, 5_000, &po), "1E5000");
+
+        let mut third = Number::from_i64(1);
+        assert!(third.divide(&Number::from_i64(3)));
+        assert!(third.raise(&Number::from_i64(1_000_000), true));
+        assert_eq!(third.print(&po), "5.562632099E-477122");
+    }
+
+    /// The reference stops spelling values out at `precision_base + 1000`
+    /// digits (Number.cc:11563, 12660) and prints their significant digits
+    /// instead, and the switch is visible: `10^1011` keeps the exact `1`,
+    /// `10^1012` is padded out to the working precision.
+    ///
+    /// Oracle: `qalc -t` gives `1E1011` and `1.000000000E1012`.
+    #[test]
+    fn the_exact_digit_route_gives_way_at_the_reference_s_own_threshold() {
+        let mut po = PrintOptions::default();
+        po.show_ending_zeroes = true;
+        assert_eq!(printed_power(10, 1011, &po), "1E1011");
+        assert_eq!(printed_power(10, 1012, &po), "1.000000000E1012");
+        assert_eq!(printed_power(10, -1011, &po), "1E-1011");
+        assert_eq!(printed_power(10, -1012, &po), "1.000000000E-1012");
+    }
+
+    /// The significant digits are counted in the output base, not in decimal:
+    /// ten decimal digits are eight hexadecimal ones and eleven octal ones
+    /// (Number.cc:12307).
+    ///
+    /// Oracle: `3^10000000 to hex` is `0x2.0290D39 × 0x10^0x3C7626` and
+    /// `2^10000000 to oct` is `02.0000000000 × 010^014556325` — the mantissas
+    /// asserted here. The exponent still prints in decimal rather than in the
+    /// output base, which is a gap in `add_base_exponent`, not in this path.
+    #[test]
+    fn significant_digits_are_counted_in_the_output_base() {
+        let mut po = PrintOptions::default();
+        po.show_ending_zeroes = true;
+        po.base = 16;
+        assert_eq!(printed_power(3, 10_000_000, &po), "0x2.0290D39 * 16^3962406");
+        assert_eq!(printed_power(2, 10_000_000, &po), "0x1.0000000 * 16^2500000");
+        po.base = 8;
+        assert_eq!(printed_power(2, 10_000_000, &po), "02.0000000000 * 8^3333333");
     }
 }

@@ -26,6 +26,30 @@
 //! Adaptive-mode subtlety verified against the reference binary: division
 //! followed by an unspaced implicit product binds the whole product into the
 //! denominator (`1/2x` → `1/(2x)`), but a space breaks it (`1/2 x` → `0.5x`).
+//!
+//! # `name(…)`
+//!
+//! The C++ name loop matches the longest *known* name at each position and
+//! never treats an unrecognised one specially, so `name(args)` has exactly
+//! three outcomes here, in this order:
+//!
+//! 1. A function this port implements — the call becomes a
+//!    [`MathStructure::Function`] the evaluator reduces.
+//! 2. A function the shipped XML definitions declare that this port has *not*
+//!    implemented ([`unimplemented_function`]) — the call becomes a `Function`
+//!    node carrying its registry id, which no evaluator arm claims, so it
+//!    survives to output as `airy(0)`. The reference prints a number there;
+//!    printing the call back is wrong in a visible way rather than in a silent
+//!    one, which is the point: before this existed `airy(0)` decomposed into
+//!    `airy * 0` and answered `0`.
+//! 3. A name nothing at all answers to — the identifier is resolved like any
+//!    other (usually splitting into a product of one-letter names) and the
+//!    parenthesis becomes an implicit multiplication, exactly as the reference
+//!    does it: `zzz(2)` is `2z^3` and `xyzzy(2)` is `2xy^2 * z^2` there.
+//!    (What the product then *prints* as is a separate question — this port
+//!    orders the factors of a symbolic product differently, and resolves
+//!    fewer one-letter names than the reference: it has no `q`, and does not
+//!    read `foo` as femto-octet times octet.)
 
 use crate::ids::FunctionId;
 use crate::lexer::{Tok, Token};
@@ -47,27 +71,47 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
-/// How deeply the recursive-descent ladder may nest before the parser gives
-/// up with a [`ParseError`] instead of running the stack out.
+/// How deeply expressions may nest before the parser gives up with a
+/// [`ParseError`] instead of running the stack out — 50000, the depth the
+/// reference binary swallows (`(((…1+2…)))` with 50000 parentheses answers
+/// `3` there).
+///
+/// One level is one *nesting* step: a grouping construct (`(…)`, `[…]`,
+/// `{…}`, `|…|`, a call argument list), one right-associative `^`, or one
+/// leading `-`/`+`/`~`/`!`. The counter is taken at the three points where
+/// the ladder re-enters itself and released on the way back out, so
+/// `((1))+((2))` peaks at two, not four.
 ///
 /// The C++ parser rewrites strings and keeps its pending groups on the heap,
-/// so it happily swallows tens of thousands of nested parentheses. This port
-/// descends the precedence ladder recursively, which trades that headroom for
-/// speed: one `(…)` level costs about eighteen frames (~9 KB in release,
-/// ~50 KB in a debug build), so a few thousand parentheses overflow an 8 MiB
-/// stack and abort the process — a crash no `Result` can catch.
+/// so depth costs it nothing. This port descends the precedence ladder
+/// recursively, and one grouping level costs about eighteen frames — measured
+/// at 8.8 KB in release and 46.5 KB in a debug build. 50000 of them is far
+/// more than any ordinary thread stack holds, which is why a parse that could
+/// go deep is moved onto a thread sized for it (see [`parse_with`]); this
+/// constant is the backstop that keeps even that thread inside the stack it
+/// was given.
+pub const MAX_PARSE_DEPTH: u32 = 50_000;
+
+/// Measured cost of one grouping level, rounded up for margin: the ladder is
+/// `parse_expression` → … → `parse_primary`, ~18 frames, and a debug build
+/// spends about five times what release does on the same frames. Measured at
+/// 8800 bytes in release and 47090 in debug.
+const BYTES_PER_GROUP_LEVEL: usize = if cfg!(debug_assertions) { 64 << 10 } else { 12 << 10 };
+
+/// The same for a level that re-enters the ladder near its bottom — one `^`
+/// or one leading sign, a handful of frames rather than eighteen. Measured at
+/// 528/672 bytes in release and 2770/3554 in debug.
+const BYTES_PER_SIGN_LEVEL: usize = if cfg!(debug_assertions) { 6 << 10 } else { 1 << 10 };
+
+/// The deepest nesting attempted on whatever stack the caller happens to be
+/// on, rather than on a stack this module sized itself.
 ///
-/// The counter is bumped at the three points where the ladder can re-enter
-/// itself — [`Parser::parse_expression`] (grouping: `(`, `[`, `|…|`, call
-/// arguments), [`Parser::parse_power`] (right-associative `^`) and
-/// [`Parser::parse_unary`] (leading `-`/`+`/`~`/`!`) — so a parenthesis level
-/// counts three, a `^` level two and a sign one.
-///
-/// 300 therefore allows ~100 nested parentheses, ~150 nested exponents and
-/// 300 leading signs. Reaching the limit costs ~0.9 MB of stack in release
-/// and ~5 MB in a debug build, both of which fit the 8 MiB main thread with
-/// room left for the evaluation pass over the tree that was just built.
-pub const MAX_PARSE_DEPTH: u32 = 300;
+/// Sized to fit the 2 MiB a libtest thread gets — the smallest stack this
+/// code realistically runs on — with room to spare for the evaluation pass
+/// that follows the parse. Everything deeper is moved onto its own thread by
+/// [`parse_with`], so this bound is never what refuses a real expression: it
+/// only bounds inputs [`DepthBound`] has already proved shallow.
+const INLINE_PARSE_DEPTH: u32 = if cfg!(debug_assertions) { 20 } else { 100 };
 
 thread_local! {
     /// Current nesting depth. A thread-local rather than a `Parser` field
@@ -75,6 +119,11 @@ thread_local! {
     /// `Parser` ([`Parser::parse_sub`]), which would otherwise restart the
     /// count at every bracket level.
     static PARSE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// The depth this thread's stack can actually hold: [`MAX_PARSE_DEPTH`]
+    /// on a thread [`parse_deep`] spawned and sized, [`INLINE_PARSE_DEPTH`]
+    /// on any other.
+    static DEPTH_LIMIT: std::cell::Cell<u32> =
+        const { std::cell::Cell::new(INLINE_PARSE_DEPTH) };
 }
 
 /// Holds one level of [`PARSE_DEPTH`], releasing it on every exit path
@@ -85,7 +134,10 @@ impl DepthGuard {
     fn enter() -> Option<DepthGuard> {
         PARSE_DEPTH.with(|d| {
             let depth = d.get();
-            if depth >= MAX_PARSE_DEPTH {
+            // `>` rather than `>=`: the outermost expression is a level of
+            // this ladder without being *nested* in anything, so the limit
+            // counts the levels below it — 50000 parentheses, not 49999.
+            if depth > DEPTH_LIMIT.with(|l| l.get()) {
                 return None;
             }
             d.set(depth + 1);
@@ -107,7 +159,9 @@ impl Drop for DepthGuard {
 /// [`crate::session::Session`] is the real implementation, backed by the unit
 /// and definition registries. [`SymbolicResolver`] — every name becomes a
 /// symbol — is what bare [`parse`] uses, for callers that only want a tree.
-pub trait NameResolver {
+/// `Sync` because [`parse_with`] hands deep expressions to a scoped thread,
+/// which shares the resolver with the thread that is blocked joining it.
+pub trait NameResolver: Sync {
     /// Resolve `name` to a structure (variable, unit, or constant).
     fn resolve(&self, name: &str) -> Option<MathStructure>;
     /// Resolve `name` to a function id, if it names a function.
@@ -138,7 +192,146 @@ impl NameResolver for SymbolicResolver {
 }
 
 /// Parse `expr` into a `MathStructure` using `resolver` for names.
+///
+/// Deep input is parsed on a thread of its own. The recursive ladder costs
+/// ~8.8 KB of stack per nesting level in release and ~46.5 KB in a debug
+/// build, so the [`MAX_PARSE_DEPTH`] the reference allows needs hundreds of
+/// megabytes — orders of magnitude more than the 8 MiB main thread, and
+/// overflowing it aborts the process instead of returning an error. Rather
+/// than refuse those expressions (the reference accepts them) or pay a thread
+/// for every parse (a thread does not inherit the thread-local calculator
+/// settings, and the vast majority of expressions nest a handful of levels),
+/// [`DepthBound`] decides: anything it proves shallow is parsed right here,
+/// anything else moves to a thread sized for exactly that input.
 pub fn parse_with(
+    expr: &str,
+    po: &ParseOptions,
+    resolver: &dyn NameResolver,
+) -> Result<MathStructure, ParseError> {
+    // `[…]` elements and text arguments are re-parsed through here by
+    // `Parser::parse_sub`; a sub-expression cannot be deeper than the whole,
+    // so once the deep thread is running there is nothing left to hand off.
+    let bound = DepthBound::of(expr);
+    if bound.total() <= INLINE_PARSE_DEPTH as usize
+        || DEPTH_LIMIT.with(|l| l.get()) > INLINE_PARSE_DEPTH
+    {
+        return parse_here(expr, po, resolver);
+    }
+    parse_deep(expr, po, resolver, bound)
+}
+
+/// An upper bound on the nesting `expr` can reach, split by what a level of
+/// each kind costs in stack.
+///
+/// Every level [`DepthGuard`] counts needs a character of its own: an opening
+/// bracket or `|` for a group, `^` for an exponent, a sign for unary. Counting
+/// those characters therefore cannot under-report, and non-ASCII bytes are
+/// counted as groups (the dearer kind) so the operators the lexer spells in
+/// Unicode (`−`, `¬`, `√`) are covered without enumerating them.
+struct DepthBound {
+    /// `(`, `[`, `{`, `|` and anything non-ASCII.
+    groups: usize,
+    /// `^` and the leading signs `-`, `+`, `~`, `!`.
+    signs: usize,
+}
+
+impl DepthBound {
+    fn of(expr: &str) -> DepthBound {
+        let mut b = DepthBound { groups: 0, signs: 0 };
+        for byte in expr.bytes() {
+            match byte {
+                b'(' | b'[' | b'{' | b'|' => b.groups += 1,
+                b'^' | b'-' | b'+' | b'~' | b'!' => b.signs += 1,
+                _ if !byte.is_ascii() => b.groups += 1,
+                _ => {}
+            }
+        }
+        b
+    }
+
+    fn total(&self) -> usize {
+        self.groups + self.signs
+    }
+
+    /// Stack big enough for every level this input can reach, whatever order
+    /// they nest in — each kind is bounded separately, so the sum holds for
+    /// any interleaving. [`MAX_PARSE_DEPTH`] caps the total, so a pathological
+    /// input asks for a bounded stack rather than an impossible one.
+    fn stack_size(&self) -> usize {
+        let cap = MAX_PARSE_DEPTH as usize;
+        let groups = self.groups.min(cap);
+        let signs = self.signs.min(cap - groups);
+        // The slack covers the frames above and below the ladder.
+        groups * BYTES_PER_GROUP_LEVEL + signs * BYTES_PER_SIGN_LEVEL + (1 << 20)
+    }
+}
+
+/// [`parse_with`] on a thread with a stack sized for `bound` nesting levels.
+///
+/// The thread is scoped and joined immediately, so `expr`, `po` and `resolver`
+/// stay borrowed. What it does *not* inherit is this thread's calculator
+/// settings, which are thread-locals in both `qalc-num` and here — precision
+/// above all, since `Number::parse` rounds literals to it — so those are
+/// carried over explicitly.
+fn parse_deep(
+    expr: &str,
+    po: &ParseOptions,
+    resolver: &dyn NameResolver,
+    bound: DepthBound,
+) -> Result<MathStructure, ParseError> {
+    let settings = ThreadSettings::capture();
+    let spawned = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("qalc-parse".into())
+            .stack_size(bound.stack_size())
+            .spawn_scoped(scope, || {
+                settings.install();
+                DEPTH_LIMIT.with(|l| l.set(MAX_PARSE_DEPTH));
+                parse_here(expr, po, resolver)
+            })
+            .map(|handle| handle.join())
+    });
+    match spawned {
+        Ok(Ok(result)) => result,
+        // A panic inside the parse is still a bug, not a deep expression:
+        // re-raise it on this thread rather than turning it into an error.
+        Ok(Err(panic)) => std::panic::resume_unwind(panic),
+        // The stack could not be reserved. Parsing here cannot overflow —
+        // `DEPTH_LIMIT` is still the inline bound — it just refuses sooner.
+        Err(_) => parse_here(expr, po, resolver),
+    }
+}
+
+/// The thread-local calculator settings a parse reads, copied to the thread
+/// [`parse_deep`] spawns. Everything else the parser consults (the unit and
+/// definition registries) is process-wide.
+struct ThreadSettings {
+    precision: i32,
+    create_interval: bool,
+    interval_calculation: qalc_num::context::IntervalCalculation,
+    assumption: crate::assumptions::Sign,
+}
+
+impl ThreadSettings {
+    fn capture() -> ThreadSettings {
+        ThreadSettings {
+            precision: qalc_num::context::precision(),
+            create_interval: qalc_num::context::create_interval(),
+            interval_calculation: qalc_num::context::interval_calculation(),
+            assumption: crate::assumptions::sign(),
+        }
+    }
+
+    fn install(&self) {
+        qalc_num::context::set_precision(self.precision);
+        qalc_num::context::set_create_interval(self.create_interval);
+        qalc_num::context::set_interval_calculation(self.interval_calculation);
+        crate::assumptions::set_sign(self.assumption);
+    }
+}
+
+/// [`parse_with`] on the calling thread, whatever its stack.
+fn parse_here(
     expr: &str,
     po: &ParseOptions,
     resolver: &dyn NameResolver,
@@ -163,6 +356,27 @@ pub fn parse_with(
 /// Parse `expr` with every name left symbolic.
 pub fn parse(expr: &str, po: &ParseOptions) -> Result<MathStructure, ParseError> {
     parse_with(expr, po, &SymbolicResolver)
+}
+
+/// The id of a function the shipped XML definitions declare but no module of
+/// this port implements — `airy`, `besselj`, `bitget` and two hundred others
+/// out of the 422 in `data/functions.xml` (`crate::defs`).
+///
+/// Their ids carry [`crate::ids::REGISTRY_ID_BIT`], which no evaluator arm
+/// matches, so a call built from one is left standing and prints back as
+/// written. That is the whole purpose: the alternative is a silent product,
+/// and `airy(0)` = `airy * 0` = `0` looks like an answer.
+///
+/// The registry is only consulted once it exists — building it re-enters the
+/// parser to read unit relations, so this must not be what triggers the
+/// build. Every parse driven by a [`crate::session::Session`] is past that
+/// point, because `Session::new` builds the registry before it parses
+/// anything; a bare [`parse`] in a process that never built one sees no
+/// definitions here either, and takes outcome 3 for every name.
+fn unimplemented_function(name: &str) -> Option<FunctionId> {
+    crate::units::store_if_ready()?
+        .registry()
+        .find_function_id(name)
 }
 
 struct Parser<'a> {
@@ -219,7 +433,10 @@ impl<'a> Parser<'a> {
         match DepthGuard::enter() {
             Some(g) => Ok(g),
             None => Err(ParseError {
-                message: format!("expression nested deeper than {MAX_PARSE_DEPTH} levels"),
+                message: format!(
+                    "expression nested deeper than {} levels",
+                    DEPTH_LIMIT.with(|l| l.get())
+                ),
                 pos: self.pos(),
             }),
         }
@@ -275,7 +492,8 @@ impl<'a> Parser<'a> {
 
     fn parse_expression(&mut self) -> Result<MathStructure, ParseError> {
         // Every grouping construct — `(…)`, `[…]`, `|…|`, a call argument —
-        // re-enters the ladder here, so this is where nesting is counted.
+        // re-enters the ladder here, so this is where a grouping level is
+        // counted, exactly once per level.
         let _depth = self.enter()?;
         let left = self.parse_dot()?;
         // `expr to <target>` — the conversion operator binds loosest of all
@@ -731,11 +949,12 @@ impl<'a> Parser<'a> {
 
     /// `^` — right-associative, binds tighter than implicit multiplication.
     fn parse_power(&mut self) -> Result<MathStructure, ParseError> {
-        // Right-associative, so `2^2^2^…` recurses once per operator.
-        let _depth = self.enter()?;
         let base = self.parse_unary()?;
         if *self.peek() == Tok::ElementPower {
             self.bump();
+            // Right-associative, so `2^2^2^…` recurses once per operator and
+            // takes a nesting level for each.
+            let _depth = self.enter()?;
             let exp = self.parse_power()?;
             return Ok(MathStructure::Function {
                 id: FunctionId(crate::matrix::id::ENTRYWISE_POWER),
@@ -746,6 +965,7 @@ impl<'a> Parser<'a> {
             self.bump();
             // Right-associative: 2^3^2 = 2^(3^2). The exponent is parsed at
             // unary level so `2^-1` works and `2^3x` is `(2^3)x`.
+            let _depth = self.enter()?;
             let exp = self.parse_power()?;
             let mut m = base;
             m.raise(exp);
@@ -755,11 +975,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_unary(&mut self) -> Result<MathStructure, ParseError> {
-        // A run of leading signs (`----…1`) recurses once per sign.
-        let _depth = self.enter()?;
         match self.peek().clone() {
             Tok::Minus => {
                 self.bump();
+                // A run of leading signs (`----…1`) recurses once per sign.
+                let _depth = self.enter()?;
                 let mut m = self.parse_unary()?;
                 // `-2^2` is `-(2^2)`: bind the power before negating.
                 if matches!(self.peek(), Tok::Power | Tok::ElementPower) {
@@ -772,15 +992,18 @@ impl<'a> Parser<'a> {
             }
             Tok::Plus => {
                 self.bump();
+                let _depth = self.enter()?;
                 self.parse_unary()
             }
             Tok::BitNot => {
                 self.bump();
+                let _depth = self.enter()?;
                 let m = self.parse_unary()?;
                 Ok(MathStructure::BitwiseNot(Box::new(m)))
             }
             Tok::LogicalNot => {
                 self.bump();
+                let _depth = self.enter()?;
                 let m = self.parse_unary()?;
                 Ok(MathStructure::LogicalNot(Box::new(m)))
             }
@@ -933,26 +1156,15 @@ impl<'a> Parser<'a> {
                         let args = self.parse_call_args()?;
                         return Ok(MathStructure::Function { id: fid, args });
                     }
-                    // `name(…)` where nothing at all answers to `name` is a
-                    // call to a function that does not exist, not a product.
-                    //
-                    // The distinction matters because the fallthrough is
-                    // silent *and* lossy: `airy(0)` became `airy * 0` = `0`,
-                    // a plausible-looking number with no relation to the
-                    // 0.3550280539 the reference computes. Implicit
-                    // multiplication of *identifiers* stays untouched —
-                    // `abc` really is `are*barn*c` and `3yx^2` really is
-                    // `3*y*x^2`; the line is drawn at a name glued to a
-                    // parenthesised argument list. A name the registries do
-                    // know (`x(2)`, `m(2)`) still multiplies, as in the C++,
-                    // and so does any *single* letter: the C++ name table
-                    // spells out every one of them as a unit, a prefix or a
-                    // predefined unknown, so `f(2)` and `a(b+c)` are products
-                    // there and a one-letter unknown function does not exist.
-                    if name.chars().count() > 1 && !self.resolver.is_known_name(name) {
-                        let name = name.clone();
-                        return self.err(format!("unknown function `{name}`"));
+                    // A function the definition files declare and this port
+                    // has yet to implement: keep the call, unevaluated. See
+                    // the module docs for why it is not a product.
+                    if let Some(fid) = unimplemented_function(name) {
+                        let args = self.parse_call_args()?;
+                        return Ok(MathStructure::Function { id: fid, args });
                     }
+                    // Anything else falls through to name resolution: nothing
+                    // knows `zzz`, so `zzz(2)` is `z*z*z*2`, as in the C++.
                 }
                 match self.resolver.resolve(name) {
                     Some(m) => Ok(m),
@@ -1521,44 +1733,63 @@ mod tests {
         format!("{m}")
     }
 
-    /// Run `f` on a thread with a stack big enough for the deepest nesting
-    /// the parser accepts.
+    /// The reference binary answers `3` to `(((…1+2…)))` with 50000
+    /// parentheses, and so must this. Nothing here spawns a thread: the point
+    /// of the test is that [`parse_with`] notices the depth and provides the
+    /// stack itself, on an ordinary 2 MiB libtest thread that would otherwise
+    /// die at about the fortieth parenthesis.
     ///
-    /// Reaching [`MAX_PARSE_DEPTH`] costs about 0.9 MB of stack in release and
-    /// about 5 MB in a debug build — more than the 2 MiB the test harness
-    /// gives a test thread, and these tests run in debug.
-    fn with_deep_stack(f: impl FnOnce() + Send + 'static) {
-        std::thread::Builder::new()
-            .stack_size(32 << 20)
-            .spawn(f)
-            .expect("spawn")
-            .join()
-            .expect("no stack overflow, and no panic");
+    /// A debug build runs the same path at a tenth of the depth. The ladder
+    /// costs 47 KB of stack per parenthesis unoptimised against 8.8 KB
+    /// optimised, so the full 50000 needs ~440 MB in release but ~2.3 GB in
+    /// debug — enough to matter on a small machine, and the release run is
+    /// what proves the number.
+    #[test]
+    fn fifty_thousand_nested_parentheses_parse() {
+        assert_eq!(MAX_PARSE_DEPTH, 50_000);
+        let depth = if cfg!(debug_assertions) { 5_000 } else { 50_000 };
+        let expr = "(".repeat(depth) + "1+2" + &")".repeat(depth);
+        assert_eq!(render(&p(&expr)), "(1 + 2)");
     }
 
-    /// Each of these aborted the process with a fatal stack overflow: the
-    /// ladder is one mutually-recursive cycle that descends ~18 frames per
-    /// `(`, and the abort happens at parse time, so no `Result` could catch
-    /// it. They must now come back as ordinary parse errors.
+    /// Past [`MAX_PARSE_DEPTH`] the parser gives up in the ordinary way.
+    ///
+    /// Each of these once aborted the process with a fatal stack overflow: the
+    /// ladder is one mutually-recursive cycle, the abort happens at parse
+    /// time, and no `Result` can catch it. They must come back as parse
+    /// errors instead — the sized stack raises the ceiling, it does not
+    /// remove it.
+    ///
+    /// Signs and exponents only: they cost about 3.5 KB of stack per level in
+    /// debug against a parenthesis's 47 KB, so overrunning the limit with them
+    /// is cheap enough to do in any build (the parenthesised case is the
+    /// release-only one below).
     #[test]
     fn nesting_past_the_limit_is_an_error_not_a_stack_overflow() {
-        with_deep_stack(|| {
-            let cases = [
-                "(".repeat(2000) + "1" + &")".repeat(2000),
-                "[".repeat(500) + "1" + &"]".repeat(500),
-                "-".repeat(100_000) + "1",
-                "sin(".repeat(200) + "x" + &")".repeat(200),
-                "2^".repeat(2000) + "2",
-            ];
-            for expr in cases {
-                let err = parse(&expr, &ParseOptions::default())
-                    .expect_err("nesting past the limit is refused");
-                assert!(
-                    err.message.contains("nested deeper"),
-                    "expected a depth error, got {err}"
-                );
-            }
-        });
+        let over = MAX_PARSE_DEPTH as usize + 1000;
+        let cases = ["-".repeat(over) + "1", "2^".repeat(over) + "2"];
+        for expr in cases {
+            let err = parse(&expr, &ParseOptions::default())
+                .expect_err("nesting past the limit is refused");
+            assert!(
+                err.message.contains("nested deeper"),
+                "expected a depth error, got {err}"
+            );
+        }
+    }
+
+    /// The same for grouping, which is the expensive kind of nesting — 440 MB
+    /// of stack is reached before the limit refuses the rest, so this one runs
+    /// in release only.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "needs ~2.3 GB of stack unoptimised")]
+    fn grouping_past_the_limit_is_an_error() {
+        let expr = "(".repeat(MAX_PARSE_DEPTH as usize + 1000) + "1";
+        let err = parse(&expr, &ParseOptions::default()).expect_err("refused");
+        assert!(
+            err.message.contains("nested deeper"),
+            "expected a depth error, got {err}"
+        );
     }
 
     /// The guard is released on the way back out, so nesting that fits keeps
@@ -1566,15 +1797,33 @@ mod tests {
     /// the depth counter leaked across a parse.
     #[test]
     fn nesting_within_the_limit_still_parses() {
-        with_deep_stack(|| {
-            let expr = "(".repeat(90) + "1+2" + &")".repeat(90);
-            for _ in 0..3 {
-                assert_eq!(render(&p(&expr)), "(1 + 2)");
-            }
-            // A parse that failed on depth must give its levels back too.
-            assert!(parse(&"(".repeat(5000), &ParseOptions::default()).is_err());
+        let expr = "(".repeat(90) + "1+2" + &")".repeat(90);
+        for _ in 0..3 {
             assert_eq!(render(&p(&expr)), "(1 + 2)");
-        });
+        }
+        // A parse that failed on depth must give its levels back too.
+        let over = "-".repeat(MAX_PARSE_DEPTH as usize + 1000) + "1";
+        assert!(parse(&over, &ParseOptions::default()).is_err());
+        assert_eq!(render(&p(&expr)), "(1 + 2)");
+        // …and the count that failed was the depth, not the width: a vector
+        // of 10000 elements nests one level deep, however long it is.
+        let wide = (0..10_000).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+        assert_eq!(p(&wide).size(), 10_000);
+    }
+
+    /// A `[…]` element is re-parsed by a fresh `Parser` through `parse_sub`,
+    /// which re-enters [`parse_with`]. The depth counter is shared across
+    /// those, so brackets nest like parentheses — and the sub-parse must not
+    /// try to spawn a thread of its own once the deep one is running.
+    #[test]
+    fn bracket_nesting_shares_the_depth_budget() {
+        // A one-element bracket group is its element, so this is `1` however
+        // deeply it is wrapped — what is being tested is that getting there
+        // neither overflows nor deadlocks.
+        let expr = "[".repeat(400) + "1" + &"]".repeat(400);
+        assert_eq!(render(&p(&expr)), "1");
+        let expr = "[".repeat(400) + "1,2" + &"]".repeat(400);
+        assert_eq!(render(&p(&expr)), "[1, 2]");
     }
 
     #[test]

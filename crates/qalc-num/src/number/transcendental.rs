@@ -13,6 +13,7 @@
 //! polylogarithm (`mpfr_li2`) are still stubs — see the bottom of
 //! `special.rs`.
 
+use super::arith::{bf_abs_cmp, bf_sgn};
 use super::{Number, RealValue};
 use crate::context;
 use astro_float::{BigFloat, Consts, RoundingMode};
@@ -26,6 +27,72 @@ fn one_over_sqrt_one_minus_square(x: &Number) -> Option<Number> {
     let mut d = x.clone();
     (d.square() && d.negate() && d.add(&Number::from_i64(1)) && d.sqrt() && d.recip())
         .then_some(d)
+}
+
+/// `mpfr_atan2(y, x)` at a point, with every limit MPFR defines at a zero or
+/// an infinity. `atan(y/x)` plus a quadrant correction cannot stand in for it:
+/// `infinity/infinity` is a NaN where `atan2(+infinity, +infinity)` is pi/4.
+///
+/// `rm` rounds the *result*, which is not the same as rounding every step that
+/// way — a negated or subtracted term has to be rounded the other way for the
+/// result to come out on the requested side.
+fn atan2_bf(y: &BigFloat, x: &BigFloat, p: usize, rm: RoundingMode) -> BigFloat {
+    if y.is_nan() || x.is_nan() {
+        return BigFloat::nan(None);
+    }
+    // IEEE-754 `atan2` reads the sign of a zero, so does this: `atan2(0, -0)`
+    // is pi, not 0.
+    let x_neg = matches!(x.sign(), Some(astro_float::Sign::Neg));
+    let y_neg = matches!(y.sign(), Some(astro_float::Sign::Neg));
+    let opp = match rm {
+        RoundingMode::Down => RoundingMode::Up,
+        RoundingMode::Up => RoundingMode::Down,
+        other => other,
+    };
+    // The magnitude of every closed-form case below is negated when y < 0, so
+    // it has to be rounded the other way round.
+    let mag = if y_neg { opp } else { rm };
+    let signed = |v: BigFloat| if y_neg { v.neg() } else { v };
+    let n = |i: i8| BigFloat::from_i8(i, p);
+    if y.is_zero() {
+        return if x_neg {
+            signed(context::with_consts(|cc| cc.pi(p, mag)))
+        } else {
+            y.clone()
+        };
+    }
+    if x.is_zero() {
+        return signed(context::with_consts(|cc| cc.pi(p, mag)).div(&n(2), p, mag));
+    }
+    if y.is_inf() {
+        if x.is_inf() {
+            // The diagonals: ±pi/4 and ±3pi/4.
+            let pi = context::with_consts(|cc| cc.pi(p, mag));
+            return signed(if x_neg {
+                pi.mul(&n(3), p, mag).div(&n(4), p, mag)
+            } else {
+                pi.div(&n(4), p, mag)
+            });
+        }
+        return signed(context::with_consts(|cc| cc.pi(p, mag)).div(&n(2), p, mag));
+    }
+    if x.is_inf() {
+        return if x_neg {
+            signed(context::with_consts(|cc| cc.pi(p, mag)))
+        } else {
+            signed(n(0))
+        };
+    }
+    // `atan` is increasing and `y/x` moves with the result, so both take `rm`;
+    // only the pi that is *subtracted* in the third quadrant flips.
+    let a = context::with_consts(|cc| y.div(x, p, rm).atan(p, rm, cc));
+    if !x_neg {
+        a
+    } else if y_neg {
+        a.sub(&context::with_consts(|cc| cc.pi(p, opp)), p, rm)
+    } else {
+        a.add(&context::with_consts(|cc| cc.pi(p, rm)), p, rm)
+    }
 }
 
 impl Number {
@@ -66,25 +133,23 @@ impl Number {
     }
 
     fn ln_impl(&mut self) -> bool {
-        if self.has_imaginary_part() {
-            // ln(z) = ln|z| + i·arg(z)
-            let mut re = self.clone();
-            if !re.abs() || !re.ln() {
-                return false;
-            }
-            let mut im = self.clone();
-            if !im.arg() {
-                return false;
-            }
-            *self = re;
-            self.set_imaginary_part(&im);
-            return true;
-        }
+        // Order is the reference's (Number.cc:7580): the infinities and the
+        // two exact values are decided before anything looks at the
+        // imaginary part.
         if self.is_plus_infinity() {
             return true;
         }
         if self.is_minus_infinity() {
-            return false;
+            // ln(-infinity) = +infinity + pi·i, not a failure.
+            let mut pi = Number::new();
+            pi.pi();
+            self.set_plus_infinity(true, false);
+            self.set_imaginary_part(&pi);
+            return true;
+        }
+        if self.is_one() {
+            self.clear(true);
+            return true;
         }
         if self.is_zero() {
             if self.is_imag_part {
@@ -94,37 +159,101 @@ impl Number {
             self.approx = true;
             return true;
         }
-        if self.is_one() {
-            self.clear(true);
+        if self.has_imaginary_part() {
+            // ln(z) = ln|z| + i·arg(z), with `arg` as the `atan2` of the two
+            // parts — `allow_zero`, because a real part that straddles zero is
+            // still a perfectly good angle here.
+            let re = self.real_part();
+            let mut new_i = self.imaginary_part();
+            if !new_i.atan2(&re, true) || new_i.has_imaginary_part() {
+                return false;
+            }
+            let mut new_r = self.clone();
+            if !new_r.abs() || new_r.has_imaginary_part() || !new_r.ln() {
+                return false;
+            }
+            *self = new_r;
+            self.set_imaginary_part(&new_i);
             return true;
         }
-        if self.real_part_is_negative() {
+        if self.is_non_positive() {
             if self.is_imag_part {
                 return false;
             }
-            // ln(-x) = ln(x) + πi
-            let mut pos = self.clone();
-            if !pos.negate() || !pos.ln() {
+            // ln(-x) = ln(x) + pi·i
+            let mut new_r = self.clone();
+            if !new_r.abs() || !new_r.ln() {
                 return false;
             }
             let mut pi = Number::new();
             pi.pi();
-            *self = pos;
+            *self = new_r;
             self.set_imaginary_part(&pi);
             return true;
         }
-        if !self.is_nonzero() {
-            return false; // interval containing zero
+
+        let p = context::bit_precision();
+        let bak = self.clone();
+        let (fl, mut fu) = (self.lower_bound_float(p), self.upper_bound_float(p));
+        let ln = |x: &BigFloat, rm: RoundingMode| context::with_consts(|cc| x.ln(p, rm, cc));
+        let mut straddles = false;
+        let (lower, upper) = if !context::create_interval() && !self.is_interval(true) {
+            let v = ln(&fl, RoundingMode::ToEven);
+            (v.clone(), v)
+        } else if bf_sgn(&fl) < 0 {
+            // The interval straddles zero (it is not non-positive, so the
+            // upper bound is above it): the image runs down to -infinity, and
+            // the argument sweeps [0, pi].
+            if bf_abs_cmp(&fl, &fu) > 0 {
+                fu = fl.neg();
+            }
+            straddles = true;
+            (
+                BigFloat::from_f64(f64::NEG_INFINITY, p),
+                ln(&fu, RoundingMode::Up),
+            )
+        } else {
+            // ln(0) is -infinity rather than the NaN the bare call gives.
+            let lo = if fl.is_zero() {
+                BigFloat::from_f64(f64::NEG_INFINITY, p)
+            } else {
+                ln(&fl, RoundingMode::Down)
+            };
+            (lo, ln(&fu, RoundingMode::Up))
+        };
+        if lower.is_nan() || upper.is_nan() {
+            return false;
         }
-        self.apply_monotone(|x, p, rm, cc| x.ln(p, rm, cc))
+        self.value = RealValue::Float { lower, upper };
+        self.imag = None;
+        self.approx = true;
+        if !self.test_float_result(true) {
+            *self = bak;
+            return false;
+        }
+        if straddles {
+            let mut pi = Number::new();
+            pi.pi();
+            let zero = Number::new();
+            let mut arc = Number::new();
+            if !arc.set_interval(&zero, &pi, false) {
+                *self = bak;
+                return false;
+            }
+            self.set_imaginary_part(&arc);
+        }
+        true
     }
 
-    /// `log(base)`.
+    /// `log(base)` — a transcription of Number.cc:7655.
+    ///
+    /// The quotient `ln(x)/ln(base)` is the general case and the *only* case
+    /// this used to have, which is why a base of zero, a negative base or one
+    /// straddling zero was refused outright: none of them survives a division.
+    /// The reference reaches them anyway, because `ln(0)` is an infinity it is
+    /// happy to carry and because the quotient is formed as `ln(x)·(1/ln b)`.
     pub fn log(&mut self, base: &Number) -> bool {
-        // `log_b(1) = 0` for every base that is definitely not 1 — including
-        // one that is infinite, unbounded or complex, none of which the
-        // `ln(x)/ln(b)` route below survives. The reference opens with the
-        // same test (Number.cc:7656).
+        // `log_b(1) = 0` for every base that is definitely not 1.
         let one = Number::from_i64(1);
         if self.is_one()
             && (base.is_greater_than(&one)
@@ -135,15 +264,28 @@ impl Number {
             self.set_precision_and_approximate_from(base);
             return true;
         }
-        if base.is_zero() || base.is_one() || !base.is_real() {
+        if base.is_one() || (base.is_zero() && self.is_zero()) {
             return false;
         }
-        // ln(x)/ln(base)
-        let mut lb = base.clone();
-        if !lb.ln() || !self.ln() {
+        // `log_x(x)` is an exact 1 — recognised before the floats get a
+        // chance to leave a hair of interval width behind.
+        if self.equals(base, false, false) {
+            let keep = self.approx;
+            *self = Number::from_i64(1);
+            self.approx = keep;
+            self.set_precision_and_approximate_from(base);
+            return true;
+        }
+        let mut num = self.clone();
+        let mut den = base.clone();
+        if !num.ln() || !den.ln() || !den.recip() || !num.multiply(&den) {
             return false;
         }
-        self.divide(&lb)
+        if self.is_imag_part && num.has_imaginary_part() {
+            return false;
+        }
+        *self = num;
+        true
     }
 
     /// `exp()`.
@@ -714,84 +856,152 @@ impl Number {
     }
 
     /// `atan2(x)` — self = atan2(self, x) (self is y).
+    ///
+    /// A transcription of Number.cc:7319. The result has to lie in (-pi, pi],
+    /// which composing `atan(y/x)` and a quadrant correction does not
+    /// guarantee once either operand is an interval: the branch cut runs
+    /// straight through the box whenever `x` can be negative and `y` straddles
+    /// zero, and the composed form walks past +pi instead of widening to the
+    /// whole circle. So each bound is a corner evaluation of atan2 itself,
+    /// picked by the sign pattern of the four endpoints — which also gives an
+    /// infinite operand a limit instead of an `infinity/infinity`.
     pub fn atan2(&mut self, x: &Number, allow_zero: bool) -> bool {
         if self.has_imaginary_part() || x.has_imaginary_part() {
             return false;
         }
-        if self.is_zero() && x.is_zero() {
-            if allow_zero {
+        if self.is_zero() {
+            if allow_zero && x.is_non_negative() {
                 self.clear(true);
+                self.set_precision_and_approximate_from(x);
                 return true;
             }
+            if x.is_zero() {
+                return false;
+            }
+            if x.is_positive() {
+                self.clear(true);
+                self.set_precision_and_approximate_from(x);
+                return true;
+            }
+        }
+        let p = context::bit_precision();
+        let (yl, yu) = (self.lower_bound_float(p), self.upper_bound_float(p));
+        let (xl, xu) = (x.lower_bound_float(p), x.upper_bound_float(p));
+
+        let (lower, upper) = if !context::create_interval()
+            && !self.is_interval(true)
+            && !x.is_interval(true)
+        {
+            let v = atan2_bf(&yl, &xl, p, RoundingMode::ToEven);
+            (v.clone(), v)
+        } else {
+            let (sgn_l, sgn_u) = (bf_sgn(&yl), bf_sgn(&yu));
+            // `atan2` of an interval that surrounds the origin is the whole
+            // circle, and no interval can say which end of the cut it is on.
+            if !allow_zero && !x.is_nonzero() && (sgn_l != sgn_u || sgn_l == 0) {
+                return false;
+            }
+            let (sgn_lo, sgn_uo) = (bf_sgn(&xl), bf_sgn(&xu));
+            let pi_d = context::with_consts(|cc| cc.pi(p, RoundingMode::Down));
+            let pi_u = context::with_consts(|cc| cc.pi(p, RoundingMode::Up));
+            let zero = BigFloat::from_i8(0, p);
+            if sgn_lo < 0 {
+                if sgn_u >= 0 {
+                    // The cut is inside the box unless `y` keeps one sign.
+                    let lo = if sgn_l < 0 {
+                        pi_d.neg()
+                    } else if sgn_uo >= 0 {
+                        if sgn_l == 0 {
+                            zero.clone()
+                        } else {
+                            atan2_bf(&yl, &xu, p, RoundingMode::Down)
+                        }
+                    } else {
+                        atan2_bf(&yu, &xu, p, RoundingMode::Down)
+                    };
+                    let hi = if sgn_l <= 0 {
+                        pi_u
+                    } else {
+                        atan2_bf(&yl, &xl, p, RoundingMode::Up)
+                    };
+                    (lo, hi)
+                } else {
+                    (
+                        atan2_bf(&yu, &xl, p, RoundingMode::Down),
+                        atan2_bf(&yl, &xu, p, RoundingMode::Up),
+                    )
+                }
+            } else if sgn_u >= 0 {
+                let hi = if sgn_u == 0 {
+                    zero.clone()
+                } else {
+                    atan2_bf(&yu, &xl, p, RoundingMode::Up)
+                };
+                let lo = if sgn_l == 0 {
+                    zero
+                } else if sgn_l < 0 {
+                    atan2_bf(&yl, &xl, p, RoundingMode::Down)
+                } else {
+                    atan2_bf(&yl, &xu, p, RoundingMode::Down)
+                };
+                (lo, hi)
+            } else {
+                (
+                    atan2_bf(&yl, &xl, p, RoundingMode::Down),
+                    atan2_bf(&yu, &xu, p, RoundingMode::Up),
+                )
+            }
+        };
+        if lower.is_nan() || upper.is_nan() {
             return false;
         }
-        // Quadrant-aware: atan(y/x) adjusted by ±π.
-        if x.real_part_is_positive() {
-            let mut q = self.clone();
-            if !q.divide(x) || !q.atan() {
-                return false;
-            }
-            *self = q;
-            return true;
+        let bak = self.clone();
+        self.value = RealValue::Float { lower, upper };
+        self.imag = None;
+        self.approx = true;
+        // `testFloatResult()` — the reference passes no arguments here, so an
+        // infinite bound is a failure rather than a result.
+        if self.lower_bound_float(p).is_inf() || self.upper_bound_float(p).is_inf() {
+            *self = bak;
+            return false;
         }
-        if x.real_part_is_negative() {
-            let y_neg = self.real_part_is_negative();
-            let mut q = self.clone();
-            if !q.divide(x) || !q.atan() {
-                return false;
-            }
-            let mut pi = Number::new();
-            pi.pi();
-            if y_neg {
-                pi.negate();
-            }
-            if !q.add(&pi) {
-                return false;
-            }
-            *self = q;
-            return true;
+        if !self.test_float_result(false) {
+            *self = bak;
+            return false;
         }
-        // x straddles zero, so `atan(y/x)` is useless; y must be sign-definite
-        // instead, and then `atan2(y, x) = ±π/2 − atan(x/y)` — continuous, and
-        // monotone in each variable, so interval arithmetic on it is tight.
-        // For a point x = 0 this collapses to ±π/2, as before.
-        if self.real_part_is_positive() || self.real_part_is_negative() {
-            let neg = self.real_part_is_negative();
-            let mut half_pi = Number::new();
-            half_pi.pi();
-            if !half_pi.divide(&Number::from_i64(2)) {
-                return false;
-            }
-            if neg {
-                half_pi.negate();
-            }
-            let mut q = x.clone();
-            if !q.divide(self) || !q.atan() || !q.negate() || !q.add(&half_pi) {
-                return false;
-            }
-            *self = q;
-            return true;
-        }
-        false
+        self.set_precision_and_approximate_from(x);
+        true
     }
 
     /// `arg()` — argument of the complex number.
     pub fn arg(&mut self) -> bool {
+        // A value that may be zero has no argument (Number.cc:7402).
+        if !self.is_nonzero() {
+            return false;
+        }
         if !self.has_imaginary_part() {
-            if self.is_zero() {
-                return false;
-            }
             if self.real_part_is_negative() {
                 let mut pi = Number::new();
                 pi.pi();
                 *self = pi;
                 return true;
             }
-            if self.real_part_is_positive() {
-                self.clear(true);
-                return true;
+            self.clear(true);
+            return true;
+        }
+        if !self.has_real_part() {
+            // Purely imaginary: ±pi/2, without asking `atan2` about it.
+            let neg = self.imaginary_part().real_part_is_negative();
+            let mut pi = Number::new();
+            pi.pi();
+            if !pi.divide(&Number::from_i64(2)) {
+                return false;
             }
-            return false;
+            if neg {
+                pi.negate();
+            }
+            *self = pi;
+            return true;
         }
         let re = self.real_part();
         let mut im = self.imaginary_part();

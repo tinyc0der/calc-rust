@@ -33,21 +33,28 @@
 //! started passing fails it too. Fixing a divergence therefore requires
 //! deleting its line, so the list cannot rot.
 //!
-//! The five files assert 674 results, of which 423 match and 251 do not:
+//! The five files assert 674 results, of which 459 match and 215 do not:
 //!
 //! | file                 | assertions | matching |
 //! |----------------------|-----------:|---------:|
-//! | `special.batch`      |        234 |      155 |
-//! | `rounding.batch`     |        127 |       92 |
+//! | `special.batch`      |        234 |      166 |
+//! | `rounding.batch`     |        127 |      117 |
 //! | `numbertheory.batch` |        117 |      116 |
 //! | `bases.batch`        |        105 |       31 |
 //! | `bitops.batch`       |         91 |       29 |
 //!
-//! The shape of the 251 matters more than the number, and it is now uniform:
+//! The shape of the 215 matters more than the number, and it is uniform:
 //! every one of them is a function the port does not implement *saying so*.
-//! 194 are calls to a name that is not a registered function and are rejected
+//! Most are calls to a name that is not a registered function and are rejected
 //! outright; the rest are registered functions declining a case they cannot
 //! evaluate and echoing themselves back. Both are visible to a user.
+//!
+//! Of the 251 this list held when it was written, 36 have since been closed:
+//! `round(x, n)` and all eleven rounding modes (25), the two-argument Hurwitz
+//! `zeta(s, a)` (3), complex `erf`/`erfc`/`erfi` (3) and complex `Si`/`Ci` (2),
+//! plus three cases that only had to stop being *rejected* to match. What is
+//! left of the rounding group is not rounding at all: `round(pi, 2)` fails for
+//! the same reason `floor(pi)` does.
 //!
 //! It did not use to be. An unregistered name fell through to the
 //! unknown-symbol path and the call silently became a product — `isprime(7)`
@@ -60,7 +67,8 @@
 //!
 //! The reassuring half: every special function the port *does* implement
 //! agrees with MPFR to all ten printed digits over the arguments exercised
-//! here — `gamma`, `digamma`, `erf`, `erfc`, `erfi`, `zeta`, `bernoulli`,
+//! here, over the real line and over the complex plane where the port reaches
+//! it — `gamma`, `digamma`, `erf`, `erfc`, `erfi`, `zeta`, `bernoulli`,
 //! `Si`, `Ci`, `Chi`, `Shi`, `li`, `fresnelc`, `fresnels`, `betainc`,
 //! `igamma` and `atan2`, at poles, at branch points, at negative and
 //! rational arguments. `number/special.rs`'s hand-rolled series are sound;
@@ -256,38 +264,13 @@ mod generated_coverage {
         // trunc: a symbolic constant argument is not approximated first: trunc(pi) is
         //   returned unevaluated.
         ("rounding.batch", 68, "symbolic constant argument not approximated; returned unevaluated"),
-        // round: round(x, decimals) and round(x, decimals, method) are unimplemented - only
-        //   the 1-argument default-mode form evaluates. The 11 IEEE-style rounding
-        //   modes (half-to-even .. down) are all unreachable.
-        ("rounding.batch", 120, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 124, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 126, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 128, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 130, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 132, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 134, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 136, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 138, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 140, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 144, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 146, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 148, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 150, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 152, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 154, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 156, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 158, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 160, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 162, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 164, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 166, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 168, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 170, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 172, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 174, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 176, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 178, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
-        ("rounding.batch", 180, "round(x, n) / round(x, n, mode) unimplemented; returned unevaluated"),
+        // round: round(x, n) and round(x, n, mode) evaluate now, and so do all 11
+        //   rounding modes. What is left of the group is the same symbolic-constant
+        //   gap as floor/ceil/trunc above: every remaining case rounds `pi`.
+        ("rounding.batch", 120, "symbolic constant argument not approximated; returned unevaluated"),
+        ("rounding.batch", 124, "symbolic constant argument not approximated; returned unevaluated"),
+        ("rounding.batch", 126, "symbolic constant argument not approximated; returned unevaluated"),
+        ("rounding.batch", 128, "symbolic constant argument not approximated; returned unevaluated"),
         // exp: exp does not recognise Euler's identity: exp(i*pi) is returned
         //   unevaluated.
         ("rounding.batch", 268, "exp(i*pi) not recognised; returned unevaluated"),
@@ -327,11 +310,6 @@ mod generated_coverage {
         ("special.batch", 190, "no erfinv: rejected as an unknown function"),
         ("special.batch", 192, "no erfinv: rejected as an unknown function"),
         ("special.batch", 194, "no erfinv: rejected as an unknown function"),
-        // zeta: only the 1-argument Riemann zeta evaluates; the 2-argument Hurwitz form is
-        //   unimplemented.
-        ("special.batch", 226, "2-argument Hurwitz form unimplemented; returned unevaluated"),
-        ("special.batch", 228, "2-argument Hurwitz form unimplemented; returned unevaluated"),
-        ("special.batch", 230, "2-argument Hurwitz form unimplemented; returned unevaluated"),
         // besselj: unregistered; qalc-num Number::besselj is a `false` stub (special.rs:1240)
         ("special.batch", 260, "no besselj: rejected as an unknown function"),
         ("special.batch", 262, "no besselj: rejected as an unknown function"),
@@ -343,7 +321,6 @@ mod generated_coverage {
         ("special.batch", 274, "no besselj: rejected as an unknown function"),
         ("special.batch", 276, "no besselj: rejected as an unknown function"),
         ("special.batch", 278, "no besselj: rejected as an unknown function"),
-        ("special.batch", 490, "no besselj: rejected as an unknown function"),
         // bessely: unregistered; qalc-num Number::bessely is a `false` stub (special.rs:1245)
         ("special.batch", 280, "no bessely: rejected as an unknown function"),
         ("special.batch", 282, "no bessely: rejected as an unknown function"),
@@ -351,7 +328,6 @@ mod generated_coverage {
         ("special.batch", 286, "no bessely: rejected as an unknown function"),
         ("special.batch", 288, "no bessely: rejected as an unknown function"),
         ("special.batch", 290, "no bessely: rejected as an unknown function"),
-        ("special.batch", 292, "no bessely: rejected as an unknown function"),
         // airy: unregistered; qalc-num Number::airy is a `false` stub (special.rs:1250)
         ("special.batch", 296, "no airy: rejected as an unknown function"),
         ("special.batch", 298, "no airy: rejected as an unknown function"),
@@ -362,14 +338,11 @@ mod generated_coverage {
         ("special.batch", 308, "no airy: rejected as an unknown function"),
         ("special.batch", 310, "no airy: rejected as an unknown function"),
         ("special.batch", 312, "no airy: rejected as an unknown function"),
-        // Si: a symbolic constant argument is not approximated first, and complex
-        //   arguments are unported.
-        ("special.batch", 324, "symbolic-constant or complex argument; returned unevaluated"),
-        ("special.batch", 494, "symbolic-constant or complex argument; returned unevaluated"),
-        // Ci: a symbolic constant argument is not approximated first, and complex
-        //   arguments are unported.
-        ("special.batch", 338, "symbolic-constant or complex argument; returned unevaluated"),
-        ("special.batch", 496, "symbolic-constant or complex argument; returned unevaluated"),
+        // Si: complex arguments evaluate now; what is left is the symbolic constant,
+        //   which is not approximated first, so Si(pi) comes back unevaluated.
+        ("special.batch", 324, "Si(pi): pi is not approximated; returned unevaluated"),
+        // Ci: as Si — Ci(pi) is all that is left of the group.
+        ("special.batch", 338, "Ci(pi): pi is not approximated; returned unevaluated"),
         // Chi: Chi is real-only: x < 0 (which is complex) and x = 0 (which is -infinity)
         //   both come back unevaluated.
         ("special.batch", 348, "complex / -infinity branch unported; returned unevaluated"),
@@ -383,7 +356,6 @@ mod generated_coverage {
         ("special.batch", 378, "no Li/polylog: rejected as an unknown function"),
         ("special.batch", 380, "no Li/polylog: rejected as an unknown function"),
         ("special.batch", 382, "no Li/polylog: rejected as an unknown function"),
-        ("special.batch", 492, "no Li/polylog: rejected as an unknown function"),
         // sinc / cis: both evaluate now, but only for an argument that reduces to a
         //   number. `pi` stays symbolic in this port, so every case whose argument is
         //   written in terms of pi is still returned unevaluated.
@@ -392,15 +364,6 @@ mod generated_coverage {
         ("special.batch", 446, "cis(pi/2): pi is not approximated; returned unevaluated"),
         ("special.batch", 448, "cis(pi/4): pi is not approximated; returned unevaluated"),
         ("special.batch", 452, "cis(-pi/2): pi is not approximated; returned unevaluated"),
-        // erf: erf/erfc/erfi are real-only; the reference evaluates them over the whole
-        //   complex plane.
-        ("special.batch", 482, "complex argument unported; returned unevaluated"),
-        // erfc: erf/erfc/erfi are real-only; the reference evaluates them over the whole
-        //   complex plane.
-        ("special.batch", 484, "complex argument unported; returned unevaluated"),
-        // erfi: erf/erfc/erfi are real-only; the reference evaluates them over the whole
-        //   complex plane.
-        ("special.batch", 486, "complex argument unported; returned unevaluated"),
     ];
 
     /// Every `.batch` file in `tests/golden/`.

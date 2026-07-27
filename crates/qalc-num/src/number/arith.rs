@@ -157,104 +157,208 @@ impl Number {
     }
 
     fn multiply_impl(&mut self, o: &Number) -> bool {
-        // Only one side is complex: scale both of its parts and stop. The
-        // general product below would multiply the other side's absent
-        // imaginary part in as an exact zero and add it back — numerically the
-        // same thing, but `0 × [1:+infinity]` is undefined, so the cross terms
-        // turn `([1:+infinity]+(-infinity)i) × 1` into a failure. The reference
-        // scales the parts separately for exactly this shape (Number.cc:3433).
-        if self.has_imaginary_part() != o.has_imaginary_part() {
-            let (complex, real) = if self.has_imaginary_part() {
-                (&*self, o)
-            } else {
-                (o, &*self)
-            };
-            let mut re = complex.real_part();
-            let mut im = complex.imaginary_part();
-            if !re.multiply(real) || !im.multiply(real) {
+        // Complex multiplication: (a+bi)(c+di) = (ac−bd) + (ad+bc)i.
+        // Only when the *other* operand is complex too — a complex value
+        // times a real one is scaled part by part below, because the cross
+        // terms would otherwise multiply an absent imaginary part in as an
+        // exact zero and turn `([1:+infinity]+(-infinity)i) × 1` into `0 ×
+        // infinity`. The reference splits the same way (Number.cc:3331).
+        if o.has_imaginary_part() {
+            if o.has_real_part() {
+                if self.has_imaginary_part() && self.has_real_part() {
+                    // (a+bi)(c+di) = (ac−bd) + (ad+bc)i
+                    let a = self.real_part();
+                    let b = self.imaginary_part();
+                    let c = o.real_part();
+                    let d = o.imaginary_part();
+                    let mut ac = a.clone();
+                    let mut bd = b.clone();
+                    let mut ad = a;
+                    let mut bc = b;
+                    if !ac.multiply(&c) || !bd.multiply(&d) || !ad.multiply(&d) || !bc.multiply(&c)
+                    {
+                        return false;
+                    }
+                    let mut re = ac;
+                    if !re.subtract(&bd) {
+                        return false;
+                    }
+                    let mut im = ad;
+                    if !im.add(&bc) {
+                        return false;
+                    }
+                    *self = re;
+                    if !im.is_zero() {
+                        self.set_imaginary_part(&im);
+                    }
+                    return true;
+                }
+                // One of the two parts of `self` is absent, so the product is
+                // `(self·i)·d + self·c` with the missing cross terms never
+                // formed at all — a `0 × infinity` the general formula would
+                // have to evaluate and refuse (Number.cc:3352).
+                let mut copy = Number::new();
+                if self.has_imaginary_part() {
+                    copy = self.imaginary_part();
+                    copy.negate();
+                } else if self.has_real_part() {
+                    copy.set_imaginary_part(&self.clone());
+                }
+                let bak = self.clone();
+                if !copy.multiply(&o.imaginary_part()) || !self.multiply(&o.real_part()) {
+                    *self = bak;
+                    return false;
+                }
+                if !self.add(&copy) {
+                    *self = bak;
+                    return false;
+                }
+                return true;
+            }
+            // `o` is purely imaginary: multiplying by it is a quarter turn.
+            if self.has_imaginary_part() {
+                let mut copy = self.imaginary_part();
+                copy.negate();
+                if self.has_real_part() {
+                    copy.set_imaginary_part(&self.real_part());
+                }
+                if !copy.multiply(&o.imaginary_part()) {
+                    return false;
+                }
+                *self = copy;
+                return true;
+            }
+            // A real value times a pure imaginary one: scale, then move the
+            // whole thing into the imaginary slot. `infinity × (-i/pi)` is
+            // `(-infinity)i`, where pairing the parts up would ask for
+            // `0 × infinity` first.
+            if !self.multiply(&o.imaginary_part()) {
                 return false;
             }
-            *self = re;
-            if !im.is_zero() {
-                self.set_imaginary_part(&im);
-            }
-            return true;
-        }
-        // Complex multiplication: (a+bi)(c+di) = (ac−bd) + (ad+bc)i
-        if o.has_imaginary_part() || self.has_imaginary_part() {
-            let a = self.real_part();
-            let b = self.imaginary_part();
-            let c = o.real_part();
-            let d = o.imaginary_part();
-            let mut ac = a.clone();
-            let mut bd = b.clone();
-            let mut ad = a;
-            let mut bc = b;
-            if !ac.multiply(&c) || !bd.multiply(&d) || !ad.multiply(&d) || !bc.multiply(&c) {
-                return false;
-            }
-            let mut re = ac;
-            if !re.subtract(&bd) {
-                return false;
-            }
-            let mut im = ad;
-            if !im.add(&bc) {
-                return false;
-            }
-            *self = re;
-            if !im.is_zero() {
-                self.set_imaginary_part(&im);
-            }
+            let moved = self.clone();
+            let keep = (self.approx, self.precision);
+            *self = Number::new();
+            self.approx = keep.0;
+            self.precision = keep.1;
+            self.set_imaginary_part(&moved);
             return true;
         }
         // `0 × ∞` is undefined, and so is `[-0.5:0.5] × [1:+infinity]`: an
         // interval that is not *known* non-zero against one that reaches
-        // infinity spans the whole line. The reference tests exactly this
-        // (Number.cc:3379), and it is the half-infinite interval that makes it
-        // matter — the arms below only recognise an infinity that is the whole
-        // value.
+        // infinity spans the whole line (Number.cc:3379).
+        //
+        // The test is on the *whole* value, imaginary part included, and it is
+        // made exactly once. Re-asking it of the real part alone — which is
+        // what scaling the two components through `multiply` would do —
+        // rejects `([-0.5:0.5]+i) × [-infinity:-1]`, whose imaginary part is
+        // what makes the operand non-zero.
         if o.includes_infinity() && !self.is_nonzero() {
             return false;
         }
         if self.includes_infinity() && !o.is_nonzero() {
             return false;
         }
-        match (&self.value, &o.value) {
-            (RealValue::PlusInfinity | RealValue::MinusInfinity, _)
-            | (_, RealValue::PlusInfinity | RealValue::MinusInfinity) => {
-                // 0 × ∞ is undefined.
-                if self.is_zero() || o.is_zero() {
+        // From here `o` is real, and the imaginary part is scaled by a
+        // recursive multiply exactly as the reference does it.
+        let scaled_imag = if self.has_imaginary_part() {
+            let mut im = self.imaginary_part();
+            if !im.multiply(o) {
+                return false;
+            }
+            Some(im)
+        } else {
+            None
+        };
+        let ok = self.multiply_real_unguarded(o);
+        if ok {
+            if let Some(im) = scaled_imag {
+                if im.is_zero() {
+                    self.imag = None;
+                } else {
+                    self.set_imaginary_part(&im);
+                }
+            }
+        }
+        ok
+    }
+
+    /// The real part of a product, once the zero-times-infinity question has
+    /// been settled for the value as a whole. `o` is real.
+    fn multiply_real_unguarded(&mut self, o: &Number) -> bool {
+        // An infinite real part keeps its magnitude and takes `o`'s sign
+        // (Number.cc:3384).
+        if matches!(self.value, RealValue::PlusInfinity | RealValue::MinusInfinity) {
+            if o.real_part_is_negative() {
+                self.value = if matches!(self.value, RealValue::PlusInfinity) {
+                    RealValue::MinusInfinity
+                } else {
+                    RealValue::PlusInfinity
+                };
+            }
+            self.set_precision_and_approximate_from(o);
+            return true;
+        }
+        if matches!(o.value, RealValue::PlusInfinity | RealValue::MinusInfinity) {
+            // A real part that is present but may be zero has no sign to give
+            // the infinity. A real part that is *absent* is simply left at
+            // zero, which is what lets `0.5i × infinity` be `(+infinity)i`.
+            if self.has_real_part() {
+                if !self.real_part().is_nonzero() {
                     return false;
                 }
-                if !self.is_nonzero() || !o.is_nonzero() {
-                    return false; // interval containing zero times infinity
-                }
-                let self_neg = self.real_part_is_negative();
-                let o_neg = o.real_part_is_negative();
-                let plus = matches!(
-                    (&self.value, &o.value),
-                    (RealValue::PlusInfinity, _) | (_, RealValue::PlusInfinity)
-                );
-                // Determine resulting sign: sign(self) × sign(o).
-                let result_plus = match (&self.value, &o.value) {
-                    (RealValue::PlusInfinity, RealValue::PlusInfinity) => true,
-                    (RealValue::MinusInfinity, RealValue::MinusInfinity) => true,
-                    (RealValue::PlusInfinity, RealValue::MinusInfinity)
-                    | (RealValue::MinusInfinity, RealValue::PlusInfinity) => false,
-                    (RealValue::PlusInfinity, _) => !o_neg,
-                    (RealValue::MinusInfinity, _) => o_neg,
-                    (_, RealValue::PlusInfinity) => !self_neg,
-                    (_, RealValue::MinusInfinity) => self_neg,
-                    _ => plus,
+                let neg = self.real_part_is_negative();
+                let o_plus = matches!(o.value, RealValue::PlusInfinity);
+                self.value = if neg == o_plus {
+                    RealValue::MinusInfinity
+                } else {
+                    RealValue::PlusInfinity
                 };
-                self.value = if result_plus { RealValue::PlusInfinity } else { RealValue::MinusInfinity };
-                self.set_precision_and_approximate_from(o);
-                true
             }
+            self.set_precision_and_approximate_from(o);
+            return true;
+        }
+        if !self.has_real_part() {
+            self.set_precision_and_approximate_from(o);
+            return true;
+        }
+        if o.is_zero() {
+            self.value = RealValue::Rational(BigRational::zero());
+            self.set_precision_and_approximate_from(o);
+            return true;
+        }
+        match (&self.value, &o.value) {
             (RealValue::Rational(a), RealValue::Rational(b)) => {
                 self.value = RealValue::Rational(a * b);
                 self.set_precision_and_approximate_from(o);
                 true
+            }
+            // A float against an exact rational is `mpfr_mul_q`: the rational
+            // is a single exact factor, not an interval of its own. Widening
+            // it to `[1/3↓ : 1/3↑]` first is what left `1.5/3` as `[0.5:0.5]`
+            // instead of the exact `0.5`.
+            (RealValue::Float { lower, upper }, RealValue::Rational(r))
+            | (RealValue::Rational(r), RealValue::Float { lower, upper }) => {
+                let p = context::bit_precision();
+                let (lower, upper) = if context::create_interval() {
+                    if r.is_negative() {
+                        (
+                            mul_bf_rat(upper, r, p, rnd(true)),
+                            mul_bf_rat(lower, r, p, rnd(false)),
+                        )
+                    } else {
+                        (
+                            mul_bf_rat(lower, r, p, rnd(true)),
+                            mul_bf_rat(upper, r, p, rnd(false)),
+                        )
+                    }
+                } else {
+                    let f = mul_bf_rat(lower, r, p, RoundingMode::ToEven);
+                    (f.clone(), f)
+                };
+                self.value = RealValue::Float { lower, upper };
+                self.approx = true;
+                self.set_precision_and_approximate_from(o);
+                self.test_float_result(true)
             }
             _ => {
                 let p = context::bit_precision();
@@ -321,12 +425,17 @@ impl Number {
             (RealValue::PlusInfinity | RealValue::MinusInfinity,
              RealValue::PlusInfinity | RealValue::MinusInfinity) => false,
             (RealValue::PlusInfinity | RealValue::MinusInfinity, _) => {
-                let flip = o.real_part_is_negative();
-                if flip {
-                    self.negate();
+                // The reference computes an infinite dividend as `x·(1/o)`
+                // (Number.cc:3595) and its `multiply` refuses an infinity
+                // against an operand that is not known non-zero
+                // (Number.cc:3380) — which `1/o` is exactly when `o` reaches
+                // infinity. `infinity / [1:+infinity]` is indeterminate, not
+                // infinity.
+                let mut oinv = o.clone();
+                if !oinv.recip() {
+                    return false;
                 }
-                self.set_precision_and_approximate_from(o);
-                true
+                self.multiply(&oinv)
             }
             (_, RealValue::PlusInfinity | RealValue::MinusInfinity) => {
                 // finite / ∞ = 0 — but an *unbounded* numerator is not
@@ -363,6 +472,33 @@ impl Number {
     /// `recip()`: self = 1/self.
     pub fn recip(&mut self) -> bool {
         if self.has_imaginary_part() {
+            // A value that is not *known* non-zero has no reciprocal: the
+            // reference's first line (Number.cc:3653), and for a complex
+            // value it is the whole value that has to be non-zero, not each
+            // part on its own.
+            if !self.is_nonzero() {
+                return false;
+            }
+            if !self.has_real_part() {
+                // 1/(bi) = −(1/b)i.
+                let mut im = self.imaginary_part();
+                if !im.recip() || !im.negate() {
+                    return false;
+                }
+                let keep = (self.approx, self.precision);
+                *self = Number::new();
+                self.approx = keep.0;
+                self.precision = keep.1;
+                self.set_imaginary_part(&im);
+                return true;
+            }
+            // An interval operand goes through the dedicated interval
+            // reciprocal below; a point one keeps the exact algebraic form.
+            if self.is_interval(true)
+                || self.imag.as_ref().is_some_and(|i| i.is_interval(true))
+            {
+                return self.recip_interval_complex();
+            }
             // 1/(a+bi) = (a−bi)/(a²+b²)
             let a = self.real_part();
             let b = self.imaginary_part();
@@ -421,6 +557,56 @@ impl Number {
         }
     }
 
+    /// The reference's dedicated interval reciprocal (Number.cc:3662).
+    ///
+    /// `1/(x+yi) = (x−yi)/(x²+y²)`, but evaluating that expression in interval
+    /// arithmetic mentions `x` and `y` twice each and throws the dependency
+    /// away — and squaring an unbounded part turns a perfectly finite
+    /// reciprocal into a failure. Instead each component is optimised over the
+    /// box directly: both are the same function `t ↦ t/(t²+s²)`, whose extrema
+    /// over `|s| ∈ [smin, smax]` sit at `t = ±smin` (value `±1/(2·smin)`) and
+    /// at the ends of `t`'s own range. The imaginary half is that function of
+    /// `−y` with the two components' roles exchanged.
+    fn recip_interval_complex(&mut self) -> bool {
+        let p = context::bit_precision();
+        let (xl, xu) = self.float_bounds(p);
+        let (yl, yu) = self.imaginary_part().float_bounds(p);
+
+        // min/max |·| over each component's range.
+        let (abs_rl, abs_ru) = abs_range(&xl, &xu, p);
+        let (abs_il, abs_iu) = abs_range(&yl, &yu, p);
+
+        let Some((rl, ru)) = recip_component(&xl, &xu, &abs_rl, &abs_ru, &abs_il, &abs_iu, p)
+        else {
+            return false;
+        };
+        let Some((il, iu)) = recip_component(
+            &yu.neg(),
+            &yl.neg(),
+            &abs_il,
+            &abs_iu,
+            &abs_rl,
+            &abs_ru,
+            p,
+        ) else {
+            return false;
+        };
+
+        let bak = self.clone();
+        let mut im = Number::new();
+        im.value = RealValue::Float { lower: il, upper: iu };
+        im.approx = true;
+        im.is_imag_part = true;
+        self.value = RealValue::Float { lower: rl, upper: ru };
+        self.approx = true;
+        if !im.test_float_result(true) || !self.test_float_result(true) {
+            *self = bak;
+            return false;
+        }
+        self.imag = Some(Box::new(im));
+        true
+    }
+
     /// `square()`: self = self².
     pub fn square(&mut self) -> bool {
         // d(x²)/dx = 2x, taken here rather than left to the `multiply` below.
@@ -441,7 +627,25 @@ impl Number {
     }
 
     fn square_impl(&mut self) -> bool {
+        if self.is_infinite(false) {
+            self.value = RealValue::PlusInfinity;
+            return true;
+        }
         if self.has_imaginary_part() {
+            if !self.has_real_part() {
+                // (bi)^2 = -b^2, with `b` squared as one variable.
+                let mut b = self.imaginary_part();
+                if !b.square() || !b.negate() {
+                    return false;
+                }
+                *self = b;
+                return true;
+            }
+            if self.is_interval(true)
+                || self.imag.as_ref().is_some_and(|i| i.is_interval(true))
+            {
+                return self.square_interval_complex();
+            }
             let o = self.clone();
             return self.multiply(&o);
         }
@@ -481,6 +685,49 @@ impl Number {
                 self.test_float_result(true)
             }
         }
+    }
+
+    /// `(x+yi)^2 = (x^2 - y^2) + 2xy i` over a box (Number.cc:4692).
+    ///
+    /// `multiply(self.clone())` would treat the two factors as independent and
+    /// compute `y*y` as an interval product, which for a `y` straddling zero
+    /// reaches below zero and widens the real part on both sides. Each part is
+    /// squared here as the one variable it is.
+    fn square_interval_complex(&mut self) -> bool {
+        let p = context::bit_precision();
+        let (xl, xu) = self.float_bounds(p);
+        let (yl, yu) = self.imaginary_part().float_bounds(p);
+        let (x2l, x2u) = sq_range(&xl, &xu, p);
+        let (y2l, y2u) = sq_range(&yl, &yu, p);
+        let re_l = x2l.sub(&y2u, p, rnd(true));
+        let re_u = x2u.sub(&y2l, p, rnd(false));
+        // 2xy, with the reference's flag semantics: a `0 * infinity` corner is
+        // a NaN and fails the whole square rather than being skipped over.
+        for a in [&xl, &xu] {
+            for b in [&yl, &yu] {
+                if a.mul(b, p, RoundingMode::ToEven).is_nan() {
+                    return false;
+                }
+            }
+        }
+        let (ml, mu) = interval_mul(&xl, &xu, &yl, &yu, p);
+        let two = BigFloat::from_i8(2, p);
+        let im_l = ml.mul(&two, p, rnd(true));
+        let im_u = mu.mul(&two, p, rnd(false));
+
+        let bak = self.clone();
+        let mut im = Number::new();
+        im.value = RealValue::Float { lower: im_l, upper: im_u };
+        im.approx = true;
+        im.is_imag_part = true;
+        self.value = RealValue::Float { lower: re_l, upper: re_u };
+        self.approx = true;
+        if !im.test_float_result(true) || !self.test_float_result(true) {
+            *self = bak;
+            return false;
+        }
+        self.imag = Some(Box::new(im));
+        true
     }
 
     /// `abs()`.
@@ -593,6 +840,196 @@ impl Number {
         }
         self.multiply(&two)
     }
+}
+
+/// `mpfr_sgn`: 0 for either zero, ±1 otherwise (an infinity has a sign).
+pub(super) fn bf_sgn(x: &BigFloat) -> i32 {
+    if x.is_zero() {
+        0
+    } else if matches!(x.sign(), Some(Sign::Neg)) {
+        -1
+    } else {
+        1
+    }
+}
+
+fn bf_abs(x: &BigFloat) -> BigFloat {
+    if matches!(x.sign(), Some(Sign::Neg)) {
+        x.neg()
+    } else {
+        x.clone()
+    }
+}
+
+/// `mpfr_cmpabs`: compares magnitudes. astro-float's own `abs_cmp` compares
+/// signed values for two finite operands, so it cannot be used for this.
+pub(super) fn bf_abs_cmp(a: &BigFloat, b: &BigFloat) -> i32 {
+    bf_cmp(&bf_abs(a), &bf_abs(b))
+}
+
+/// `mpfr_cmp`, with `−0 == 0` — astro-float orders the two zeroes by sign.
+pub(super) fn bf_cmp(a: &BigFloat, b: &BigFloat) -> i32 {
+    if a.is_zero() && b.is_zero() {
+        return 0;
+    }
+    match a.cmp(b) {
+        Some(c) if c > 0 => 1,
+        Some(c) if c < 0 => -1,
+        _ => 0,
+    }
+}
+
+/// min and max of `|t|` over `t ∈ [l, u]`. The minimum is zero exactly when
+/// the interval straddles (or touches) zero.
+fn abs_range(l: &BigFloat, u: &BigFloat, p: usize) -> (BigFloat, BigFloat) {
+    let (al, au) = (bf_abs(l), bf_abs(u));
+    let lo = if bf_sgn(l) != bf_sgn(u) {
+        BigFloat::from_i8(0, p)
+    } else if bf_cmp(&au, &al) < 0 {
+        au.clone()
+    } else {
+        al.clone()
+    };
+    let hi = if bf_cmp(&al, &au) > 0 { al } else { au };
+    (lo, hi)
+}
+
+/// One component of the interval reciprocal: the range of `t/(t²+s²)` for
+/// `t ∈ [l, u]` and `s` the other component, whose `|s|` runs over
+/// `[a_il, a_iu]`. `a_rl`/`a_ru` are the same bounds for `|t|`.
+///
+/// Statement for statement, the body of `Number::recip`'s `for(i = 0; i < 2;
+/// i++)` loop (Number.cc:3697). The interval is first reflected into `u ≥ 0`,
+/// because `t/(t²+s²)` is odd in `t`.
+///
+/// `None` where the reference gives up. A quotient of two infinities (or of
+/// two zeroes) is a NaN, and the reference notices it not by inspecting the
+/// result — the NaN lands in a temporary that is then thrown away — but
+/// through MPFR's sticky NaN and range flags, which its `testFloatResult`
+/// tests before anything else (Number.cc:2387). So a NaN *anywhere* in this
+/// computation fails the whole reciprocal, even when both endpoints came out
+/// finite: `1/([1:+infinity]+i)` is one of those.
+#[allow(clippy::too_many_arguments)]
+fn recip_component(
+    l: &BigFloat,
+    u: &BigFloat,
+    a_rl: &BigFloat,
+    a_ru: &BigFloat,
+    a_il: &BigFloat,
+    a_iu: &BigFloat,
+    p: usize,
+) -> Option<(BigFloat, BigFloat)> {
+    // Every NaN in this routine comes from a division, so one checked
+    // division is the whole of the reference's flag test.
+    let mut nan = false;
+    let mut div = |a: &BigFloat, b: &BigFloat, rm: RoundingMode| {
+        let r = a.div(b, p, rm);
+        if r.is_nan() {
+            nan = true;
+        }
+        r
+    };
+    let two = BigFloat::from_i8(2, p);
+    let (mut fl, mut fu) = (l.clone(), u.clone());
+    let neg = bf_sgn(&fu) < 0;
+    if neg {
+        let (nl, nu) = (fu.neg(), fl.neg());
+        fl = nl;
+        fu = nu;
+    }
+    let absm_il = a_il.neg();
+    let absm_iu = a_iu.neg();
+    // |s|² at both rounding directions, reused below.
+    let il2_d = a_il.mul(a_il, p, rnd(true));
+    let il2_u = a_il.mul(a_il, p, rnd(false));
+    let iu2_u = a_iu.mul(a_iu, p, rnd(false));
+    // The maximum over `s` is always at |s| = a_il (smallest denominator);
+    // `t \u21a6 t/(t\u00b2+a_il\u00b2)` then peaks at `t = a_il`.
+    let ru = if bf_cmp(&fl, a_il) <= 0 {
+        if bf_cmp(&fu, a_il) >= 0 {
+            // the peak is inside the range: 1/(2\u00b7a_il)
+            div(a_il, &il2_d.mul(&two, p, rnd(true)), rnd(false))
+        } else {
+            // still climbing at t = u
+            div(&fu, &fu.mul(&fu, p, rnd(true)).add(&il2_d, p, rnd(true)), rnd(false))
+        }
+    } else {
+        // past the peak already: largest at t = l
+        div(&fl, &fl.mul(&fl, p, rnd(true)).add(&il2_d, p, rnd(true)), rnd(false))
+    };
+    let rl = if bf_sgn(&fl) < 0 {
+        // the negative half mirrors the maximum
+        if bf_cmp(&fl, &absm_il) <= 0 {
+            div(&absm_il, &il2_u.mul(&two, p, rnd(false)), rnd(true))
+        } else {
+            div(&fl, &fl.mul(&fl, p, rnd(true)).add(&il2_d, p, rnd(true)), rnd(false))
+        }
+    } else if bf_cmp(&fl, &absm_iu) <= 0 {
+        if bf_cmp(a_ru, &absm_iu) >= 0 {
+            div(&absm_iu, &iu2_u.mul(&two, p, rnd(false)), rnd(true))
+        } else {
+            div(a_ru, &a_ru.mul(a_ru, p, rnd(false)).add(&iu2_u, p, rnd(false)), rnd(true))
+        }
+    } else if bf_cmp(&fl, a_iu) > 0 {
+        // t is past the peak for every s: smallest at t = a_ru, |s| = a_iu
+        div(a_ru, &a_ru.mul(a_ru, p, rnd(false)).add(&iu2_u, p, rnd(false)), rnd(true))
+    } else {
+        let mut v = div(
+            &fl,
+            &a_rl.mul(a_rl, p, rnd(false)).add(&iu2_u, p, rnd(false)),
+            rnd(true),
+        );
+        if bf_cmp(a_ru, a_iu) > 0 {
+            // the range crosses the peak, so the far end competes with it
+            let c = div(
+                a_ru,
+                &a_ru.mul(a_ru, p, rnd(false)).add(&iu2_u, p, rnd(false)),
+                rnd(true),
+            );
+            if bf_cmp(&c, &v) < 0 {
+                v = c;
+            }
+        }
+        v
+    };
+    if nan {
+        return None;
+    }
+    Some(if neg {
+        (ru.neg(), rl.neg())
+    } else {
+        (rl, ru)
+    })
+}
+
+/// min and max of `t^2` over `t` in `[l, u]`, rounded outwards.
+fn sq_range(l: &BigFloat, u: &BigFloat, p: usize) -> (BigFloat, BigFloat) {
+    let bigger_l = bf_abs_cmp(l, u) > 0;
+    let hi = if bigger_l {
+        l.mul(l, p, rnd(false))
+    } else {
+        u.mul(u, p, rnd(false))
+    };
+    if bf_sgn(l) < 0 && bf_sgn(u) > 0 {
+        return (BigFloat::from_i8(0, p), hi);
+    }
+    let lo = if bigger_l {
+        u.mul(u, p, rnd(true))
+    } else {
+        l.mul(l, p, rnd(true))
+    };
+    (lo, hi)
+}
+
+/// `mpfr_mul_q`: a float times an exact rational, correctly rounded once.
+/// The product with the numerator is computed at enough precision to be
+/// exact, so only the division by the denominator rounds.
+fn mul_bf_rat(f: &BigFloat, r: &BigRational, p: usize, rm: RoundingMode) -> BigFloat {
+    let num = crate::float::bigfloat_from_bigint_exact(r.numer());
+    let den = crate::float::bigfloat_from_bigint_exact(r.denom());
+    let wide = p + r.numer().bits() as usize + 8;
+    let prod = f.mul(&num, wide, RoundingMode::None);
+    prod.div(&den, p, rm)
 }
 
 /// Interval multiplication: all four corner products with directed rounding.

@@ -27,18 +27,22 @@
 //!
 //! | | count |
 //! |---|---|
-//! | held | 599 |
-//! | violated | 3 |
+//! | held | 602 |
+//! | violated | 0 (3 before the evaluator fix below) |
 //! | out of scope: `integrate.rs` has no rule | 1 598 |
 //! | out of scope: the answer contains `abs()`, which `differentiate.rs` cannot differentiate | 56 |
 //! | out of scope: the answer is non-elementary (`Si`/`Ci`/…) | 24 |
 //! | timed out | 0 |
 //!
-//! **The three violations are not wrong integrals.** All three are
-//! `acos(u)` with `u` monic in `x`, and all three are the *evaluator* failing
-//! to cancel `A - A` in a single pass; see
-//! [`integrate_differentiate_roundtrip::KNOWN_VIOLATIONS`]. No integrand in
-//! the corpus produced an antiderivative whose derivative had the wrong value.
+//! **The three violations were not wrong integrals.** All three were
+//! `acos(u)` with `u` monic in `x`, and all three were the *evaluator* failing
+//! to cancel `A - A` in a single pass. No integrand in the corpus produced an
+//! antiderivative whose derivative had the wrong value. They are fixed — the
+//! merge engine now applies the `evalSort` that ends the C++ `MERGE_ALL2` and
+//! `MERGE_INDEX2` macros, so a product's factors reach `merge_addition` in one
+//! order and the pair cancels on the first pass; see
+//! [`integrate_differentiate_roundtrip::KNOWN_VIOLATIONS`] for the full
+//! diagnosis.
 //!
 //! **The 1 598 skips are the real finding**, and the driver prints them broken
 //! down by wrapper so the number is not opaque: `tan(@)` and `acosh(@)` are
@@ -386,7 +390,52 @@ fn results_agree(a: &MathStructure, b: &MathStructure) -> bool {
     let mut nb = b.clone();
     harness::evaluate_approx_in_place(&mut na);
     harness::evaluate_approx_in_place(&mut nb);
-    numbers_agree(&na, &nb) || harness::print(&na) == harness::print(&nb)
+    if numbers_agree(&na, &nb) || harness::print(&na) == harness::print(&nb) {
+        return true;
+    }
+    difference_is_zero(a, b)
+}
+
+/// The third relaxation: `a - b` reduces to a number no larger than `1e-9`.
+///
+/// Comparing two *values* needs both sides to reduce to a value, and one
+/// family of integrands does not get there — the ones whose answer still
+/// mentions a function call this port cannot evaluate. `int x acos(4x+5) dx`
+/// is the whole family: at `x = 3` both sides carry `3 acos(17)`, and
+/// `acos(z)` outside `[-1, 1]` is not implemented (`asin(17)` *is*, which is
+/// the only reason the arcsine half of the corpus does not land here too).
+/// Neither side is a number, the two print differently because one of them
+/// also carries a `1.6e-58i` rounding residue, and the case is reported as a
+/// violated integral when the integral is right.
+///
+/// Subtracting first sidesteps it: the unevaluable term is identical on both
+/// sides and cancels structurally, leaving exactly the residue to be judged.
+/// This is not weaker than comparing the two values — it is the same claim,
+/// `d/dx int f dx - f = 0`, asked in the order that can be answered — and
+/// [`the_check_rejects_a_wrong_constant_factor`] and
+/// [`the_check_rejects_a_missing_chain_rule_factor`] both still fail through
+/// it, because a wrong rule leaves a difference far above `1e-9`.
+///
+/// The bar is absolute rather than relative because there is no reduced value
+/// to take a relative bar against; at the magnitudes this corpus produces
+/// (`|f| < 100` at `x = 3` and `x = -5`) that is the stricter of the two.
+///
+/// Up to three merge passes, because cancelling `A - A` is the one thing the
+/// evaluator is known to need more than one for, and running the difference
+/// to a fixed point is the point of this fallback.
+fn difference_is_zero(a: &MathStructure, b: &MathStructure) -> bool {
+    let mut d = MathStructure::Addition(vec![
+        a.clone(),
+        MathStructure::Multiplication(vec![MathStructure::from_i64(-1), b.clone()]),
+    ]);
+    for _ in 0..3 {
+        harness::evaluate_approx_in_place(&mut d);
+        if let MathStructure::Number(n) = &d {
+            let m = magnitude(n);
+            return m.is_finite() && m <= 1e-9;
+        }
+    }
+    false
 }
 
 // =====================================================================
@@ -487,53 +536,33 @@ mod integrate_differentiate_roundtrip {
     /// `(case id, diagnosis)`, in the shape `evaluation_invariants.rs` uses:
     /// a new violation fails the test, and so does an entry that has started
     /// passing. See the module docs on the ledger.
-    /// One defect, in three cases, and it is not in `integrate.rs`.
+    /// Empty.
     ///
-    /// All three are `acos(u)` with `u` monic in `x`. `∫acos(u) dx` comes back
-    /// as `x·acos(u) - sqrt(1 - u²)/u'` — correct — and differentiating it
-    /// gives `x/sqrt(1-u²) - x/sqrt(1-u²) + acos(u)`, whose first two terms are
-    /// structurally identical and must cancel. One `evaluate_calculated_with`
-    /// pass does not cancel them; a second one does. Verified directly on
-    /// `acos(x)`: pass 1 prints `x / sqrt(1 - x^2) - x / sqrt(1 - x^2) +
-    /// acos(x)`, pass 2 prints `acos(x)`, pass 3 is stable. `test_integration6`
-    /// evaluates once (`test.cc:586`), so the uncancelled pair survives to the
-    /// substitution — and at `x = 3` the two terms become `3 / sqrt(-8)`, a
-    /// complex float whose interval carries a rounding residue, so they no
-    /// longer cancel *at all* and the result prints as `… + acos(3)` with a
-    /// leading `0.000000000i`.
+    /// It held one defect in three cases, and the defect was not in
+    /// `integrate.rs`: all three were `acos(u)` with `u` monic in `x`.
+    /// `∫acos(u) dx` comes back as `x·acos(u) - sqrt(1 - u²)/u'` — correct —
+    /// and differentiating it gives `x/sqrt(1-u²) - x/sqrt(1-u²) + acos(u)`,
+    /// whose first two terms are structurally identical and must cancel. One
+    /// `evaluate_calculated_with` pass did not cancel them; a second one did,
+    /// and `test_integration6` evaluates once (`test.cc:586`), so the
+    /// uncancelled pair survived to the substitution — at `x = 3` the two
+    /// terms become `3 / sqrt(-8)`, a complex float whose interval carries a
+    /// rounding residue, so they stopped cancelling at all and the result
+    /// printed as `… + acos(3)` with a leading `0.000000000i`.
     ///
-    /// This is the same non-idempotence `evaluation_invariants.rs` records as
-    /// P1 class B for `abs(x - y) - abs(y - x)`, reached from a third
-    /// direction. It is invisible through the CLI, because
-    /// `differentiate::calculate_function` hands its result back to the outer
-    /// merge loop, which supplies the second pass — `diff(acos(x) * x -
-    /// sqrt(1 - x^2), x)` prints `acos(x)` there.
+    /// This was the same non-idempotence `evaluation_invariants.rs` recorded
+    /// as P1 class B and as P2's only entry, reached from a third direction,
+    /// and one fix retired all five: the port had dropped the `else
+    /// evalSort()` arm of the C++ `MERGE_ALL2` and `MERGE_INDEX2` macros, so
+    /// nothing put a product's factors in a canonical order during the merge
+    /// loop and `merge_addition`, which compares two products factor by factor
+    /// from a fixed offset, saw `x·(1-x²)^-½` and `-1·(1-x²)^-½·x` as
+    /// different terms. See `calculate::collapse_nary` and `sort::eval_sort`.
     ///
-    /// The wrapper's four other bases (`4x+5`, `-2x+7`, `4.7x-5.2`, …) hold,
-    /// because a non-unit `u'` leaves the two terms with different constant
-    /// factorisations that the *first* pass does merge.
-    pub const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
-        (
-            "acos(x)",
-            "evaluation is not idempotent: d/dx of the (correct) antiderivative \
-             leaves `x / sqrt(1 - x^2) - x / sqrt(1 - x^2) + acos(x)`, which a \
-             second pass folds to `acos(x)`. Substituting x = 3 into the \
-             unfolded form turns the pair into `3 / sqrt(-8) - 3 / sqrt(-8)`, a \
-             complex float difference that evaluates to `0.000000000i` rather \
-             than 0. Not a wrong integral — `∫acos(x) dx = x acos(x) - \
-             sqrt(1 - x^2)` is right.",
-        ),
-        (
-            "acos(x+6)",
-            "same as `acos(x)`: the uncancelled `x / sqrt(1 - (x+6)^2)` pair \
-             survives one evaluation pass and stops cancelling once x = 3 makes \
-             it `3 / sqrt(-80)`.",
-        ),
-        (
-            "acos(x-7)",
-            "same as `acos(x)`, with `3 / sqrt(-15)`.",
-        ),
-    ];
+    /// The wrapper's four other bases (`4x+5`, `-2x+7`, `4.7x-5.2`, …) always
+    /// held, because a non-unit `u'` left the two terms with different
+    /// constant factorisations that the *first* pass did merge.
+    pub const KNOWN_VIOLATIONS: &[(&str, &str)] = &[];
 
     /// Whether `m` mentions any of `names`, resolved through the port's own
     /// function tables so a typo excludes nothing silently.

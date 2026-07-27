@@ -259,6 +259,15 @@ impl Number {
         if re.is_zero() || im.is_zero() {
             return;
         }
+        // Every finite quantity is negligible beside an unbounded one, so the
+        // comparison says nothing when the part that would survive reaches
+        // infinity — and dropping the other one then hands back an enclosure
+        // that does not contain the values the function takes.
+        // `acos([0:0.5]+[-2:2]i)` came out as `0+([-infinity:1.5452])i`, with
+        // the whole real part thrown away.
+        if re.includes_infinity() || im.includes_infinity() {
+            return;
+        }
         if negligible_beside(&re, &im) {
             let mut cleaned = Number::new();
             cleaned.set_imaginary_part(&im);

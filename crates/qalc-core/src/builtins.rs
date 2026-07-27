@@ -332,6 +332,36 @@ fn apply(id: u32, args: &[Number]) -> Option<Number> {
         (id::TRUNC, 1) | (id::INT, 1) => unary(args, |n| n.trunc()),
         (id::FRAC, 1) => unary(args, |n| n.frac()),
         (id::ROUND, 1) => unary(args, |n| n.round(RoundingMode::HalfAwayFromZero)),
+        // `round(x, decimals)` / `round(x, decimals, mode)`
+        // (RoundFunction::calculate, BuiltinFunctions-number.cc:1026): scale by
+        // 10^decimals, round, scale back. Both extra arguments are
+        // `IntegerArgument`s and the third is clamped to the enum's range, so a
+        // fractional or out-of-range one leaves the call unevaluated.
+        (id::ROUND, 2) | (id::ROUND, 3) => {
+            let mode = if args.len() == 3 {
+                RoundingMode::from_index(args[2].to_i64()?)?
+            } else {
+                RoundingMode::HalfAwayFromZero
+            };
+            let decimals = &args[1];
+            if !decimals.is_integer() || args[0].has_imaginary_part() {
+                return None;
+            }
+            let mut n = args[0].clone();
+            if !decimals.is_zero() && !n.exp10_mul(decimals) {
+                return None;
+            }
+            if !n.round(mode) {
+                return None;
+            }
+            if !decimals.is_zero() {
+                let mut back = decimals.clone();
+                if !back.negate() || !n.exp10_mul(&back) {
+                    return None;
+                }
+            }
+            Some(n)
+        }
         (id::BITWISE_NOT, 1) => unary(args, |n| n.bit_not()),
         // Special functions (hand-rolled in qalc-num; MPFR has no pure-Rust
         // equivalent).
@@ -341,6 +371,9 @@ fn apply(id: u32, args: &[Number]) -> Option<Number> {
         (id::ERFC, 1) => unary(args, |n| n.erfc()),
         (id::ERFI, 1) => unary(args, |n| n.erfi()),
         (id::ZETA, 1) => unary(args, |n| n.zeta()),
+        // `zeta(s, a)` — the Hurwitz zeta (ZetaFunction takes 1-2 arguments,
+        // BuiltinFunctions-special.cc).
+        (id::ZETA, 2) => binary(args, |n, o| n.hurwitz_zeta(o)),
         (id::BERNOULLI, 1) => unary(args, |n| n.bernoulli()),
         (id::EXPINT, 1) => unary(args, |n| n.expint()),
         (id::LOGINT, 1) => unary(args, |n| n.logint()),
@@ -1128,20 +1161,32 @@ mod tests {
         assert!(s.contains("mod"), "got {s}");
     }
 
-    /// A call to a name no registry answers to must not become a product.
+    /// `name(args)` has three outcomes, and the middle one is why this test
+    /// exists (the rule itself is documented in [`crate::parser`]).
     ///
     /// This is the failure mode the golden suite was written to expose:
     /// `airy` is unimplemented, `airy * 0` is `0`, and `0` is
-    /// indistinguishable from the 0.3550280539 the reference computes. Only
-    /// the *call* form is rejected — implicit multiplication of identifiers
-    /// is load-bearing and stays.
+    /// indistinguishable from the 0.3550280539 the reference computes. But
+    /// `airy` is not an *unknown* name — `data/functions.xml` declares it,
+    /// this port has simply not implemented it — so the call is kept whole and
+    /// unevaluated, and prints back as `airy(0)`. Wrong in a way anyone can
+    /// see, rather than wrong in a way nobody can.
+    ///
+    /// Names nothing declares are left to decompose into products, which is
+    /// what the reference does with them: it answers `2z^3` to `zzz(2)`.
     #[test]
-    fn unknown_function_calls_are_rejected_not_multiplied() {
+    fn unknown_function_calls_are_echoed_not_multiplied() {
         let mut s = crate::session::Session::new();
+        // 2. Declared, unimplemented: the call reaches the output intact —
+        //    and, above all, is not the `0` the product used to give.
         for expr in ["airy(0)", "besselj(0, 0)", "floatParts(0)", "bitget(12, 3)"] {
-            let err = s.evaluate_line(expr).expect_err(expr);
-            assert!(err.contains("unknown function"), "{expr}: {err}");
+            assert_eq!(s.evaluate_line(expr).expect(expr), expr);
         }
+        // 1. Implemented: still evaluated.
+        assert_eq!(s.evaluate_line("sin(0)").expect("sin(0)"), "0");
+        // 3. Declared nowhere: a product, byte for byte what the reference
+        //    prints for it.
+        assert_eq!(s.evaluate_line("zzz(2)").expect("zzz(2)"), "2z^3");
         // Not a call: still a product of identifiers.
         assert!(s.evaluate_line("3yx^2").is_ok());
         // A single letter is a unit, a prefix or an unknown in the C++ name

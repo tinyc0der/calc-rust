@@ -140,67 +140,27 @@ const MAX_DEPTH: usize = 12;
 /// Largest `k` in the `x^k * g(x)` by-parts reduction.
 const MAX_PARTS_POWER: i64 = 8;
 
-/// `m = a*x + b` with numeric `a != 0` and `b`, or `None`.
-fn linear(m: &MathStructure, x: &MathStructure) -> Option<(Number, Number)> {
-    let (a, b) = linear_raw(m, x)?;
-    if a.is_zero() {
-        return None;
-    }
-    Some((a, b))
-}
+/// `max_part_depth` — how many nested integrations by parts one integral may
+/// spend. The C++ default is 5 (`MathStructure.h:868`); this port stops at 3
+/// because its search is wider (every factor is tried as `u`, not just the
+/// first that differentiates) and the corpus needs no more: raising it to 5
+/// answers nothing extra and roughly triples the run time.
+const MAX_PARTS_DEPTH: usize = 3;
 
-fn linear_raw(m: &MathStructure, x: &MathStructure) -> Option<(Number, Number)> {
-    if m.equals(x) {
-        return Some((Number::from_i64(1), Number::new()));
-    }
-    if !contains(m, x) {
-        let MathStructure::Number(n) = m else {
-            return None;
-        };
-        return Some((Number::new(), n.clone()));
-    }
-    match m {
-        MathStructure::Addition(terms) => {
-            let mut a = Number::new();
-            let mut b = Number::new();
-            for t in terms {
-                let (ta, tb) = linear_raw(t, x)?;
-                if !a.add(&ta) || !b.add(&tb) {
-                    return None;
-                }
-            }
-            Some((a, b))
-        }
-        MathStructure::Multiplication(factors) => {
-            let mut coeff = Number::from_i64(1);
-            let mut seen_x = false;
-            for f in factors {
-                if f.equals(x) {
-                    if seen_x {
-                        return None;
-                    }
-                    seen_x = true;
-                    continue;
-                }
-                if contains(f, x) {
-                    return None;
-                }
-                let MathStructure::Number(n) = f else {
-                    return None;
-                };
-                if !coeff.multiply(n) {
-                    return None;
-                }
-            }
-            if seen_x {
-                Some((coeff, Number::new()))
-            } else {
-                Some((Number::new(), coeff))
-            }
-        }
-        _ => None,
-    }
-}
+/// Largest expression by parts will hand back to the integrator, counted in
+/// nodes. `MathStructure-integrate.cc:6524` uses `countTotalChildren() < 100`
+/// for the same purpose: `u' * int v dx` can grow without bound even when
+/// every step is legal, and integrating the result is what costs.
+const MAX_PARTS_NODES: usize = 120;
+
+/// Largest number of factors by parts will split a product into. The C++
+/// requires `SIZE < 10` (`:6495`).
+const MAX_PARTS_FACTORS: usize = 6;
+
+/// How many nested radical substitutions one integral may spend. One is
+/// enough for this corpus — an integrand carries a single radical — and more
+/// would only widen a search that has no other termination argument.
+const MAX_SUBST_DEPTH: usize = 1;
 
 /// `m = c * x^n` with numeric `c != 0` and `n != 0`, or `None`.
 fn monomial(m: &MathStructure, x: &MathStructure) -> Option<(Number, Number)> {
@@ -252,6 +212,104 @@ fn monomial(m: &MathStructure, x: &MathStructure) -> Option<(Number, Number)> {
     }
 }
 
+/// `m = b + a x^n` with numeric `a != 0`, numeric `b` and numeric `n != 0`.
+///
+/// This is the C++'s `integrate_info(m, x, madd, mmul, mexp)`
+/// (`MathStructure-integrate.cc:32`), which every rule in the table calls
+/// first to decide whether a substitution applies. [`linear`] is the `n = 1`
+/// case, kept separate because the rules that only ever want a linear
+/// argument read better with two return values.
+fn affine_power(m: &MathStructure, x: &MathStructure) -> Option<(Number, Number, Number)> {
+    if !contains(m, x) {
+        return None;
+    }
+    let single;
+    let terms: &[MathStructure] = match m {
+        MathStructure::Addition(t) => t,
+        _ => {
+            single = [m.clone()];
+            &single
+        }
+    };
+    let mut a = Number::new();
+    let mut b = Number::new();
+    let mut exp: Option<Number> = None;
+    for t in terms {
+        if !contains(t, x) {
+            let MathStructure::Number(c) = t else {
+                return None;
+            };
+            if !b.add(c) {
+                return None;
+            }
+            continue;
+        }
+        let (c, d) = monomial(t, x)?;
+        match &exp {
+            Some(e) if !e.equals(&d, false, false) => return None,
+            _ => exp = Some(d),
+        }
+        if !a.add(&c) {
+            return None;
+        }
+    }
+    let n = exp?;
+    if a.is_zero() || !a.is_real() || !n.is_real() {
+        return None;
+    }
+    Some((a, b, n))
+}
+
+/// The constant `du/dx` contributes when `u = a x^n + b` is substituted into
+/// an integral that already carries a factor `x^k`: `du = a n x^(n-1) dx`, so
+/// the rule only fires when `k + 1 == n`, and then divides by `a n`.
+///
+/// `k = 0` is the bare case `int f(a x + b) dx = F(a x + b) / a`.
+fn substitution_divisor(u: &MathStructure, k: &Number, x: &MathStructure) -> Option<Number> {
+    let (a, _b, n) = affine_power(u, x)?;
+    let mut want = n.clone();
+    if !want.subtract(&Number::from_i64(1)) || !want.equals(k, false, false) {
+        return None;
+    }
+    let mut d = a;
+    if !d.multiply(&n) || d.is_zero() {
+        return None;
+    }
+    Some(d)
+}
+
+/// Whether `m` mentions one of the *real*-branch radicals.
+///
+/// `cbrt(x)` and `root(x, 3)` are negative for negative `x`; the `x^(1/3)`
+/// that the merge engine produces once they have been differentiated is the
+/// principal complex root, and the two disagree on the whole negative axis.
+/// An expression built out of both is therefore wrong there even though it
+/// differentiates back correctly *as a formal expression* — the derivative
+/// and the integrand simply denote different functions.
+///
+/// [`int_by_parts`] refuses to differentiate such a `u` for that reason: it
+/// is the one place in this file that puts a derivative and an integral of
+/// the same subexpression side by side in one answer. `sqrt` is not on the
+/// list, because `sqrt(x)` and `x^(1/2)` are the same principal branch.
+fn mentions_real_radical(m: &MathStructure) -> bool {
+    if let MathStructure::Function { id, .. } = m {
+        if matches!(id.0, bid::CBRT | bid::ROOT) {
+            return true;
+        }
+    }
+    (0..m.size())
+        .filter_map(|i| m.get(i))
+        .any(mentions_real_radical)
+}
+
+/// How many nodes `m` has, for [`MAX_PARTS_NODES`].
+fn node_count(m: &MathStructure) -> usize {
+    1 + (0..m.size())
+        .filter_map(|i| m.get(i))
+        .map(node_count)
+        .sum::<usize>()
+}
+
 /// `x^k` with `k` a positive integer no larger than [`MAX_PARTS_POWER`].
 fn small_power_of_x(m: &MathStructure, x: &MathStructure) -> Option<i64> {
     if m.equals(x) {
@@ -278,10 +336,22 @@ fn small_power_of_x(m: &MathStructure, x: &MathStructure) -> Option<i64> {
 /// when no rule applies. The result is *unevaluated*: the caller runs it
 /// through the merge engine.
 pub fn integrate(m: &MathStructure, x: &MathStructure) -> Option<MathStructure> {
-    int_rec(m, x, 0)
+    let mut parents = Vec::new();
+    int_rec(m, x, 0, MAX_PARTS_DEPTH, MAX_SUBST_DEPTH, &mut parents)
 }
 
-fn int_rec(m: &MathStructure, x: &MathStructure, depth: usize) -> Option<MathStructure> {
+/// `parts` is the C++'s `max_part_depth` and `parents` its `parent_parts`:
+/// the first bounds how many nested integrations by parts one integral may
+/// spend, the second refuses an integral that is already on the stack, which
+/// is what stops `int u v` from reducing to itself.
+fn int_rec(
+    m: &MathStructure,
+    x: &MathStructure,
+    depth: usize,
+    parts: usize,
+    subst: usize,
+    parents: &mut Vec<MathStructure>,
+) -> Option<MathStructure> {
     if depth > MAX_DEPTH {
         return None;
     }
@@ -292,17 +362,116 @@ fn int_rec(m: &MathStructure, x: &MathStructure, depth: usize) -> Option<MathStr
     if m.equals(x) {
         return Some(mul(vec![ratio(1, 2), pow(x.clone(), num(2))]));
     }
-    match m {
+    let table = match m {
         MathStructure::Addition(terms) => {
             let mut out = Vec::with_capacity(terms.len());
+            let mut all = true;
             for t in terms {
-                out.push(int_rec(t, x, depth + 1)?);
+                match int_rec(t, x, depth + 1, parts, subst, parents) {
+                    Some(v) => out.push(v),
+                    None => {
+                        all = false;
+                        break;
+                    }
+                }
             }
-            Some(add(out))
+            if all {
+                Some(add(out))
+            } else {
+                None
+            }
         }
-        MathStructure::Multiplication(factors) => int_product(factors, x, depth),
-        MathStructure::Power { base, exponent } => int_power(base, exponent, x, depth),
-        MathStructure::Function { id, args } => int_function(id.0, args, x, depth),
+        MathStructure::Multiplication(factors) => {
+            int_product(factors, x, depth, parts, subst, parents)
+        }
+        MathStructure::Power { base, exponent } => {
+            int_power(base, exponent, x, depth, parts, subst, parents)
+        }
+        MathStructure::Function { id, args } => {
+            int_function(id.0, args, x, depth, parts, subst, parents)
+        }
+        _ => None,
+    };
+    if table.is_some() {
+        return table;
+    }
+    if subst > 0 {
+        if let Some(r) = int_radical_substitution(m, x, depth, parts, subst - 1, parents) {
+            return Some(r);
+        }
+    }
+    // Last resort: a polynomial no rule above recognised, multiplied out and
+    // integrated term by term. `(2x^2+5)^2` reaches here because the
+    // substitution `u = 2x^2 + 5` wants a companion factor of `x` that is not
+    // there; `(4x+5)^3` does not, because the substitution *does* apply and
+    // `(4x+5)^4/16` is the better answer.
+    let p = dense_of(m, x)?;
+    if p.len() > MAX_EXPAND_DEGREE + 1 {
+        return None;
+    }
+    integrate_poly(&p, x)
+}
+
+/// `int g(x) x^k dx` for a single non-additive factor `g` whose dependence on
+/// `x` is an affine power `u = a x^n + b`, and a companion factor `x^k`.
+///
+/// The rule is the chain rule read backwards: `du = a n x^(n-1) dx`, so
+/// `int g(u) x^(n-1) dx = G(u) / (a n)`, and it fires only when the companion
+/// exponent `k` is exactly `n - 1`. `k = 0` is the plain linear substitution
+/// `u = a x + b` the reference's table is written against; `k = 1, n = 2` is
+/// what turns `x sin(x^2)`, `x / sqrt(x^2 - 1)` and `x / (2x^2 + 5)` into
+/// one-line answers.
+fn int_chain(g: &MathStructure, k: &Number, x: &MathStructure) -> Option<MathStructure> {
+    match g {
+        MathStructure::Function { id, args } if args.len() == 1 => {
+            let u = &args[0];
+            let d = substitution_divisor(u, k, x)?;
+            let f = antiderivative_of(id.0, u)?;
+            Some(over(f, &d))
+        }
+        MathStructure::Power { base, exponent } => {
+            let b_has = contains(base, x);
+            let e_has = contains(exponent, x);
+            if b_has == e_has {
+                return None;
+            }
+            if b_has {
+                // `f(u)^p` with `f` in the table of integer powers.
+                if let (MathStructure::Function { id, args }, MathStructure::Number(p)) =
+                    (base.as_ref(), exponent.as_ref())
+                {
+                    if args.len() == 1 {
+                        if let Some(pi) = p.to_i64() {
+                            if let Some(d) = substitution_divisor(&args[0], k, x) {
+                                if let Some(f) = antiderivative_of_power(id.0, &args[0], pi) {
+                                    return Some(over(f, &d));
+                                }
+                            }
+                        }
+                    }
+                }
+                let d = substitution_divisor(base, k, x)?;
+                // `u^(p+1) / (p+1)`, except at `p = -1` where that divides by
+                // zero and the answer is a logarithm.
+                let mut np1 = add(vec![(**exponent).clone(), num(1)]);
+                evaluate(&mut np1, &EvaluationOptions::default());
+                if matches!(&np1, MathStructure::Number(n) if n.is_zero()) {
+                    return Some(over(
+                        func(bid::LN, vec![func(bid::ABS, vec![(**base).clone()])]),
+                        &d,
+                    ));
+                }
+                let r = mul(vec![pow((**base).clone(), np1.clone()), inv(np1)]);
+                return Some(over(r, &d));
+            }
+            // `int b^u x^(n-1) dx = b^u / (a n ln b)`.
+            let d = substitution_divisor(exponent, k, x)?;
+            let mut factors = vec![pow((**base).clone(), (**exponent).clone())];
+            if !matches!(base.as_ref(), MathStructure::Symbolic(s) if s == "e") {
+                factors.push(inv(func(bid::LN, vec![(**base).clone()])));
+            }
+            Some(over(mul(factors), &d))
+        }
         _ => None,
     }
 }
@@ -312,58 +481,29 @@ fn int_power(
     exponent: &MathStructure,
     x: &MathStructure,
     depth: usize,
+    parts: usize,
+    subst: usize,
+    parents: &mut Vec<MathStructure>,
 ) -> Option<MathStructure> {
-    let b_has = contains(base, x);
-    let e_has = contains(exponent, x);
-    if b_has && e_has {
-        return None;
-    }
-    if b_has {
-        // `int (a x + b)^n dx`, with `n` constant.
-        let Some((a, _)) = linear(base, x) else {
-            // A higher-degree denominator: `int P(x)/Q(x) dx` by partial
-            // fractions (the `1/Q(x)` shape reaches here as a bare power).
-            if matches!(exponent, MathStructure::Number(n) if n.is_minus_one()) {
-                return int_partial_fractions(
-                    &mul(vec![pow(base.clone(), num(-1))]),
-                    x,
-                    depth,
-                );
-            }
-            return None;
-        };
-        if let MathStructure::Number(n) = exponent {
-            // `int (a x + b)^-1 dx` is a logarithm, not a power: the general
-            // rule below would divide by `n + 1 = 0`.
-            if n.is_minus_one() {
-                // `int 1/(a x + b) dx = ln|a x + b| / a`
-                return Some(over(
-                    func(bid::LN, vec![func(bid::ABS, vec![base.clone()])]),
-                    &a,
-                ));
-            }
-        }
-        // `(a x + b)^(n+1) / (a (n+1))`
-        let mut np1 = add(vec![exponent.clone(), num(1)]);
-        evaluate(&mut np1, &EvaluationOptions::default());
-        if matches!(&np1, MathStructure::Number(n) if n.is_zero()) {
-            return Some(over(
-                func(bid::LN, vec![func(bid::ABS, vec![base.clone()])]),
-                &a,
-            ));
-        }
-        let mut r = mul(vec![pow(base.clone(), np1.clone()), inv(np1)]);
-        r = over(r, &a);
+    let g = pow(base.clone(), exponent.clone());
+    if let Some(r) = int_chain(&g, &Number::new(), x) {
         return Some(r);
     }
-    // `int b^(a x + c) dx = b^(a x + c) / (a ln b)`.
-    let (a, _) = linear(exponent, x)?;
-    let mut factors = vec![pow(base.clone(), exponent.clone())];
-    if !matches!(base, MathStructure::Symbolic(s) if s == "e") {
-        factors.push(inv(func(bid::LN, vec![base.clone()])));
+    // A higher-degree denominator: `int P(x)/Q(x) dx` by partial fractions
+    // (the `1/Q(x)` shape reaches here as a bare power).
+    if contains(base, x)
+        && !contains(exponent, x)
+        && matches!(exponent, MathStructure::Number(n) if n.is_negative() && n.is_integer())
+    {
+        if let Some(r) = int_partial_fractions(&g, x, depth) {
+            return Some(r);
+        }
     }
-    let _ = depth;
-    Some(over(mul(factors), &a))
+    if let Some(r) = int_quadratic_radical(std::slice::from_ref(&g), x) {
+        return Some(r);
+    }
+    let _ = (parts, parents);
+    None
 }
 
 /// Antiderivative of the one-argument builtin `id` at `u`, for `u` the
@@ -413,12 +553,114 @@ fn antiderivative_of(id: u32, u: &MathStructure) -> Option<MathStructure> {
             mul(vec![u.clone(), f(bid::ASINH)]),
             neg(func(bid::SQRT, vec![add_one_square(u)])),
         ]),
+        // `int acosh u du = u acosh u - sqrt(u^2 - 1)`
+        bid::ACOSH => add(vec![
+            mul(vec![u.clone(), f(bid::ACOSH)]),
+            neg(func(bid::SQRT, vec![sub_one_square_flipped(u)])),
+        ]),
         bid::ATANH => add(vec![
             mul(vec![u.clone(), f(bid::ATANH)]),
             mul(vec![
                 ratio(1, 2),
                 func(bid::LN, vec![sub_one_square(u)]),
             ]),
+        ]),
+        _ => return None,
+    })
+}
+
+/// Antiderivative of `f(u)^p` at `u` the identity, for the integer powers
+/// that have one. The caller applies the chain-rule factor.
+///
+/// The reference spells these out in `integrate_function`'s per-function
+/// blocks, gated on `mpow` (`MathStructure-integrate.cc:1184`, `:1803`,
+/// `:2763` and so on). Only `p = 2` is filled in here, because that is what
+/// the corpus reaches — `sin(u)·sin(u)` collapses to `sin(u)^2` — and a
+/// half-populated table of reduction formulas is a place for a sign error to
+/// hide with nothing exercising it.
+fn antiderivative_of_power(id: u32, u: &MathStructure, p: i64) -> Option<MathStructure> {
+    if p != 2 {
+        return None;
+    }
+    let f = |i: u32| func(i, vec![u.clone()]);
+    // `sin(2u)`, `cosh(2u)`: the double-angle argument.
+    let two_u = mul(vec![num(2), u.clone()]);
+    let half_u = mul(vec![ratio(1, 2), u.clone()]);
+    Some(match id {
+        // `int sin^2 u du = u/2 - sin(2u)/4`
+        bid::SIN => add(vec![
+            half_u,
+            neg(mul(vec![ratio(1, 4), func(bid::SIN, vec![two_u])])),
+        ]),
+        // `int cos^2 u du = u/2 + sin(2u)/4`
+        bid::COS => add(vec![
+            half_u,
+            mul(vec![ratio(1, 4), func(bid::SIN, vec![two_u])]),
+        ]),
+        // `int tan^2 u du = tan u - u`
+        bid::TAN => add(vec![f(bid::TAN), neg(u.clone())]),
+        // `int cot^2 u du = -cot u - u`
+        bid::COT => add(vec![neg(f(bid::COT)), neg(u.clone())]),
+        // `int sinh^2 u du = sinh(2u)/4 - u/2`
+        bid::SINH => add(vec![
+            mul(vec![ratio(1, 4), func(bid::SINH, vec![two_u])]),
+            neg(half_u),
+        ]),
+        // `int cosh^2 u du = sinh(2u)/4 + u/2`
+        bid::COSH => add(vec![
+            mul(vec![ratio(1, 4), func(bid::SINH, vec![two_u])]),
+            half_u,
+        ]),
+        // `int tanh^2 u du = u - tanh u`
+        bid::TANH => add(vec![u.clone(), neg(f(bid::TANH))]),
+        // `int ln^2 u du = u (ln^2 u - 2 ln u + 2)`
+        bid::LN | bid::LOG => mul(vec![
+            u.clone(),
+            add(vec![
+                pow(f(bid::LN), num(2)),
+                neg(mul(vec![num(2), f(bid::LN)])),
+                num(2),
+            ]),
+        ]),
+        // `int asin^2 u du = u asin^2 u + 2 sqrt(1 - u^2) asin u - 2u`
+        bid::ASIN => add(vec![
+            mul(vec![u.clone(), pow(f(bid::ASIN), num(2))]),
+            mul(vec![
+                num(2),
+                func(bid::SQRT, vec![sub_one_square(u)]),
+                f(bid::ASIN),
+            ]),
+            neg(mul(vec![num(2), u.clone()])),
+        ]),
+        // `int acos^2 u du = u acos^2 u - 2 sqrt(1 - u^2) acos u - 2u`
+        bid::ACOS => add(vec![
+            mul(vec![u.clone(), pow(f(bid::ACOS), num(2))]),
+            neg(mul(vec![
+                num(2),
+                func(bid::SQRT, vec![sub_one_square(u)]),
+                f(bid::ACOS),
+            ])),
+            neg(mul(vec![num(2), u.clone()])),
+        ]),
+        // `int asinh^2 u du = u asinh^2 u - 2 sqrt(u^2 + 1) asinh u + 2u`
+        bid::ASINH => add(vec![
+            mul(vec![u.clone(), pow(f(bid::ASINH), num(2))]),
+            neg(mul(vec![
+                num(2),
+                func(bid::SQRT, vec![add_one_square(u)]),
+                f(bid::ASINH),
+            ])),
+            mul(vec![num(2), u.clone()]),
+        ]),
+        // `int acosh^2 u du = u acosh^2 u - 2 sqrt(u^2 - 1) acosh u + 2u`
+        bid::ACOSH => add(vec![
+            mul(vec![u.clone(), pow(f(bid::ACOSH), num(2))]),
+            neg(mul(vec![
+                num(2),
+                func(bid::SQRT, vec![sub_one_square_flipped(u)]),
+                f(bid::ACOSH),
+            ])),
+            mul(vec![num(2), u.clone()]),
         ]),
         _ => return None,
     })
@@ -432,20 +674,73 @@ fn sub_one_square(u: &MathStructure) -> MathStructure {
     add(vec![num(1), neg(pow(u.clone(), num(2)))])
 }
 
+/// `u^2 - 1`, the other way round — `acosh`'s radicand.
+fn sub_one_square_flipped(u: &MathStructure) -> MathStructure {
+    add(vec![pow(u.clone(), num(2)), num(-1)])
+}
+
 fn int_function(
     id: u32,
     args: &[MathStructure],
     x: &MathStructure,
     depth: usize,
+    parts: usize,
+    subst: usize,
+    parents: &mut Vec<MathStructure>,
 ) -> Option<MathStructure> {
-    let _ = depth;
     if args.len() != 1 {
         return None;
     }
-    let u = &args[0];
-    let (a, _) = linear(u, x)?;
-    let f = antiderivative_of(id, u)?;
-    Some(over(f, &a))
+    let g = func(id, args.to_vec());
+    if let Some(r) = int_chain(&g, &Number::new(), x) {
+        return Some(r);
+    }
+    int_function_by_parts(&g, x, depth, parts, subst, parents)
+}
+
+/// By parts against `dv = dx`: `int f dx = x f - int x f' dx`.
+///
+/// `MathStructure-integrate.cc:3479` runs this for `ln`, `asin`, `acos`,
+/// `atan`, `asinh`, `acosh` and `atanh` before anything else, and `:3876`
+/// runs it for every remaining function *except* `sin`, `cos`, `tan`, `sinh`,
+/// `cosh` and `tanh`. Those six are excluded because their derivative is
+/// another function of the same family, so `int x f' dx` is no easier than
+/// what it came from and the recursion only burns the budget.
+fn int_function_by_parts(
+    g: &MathStructure,
+    x: &MathStructure,
+    depth: usize,
+    parts: usize,
+    subst: usize,
+    parents: &mut Vec<MathStructure>,
+) -> Option<MathStructure> {
+    if parts == 0 || depth + 1 > MAX_DEPTH {
+        return None;
+    }
+    let MathStructure::Function { id, .. } = g else {
+        return None;
+    };
+    if matches!(
+        id.0,
+        bid::SIN | bid::COS | bid::TAN | bid::COT | bid::SINH | bid::COSH | bid::TANH
+    ) {
+        return None;
+    }
+    if parents.iter().any(|p| p.equals(g)) || mentions_real_radical(g) {
+        return None;
+    }
+    let eo = EvaluationOptions::default();
+    let mut dg = crate::differentiate::differentiate(g, x)?;
+    evaluate(&mut dg, &eo);
+    let mut w = mul(vec![x.clone(), dg]);
+    evaluate(&mut w, &eo);
+    if node_count(&w) > MAX_PARTS_NODES {
+        return None;
+    }
+    parents.push(g.clone());
+    let tail = int_rec(&w, x, depth + 1, parts - 1, subst, parents);
+    parents.pop();
+    Some(add(vec![mul(vec![x.clone(), g.clone()]), neg(tail?)]))
 }
 
 /// `int f(w)/w dw` for the five builtins whose integral is a named special
@@ -465,6 +760,9 @@ fn int_product(
     factors: &[MathStructure],
     x: &MathStructure,
     depth: usize,
+    parts: usize,
+    subst: usize,
+    parents: &mut Vec<MathStructure>,
 ) -> Option<MathStructure> {
     // Constant factors come straight out of the integral.
     let mut consts: Vec<MathStructure> = Vec::new();
@@ -481,7 +779,7 @@ fn int_product(
         return Some(mul(consts));
     }
     if vars.len() == 1 {
-        let inner = int_rec(&vars[0], x, depth + 1)?;
+        let inner = int_rec(&vars[0], x, depth + 1, parts, subst, parents)?;
         consts.push(inner);
         return Some(mul(consts));
     }
@@ -489,13 +787,517 @@ fn int_product(
         consts.push(r);
         return Some(mul(consts));
     }
-    if let Some(r) = int_by_parts(&vars, x, depth) {
+    if let Some(r) = int_substitution(&vars, x) {
         consts.push(r);
         return Some(mul(consts));
     }
+    if let Some(r) = int_quadratic_radical(&vars, x) {
+        consts.push(r);
+        return Some(mul(consts));
+    }
+    // Before by parts, not after: by parts applied to a rational function
+    // produces a correct but unrecognisable answer, and often no answer at
+    // all, where the residue expansion is a closed form.
     if let Some(r) = int_partial_fractions(&mul(vars.clone()), x, depth) {
         consts.push(r);
         return Some(mul(consts));
+    }
+    if let Some(r) = int_by_parts(&vars, x, depth, parts, subst, parents) {
+        consts.push(r);
+        return Some(mul(consts));
+    }
+    None
+}
+
+// ----------------------------------------------------------------------
+// Substitution t = (a x + b)^(1/n)
+// ----------------------------------------------------------------------
+
+/// The symbol the radical substitution integrates against. Constructed
+/// directly as a `Symbolic`, never parsed, so it cannot collide with a name
+/// the user could write.
+const SUBST_VAR: &str = "\u{2009}t\u{2009}";
+
+/// `m = (a x + b)^q`, in every spelling: the bare linear expression, `sqrt`,
+/// `cbrt`, `root(·, k)`, and any of those raised to a constant power.
+fn linear_power(m: &MathStructure, x: &MathStructure) -> Option<(Number, Number, Number)> {
+    if let MathStructure::Function { id, args } = m {
+        let root = match (id.0, args.len()) {
+            (bid::SQRT, 1) => Some(Number::from_ints(1, 2, 0)),
+            (bid::CBRT, 1) => Some(Number::from_ints(1, 3, 0)),
+            (bid::ROOT, 2) => {
+                let MathStructure::Number(k) = &args[1] else {
+                    return None;
+                };
+                let ki = k.to_i64()?;
+                if !(2..=8).contains(&ki) {
+                    return None;
+                }
+                Some(Number::from_ints(1, ki, 0))
+            }
+            _ => None,
+        };
+        if let Some(q) = root {
+            let (a, b, n) = affine_power(&args[0], x)?;
+            if !n.is_one() {
+                return None;
+            }
+            return Some((a, b, q));
+        }
+        return None;
+    }
+    if let MathStructure::Power { base, exponent } = m {
+        if contains(exponent, x) {
+            return None;
+        }
+        let MathStructure::Number(e) = exponent.as_ref() else {
+            return None;
+        };
+        let (a, b, q0) = linear_power(base, x)?;
+        let mut q = q0;
+        if !q.multiply(e) || !q.is_rational() {
+            return None;
+        }
+        return Some((a, b, q));
+    }
+    let (a, b, n) = affine_power(m, x)?;
+    if !n.is_one() {
+        return None;
+    }
+    Some((a, b, Number::from_i64(1)))
+}
+
+/// The node inside `m` that spells `(a x + b)^(1/d)` outright, and `d`.
+///
+/// `cbrt(x)^2` is a use of the radical with exponent `2/3`, but the radical
+/// *itself* is right there as the base, and reusing that exact node for the
+/// back-substitution is what keeps the real cube root real.
+fn witness_of(m: &MathStructure, x: &MathStructure) -> Option<(MathStructure, i64)> {
+    if let Some((_, _, q)) = linear_power(m, x) {
+        if q.is_positive() && q.numerator().is_one() {
+            let d = q.denominator().to_i64()?;
+            if d > 1 {
+                return Some((m.clone(), d));
+            }
+        }
+    }
+    if let MathStructure::Power { base, .. } = m {
+        return witness_of(base, x);
+    }
+    None
+}
+
+/// What one integrand needs from the substitution `t = (a x + b)^(1/n)`.
+struct RadicalUse {
+    a: Number,
+    b: Number,
+    /// `n`: the lcm of the denominators of every fractional power of
+    /// `a x + b` in the integrand.
+    n: i64,
+    /// A node that already spells `(a x + b)^(1/n)`, when one occurs. Using
+    /// it verbatim for the back-substitution is what keeps `cbrt` — the real
+    /// cube root — from silently becoming the principal complex one.
+    witness: Option<MathStructure>,
+    /// Whether any `cbrt`/`root` was involved, which is when that matters.
+    real_branch: bool,
+}
+
+/// Find the one radical the whole integrand is built on, or `None` if there
+/// is none or more than one.
+fn scan_radicals(
+    m: &MathStructure,
+    x: &MathStructure,
+    acc: &mut Option<RadicalUse>,
+) -> bool {
+    if !contains(m, x) {
+        return true;
+    }
+    if let Some((a, b, q)) = linear_power(m, x) {
+        let den = q.denominator().to_i64().unwrap_or(0);
+        if den > 1 {
+            let real = mentions_real_radical(m);
+            let w = witness_of(m, x).filter(|(_, d)| *d == den).map(|(w, _)| w);
+            let is_witness = w.is_some();
+            match acc {
+                None => {
+                    *acc = Some(RadicalUse {
+                        a,
+                        b,
+                        n: den,
+                        witness: w,
+                        real_branch: real,
+                    });
+                }
+                Some(u) => {
+                    if !u.a.equals(&a, false, false) || !u.b.equals(&b, false, false) {
+                        return false;
+                    }
+                    let mut l = Number::from_i64(u.n);
+                    if !l.lcm(&Number::from_i64(den)) {
+                        return false;
+                    }
+                    u.n = match l.to_i64() {
+                        Some(v) if (2..=8).contains(&v) => v,
+                        _ => return false,
+                    };
+                    if is_witness && den == u.n {
+                        u.witness = witness_of(m, x).map(|(w, _)| w);
+                    } else if den > u.n {
+                        u.witness = None;
+                    }
+                    u.real_branch |= real;
+                }
+            }
+            return true;
+        }
+    }
+    (0..m.size())
+        .filter_map(|i| m.get(i))
+        .all(|c| scan_radicals(c, x, acc))
+}
+
+/// Rewrite `m` in terms of `t`, given `x = (t^n - b)/a`.
+fn rewrite_in_t(
+    m: &MathStructure,
+    x: &MathStructure,
+    a: &Number,
+    b: &Number,
+    n: i64,
+    t: &MathStructure,
+) -> Option<MathStructure> {
+    if !contains(m, x) {
+        return Some(m.clone());
+    }
+    if let Some((ma, mb, q)) = linear_power(m, x) {
+        if ma.equals(a, false, false) && mb.equals(b, false, false) {
+            let mut e = q;
+            if !e.multiply(&Number::from_i64(n)) || !e.is_integer() {
+                return None;
+            }
+            let k = e.to_i64()?;
+            return Some(if k == 1 {
+                t.clone()
+            } else {
+                pow(t.clone(), num(k))
+            });
+        }
+    }
+    if m.equals(x) {
+        // `x = (t^n - b) / a`
+        let mut inv_a = Number::from_i64(1);
+        let mut minus_b = b.clone();
+        if !inv_a.divide(a) || !minus_b.negate() {
+            return None;
+        }
+        return Some(mul(vec![
+            nr(inv_a),
+            add(vec![pow(t.clone(), num(n)), nr(minus_b)]),
+        ]));
+    }
+    let rec = |c: &MathStructure| rewrite_in_t(c, x, a, b, n, t);
+    match m {
+        MathStructure::Addition(terms) => {
+            Some(add(terms.iter().map(rec).collect::<Option<Vec<_>>>()?))
+        }
+        MathStructure::Multiplication(factors) => {
+            Some(mul(factors.iter().map(rec).collect::<Option<Vec<_>>>()?))
+        }
+        MathStructure::Power { base, exponent } => {
+            if contains(exponent, x) {
+                return None;
+            }
+            Some(pow(rec(base)?, (**exponent).clone()))
+        }
+        MathStructure::Function { id, args } => {
+            Some(func(id.0, args.iter().map(rec).collect::<Option<Vec<_>>>()?))
+        }
+        _ => None,
+    }
+}
+
+/// `int f dx` by the substitution `t = (a x + b)^(1/n)`, so that
+/// `x = (t^n - b)/a` and `dx = (n/a) t^(n-1) dt`.
+///
+/// This is the port's counterpart of the reference's
+/// `UnknownVariable`-and-`replace` block (`MathStructure-integrate.cc:3684`),
+/// and it is what the whole radical third of the corpus turns on:
+/// `sin(cbrt(x))` has no rule at all, while `3 t^2 sin(t)` is two rounds of
+/// integration by parts.
+///
+/// The back-substitution reuses the *exact* node the integrand spelled the
+/// radical with wherever one exists, rather than rebuilding `(a x + b)^(1/n)`.
+/// `cbrt` is the real cube root and `x^(1/3)` is the principal complex one;
+/// they differ on the whole negative axis, and an answer that swapped one for
+/// the other would be wrong there. When no such node occurs, one is built —
+/// but only if no `cbrt`/`root` was involved, so the rebuilt spelling cannot
+/// be the wrong branch of one that was.
+fn int_radical_substitution(
+    m: &MathStructure,
+    x: &MathStructure,
+    depth: usize,
+    parts: usize,
+    subst: usize,
+    parents: &mut Vec<MathStructure>,
+) -> Option<MathStructure> {
+    if depth + 1 > MAX_DEPTH {
+        return None;
+    }
+    let mut acc: Option<RadicalUse> = None;
+    if !scan_radicals(m, x, &mut acc) {
+        return None;
+    }
+    let use_ = acc?;
+    let n = use_.n;
+    if !(2..=8).contains(&n) || use_.a.is_zero() {
+        return None;
+    }
+    let back = match use_.witness {
+        Some(w) => w,
+        None if use_.real_branch => return None,
+        None => pow(
+            add(vec![
+                mul(vec![nr(use_.a.clone()), x.clone()]),
+                nr(use_.b.clone()),
+            ]),
+            nr(Number::from_ints(1, n, 0)),
+        ),
+    };
+
+    let t = MathStructure::symbolic(SUBST_VAR);
+    let g = rewrite_in_t(m, x, &use_.a, &use_.b, n, &t)?;
+    // `dx = (n/a) t^(n-1) dt`
+    let mut coef = Number::from_i64(n);
+    if !coef.divide(&use_.a) {
+        return None;
+    }
+    let mut integrand = mul(vec![nr(coef), pow(t.clone(), num(n - 1)), g]);
+    let eo = EvaluationOptions::default();
+    evaluate(&mut integrand, &eo);
+    if node_count(&integrand) > MAX_PARTS_NODES {
+        return None;
+    }
+    let mut r = int_rec(&integrand, &t, depth + 1, parts, subst, parents)?;
+    evaluate(&mut r, &eo);
+    if contains(&r, &t) {
+        crate::solve::replace(&mut r, &t, &back);
+    }
+    if contains(&r, &t) {
+        return None;
+    }
+    Some(r)
+}
+
+// ----------------------------------------------------------------------
+// Quadratic radicals
+// ----------------------------------------------------------------------
+
+/// `int P(x) sqrt(Q)^h dx` for a quadratic `Q` and `h` in `{-1, 1}`.
+///
+/// This is the family every inverse-trigonometric and inverse-hyperbolic
+/// integrand reduces to once by parts has run: `int x asin(4x+5) dx` becomes
+/// `x^2/2 · asin' = 2x^2 / sqrt(-16x^2 - 40x - 24)`, and without a rule for
+/// that shape the whole by-parts branch is wasted.
+///
+/// `I_k = int x^k / sqrt(Q) dx` satisfies
+/// `x^(k-1) sqrt(Q) = k a I_k + (k - 1/2) b I_(k-1) + (k - 1) c I_(k-2)`
+/// — differentiate the left side to see it — which is solved for `I_k` and
+/// run upwards from `I_0`. `sqrt(Q)` itself is folded in by multiplying the
+/// numerator by `Q`.
+fn int_quadratic_radical(
+    vars: &[MathStructure],
+    x: &MathStructure,
+) -> Option<MathStructure> {
+    let mut radical: Option<(Vec<Number>, MathStructure, i64)> = None;
+    let mut numer: Vec<MathStructure> = Vec::new();
+    for v in vars {
+        match radical_factor(v, x) {
+            Some(r) => {
+                if radical.is_some() {
+                    return None;
+                }
+                radical = Some(r);
+            }
+            None => numer.push(v.clone()),
+        }
+    }
+    let (q, q_expr, h) = radical?;
+    if q.len() != 3 {
+        return None;
+    }
+    let (c, b, a) = (q[0].clone(), q[1].clone(), q[2].clone());
+    if a.is_zero() || !a.is_real() || !b.is_real() || !c.is_real() {
+        return None;
+    }
+    let mut n = dense_of(&mul(numer), x)?;
+    match h {
+        1 => n = poly_mul(&n, &q)?,
+        -1 => {}
+        _ => return None,
+    }
+    if n.len() > 5 {
+        return None;
+    }
+
+    let sq = func(bid::SQRT, vec![q_expr]);
+    // `2 a x + b`, which is `Q'`.
+    let mut two_a = a.clone();
+    if !two_a.multiply(&Number::from_i64(2)) {
+        return None;
+    }
+    let lin = add(vec![mul(vec![nr(two_a.clone()), x.clone()]), nr(b.clone())]);
+    // `b^2 - 4ac`.
+    let mut disc = b.clone();
+    let mut four_ac = a.clone();
+    if !disc.multiply(&b)
+        || !four_ac.multiply(&c)
+        || !four_ac.multiply(&Number::from_i64(4))
+        || !four_ac.negate()
+        || !disc.add(&four_ac)
+    {
+        return None;
+    }
+
+    let i0 = if a.is_negative() {
+        // `Q` opens downwards: it is positive only between two real roots, and
+        // the antiderivative is an arcsine. With no real roots `Q < 0`
+        // everywhere and there is nothing real to return.
+        if !disc.is_positive() {
+            return None;
+        }
+        let mut na = a.clone();
+        if !na.negate() {
+            return None;
+        }
+        let s1 = func(bid::SQRT, vec![nr(na)]);
+        let s2 = func(bid::SQRT, vec![nr(disc)]);
+        mul(vec![
+            inv(s1),
+            func(bid::ASIN, vec![mul(vec![neg(lin.clone()), inv(s2)])]),
+        ])
+    } else {
+        let s1 = func(bid::SQRT, vec![nr(a.clone())]);
+        if disc.is_negative() {
+            let mut nd = disc.clone();
+            if !nd.negate() {
+                return None;
+            }
+            let s2 = func(bid::SQRT, vec![nr(nd)]);
+            mul(vec![
+                inv(s1),
+                func(bid::ASINH, vec![mul(vec![lin.clone(), inv(s2)])]),
+            ])
+        } else {
+            let inner = add(vec![
+                mul(vec![num(2), s1.clone(), sq.clone()]),
+                lin.clone(),
+            ]);
+            mul(vec![
+                inv(s1),
+                func(bid::LN, vec![func(bid::ABS, vec![inner])]),
+            ])
+        }
+    };
+
+    let mut ints: Vec<MathStructure> = vec![i0];
+    for k in 1..n.len() {
+        let ki = k as i64;
+        let head = if k == 1 {
+            sq.clone()
+        } else {
+            mul(vec![pow(x.clone(), num(ki - 1)), sq.clone()])
+        };
+        let mut terms = vec![head];
+        // `-(k - 1/2) b I_(k-1)`
+        let mut c1 = Number::from_ints(2 * ki - 1, 2, 0);
+        if !c1.multiply(&b) || !c1.negate() {
+            return None;
+        }
+        if !c1.is_zero() {
+            terms.push(mul(vec![nr(c1), ints[k - 1].clone()]));
+        }
+        if k >= 2 {
+            // `-(k - 1) c I_(k-2)`
+            let mut c2 = Number::from_i64(ki - 1);
+            if !c2.multiply(&c) || !c2.negate() {
+                return None;
+            }
+            if !c2.is_zero() {
+                terms.push(mul(vec![nr(c2), ints[k - 2].clone()]));
+            }
+        }
+        let mut den = a.clone();
+        if !den.multiply(&Number::from_i64(ki)) {
+            return None;
+        }
+        ints.push(over(add(terms), &den));
+    }
+
+    let mut out: Vec<MathStructure> = Vec::new();
+    for (k, coef) in n.iter().enumerate() {
+        if coef.is_zero() {
+            continue;
+        }
+        out.push(mul(vec![nr(coef.clone()), ints[k].clone()]));
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(add(out))
+}
+
+/// A factor that is `Q^(h/2)` for a polynomial `Q` and an *odd* `h`, in any
+/// of the three spellings the merge engine leaves behind: `sqrt(Q)`,
+/// `sqrt(Q)^h` and `Q^(h/2)`.
+fn radical_factor(
+    v: &MathStructure,
+    x: &MathStructure,
+) -> Option<(Vec<Number>, MathStructure, i64)> {
+    if let MathStructure::Function { id, args } = v {
+        if id.0 == bid::SQRT && args.len() == 1 {
+            return Some((dense_of(&args[0], x)?, args[0].clone(), 1));
+        }
+    }
+    let MathStructure::Power { base, exponent } = v else {
+        return None;
+    };
+    let MathStructure::Number(e) = exponent.as_ref() else {
+        return None;
+    };
+    if let MathStructure::Function { id, args } = base.as_ref() {
+        if id.0 == bid::SQRT && args.len() == 1 {
+            let h = e.to_i64()?;
+            if h % 2 == 0 {
+                return None;
+            }
+            return Some((dense_of(&args[0], x)?, args[0].clone(), h));
+        }
+    }
+    // `Q^(h/2)`.
+    let mut doubled = e.clone();
+    if !doubled.multiply(&Number::from_i64(2)) {
+        return None;
+    }
+    let h = doubled.to_i64()?;
+    if h % 2 == 0 {
+        return None;
+    }
+    Some((dense_of(base, x)?, (**base).clone(), h))
+}
+
+/// `int c x^k g(x) dx` through the substitution `u = a x^(k+1) + b`, when the
+/// product is exactly a monomial times one such `g`. See [`int_chain`].
+fn int_substitution(vars: &[MathStructure], x: &MathStructure) -> Option<MathStructure> {
+    if vars.len() != 2 {
+        return None;
+    }
+    for (i, j) in [(0usize, 1usize), (1, 0)] {
+        let Some((c, k)) = monomial(&vars[i], x) else {
+            continue;
+        };
+        let Some(r) = int_chain(&vars[j], &k, x) else {
+            continue;
+        };
+        return Some(mul(vec![nr(c), r]));
     }
     None
 }
@@ -534,46 +1336,101 @@ fn is_reciprocal_x(m: &MathStructure, x: &MathStructure) -> bool {
     base.equals(x) && matches!(exponent.as_ref(), MathStructure::Number(n) if n.is_minus_one())
 }
 
-/// `int x^k g(x) dx = x^k G(x) - k int x^(k-1) G(x) dx`.
+/// Integration by parts: `int u v dx = u V - int u' V dx`, with `V = int v dx`.
 ///
-/// `k` strictly decreases, so the recursion terminates; it is additionally
-/// bounded by `k <= MAX_PARTS_POWER` and by [`MAX_DEPTH`].
+/// This is `MathStructure-integrate.cc:6494`. Each factor of the product is
+/// tried as `u` in turn, with `v` the product of the others; the inner `V` is
+/// integrated with the by-parts budget set to zero, exactly as the C++ does
+/// (`minteg_v.integrate(…, 0, parent_parts)`), because a `V` that itself
+/// needed by parts is a `V` that will not simplify anything.
+///
+/// Three things bound it: [`MAX_PARTS_DEPTH`] limits nesting, `parents`
+/// refuses an integral already on the stack — which is what stops
+/// `int u v dx` from reducing to itself — and [`MAX_PARTS_NODES`] refuses an
+/// intermediate that has grown past the point of being worth integrating.
+///
+/// The order factors are tried in is the only place this departs from the
+/// reference, which simply walks the children. `u` is picked by the textbook
+/// LIATE preference ([`parts_rank`]); the C++'s order works because it
+/// retries every factor, but for `x ln x` it spends the whole budget on the
+/// branch that grows before reaching the one that shrinks.
 fn int_by_parts(
     vars: &[MathStructure],
     x: &MathStructure,
     depth: usize,
+    parts: usize,
+    subst: usize,
+    parents: &mut Vec<MathStructure>,
 ) -> Option<MathStructure> {
-    if depth + 1 > MAX_DEPTH {
+    if parts == 0 || depth + 1 > MAX_DEPTH || vars.len() > MAX_PARTS_FACTORS {
         return None;
     }
-    // Find the `x^k` factor.
-    let mut k_idx = None;
-    for (i, v) in vars.iter().enumerate() {
-        if let Some(k) = small_power_of_x(v, x) {
-            k_idx = Some((i, k));
-            break;
+    let whole = mul(vars.to_vec());
+    if parents.iter().any(|p| p.equals(&whole)) {
+        return None;
+    }
+    let eo = EvaluationOptions::default();
+    let mut order: Vec<usize> = (0..vars.len()).collect();
+    order.sort_by_key(|i| parts_rank(&vars[*i], x));
+    for i in order {
+        let u = &vars[i];
+        if mentions_real_radical(u) {
+            continue;
+        }
+        let Some(mut du) = crate::differentiate::differentiate(u, x) else {
+            continue;
+        };
+        let v = mul(
+            vars.iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, m)| m.clone())
+                .collect::<Vec<_>>(),
+        );
+        let Some(mut big_v) = int_rec(&v, x, depth + 1, 0, subst, parents) else {
+            continue;
+        };
+        evaluate(&mut big_v, &eo);
+        evaluate(&mut du, &eo);
+        let mut w = mul(vec![big_v.clone(), du]);
+        evaluate(&mut w, &eo);
+        if node_count(&w) > MAX_PARTS_NODES {
+            continue;
+        }
+        parents.push(whole.clone());
+        let tail = int_rec(&w, x, depth + 1, parts - 1, subst, parents);
+        parents.pop();
+        if let Some(tail) = tail {
+            return Some(add(vec![mul(vec![u.clone(), big_v]), neg(tail)]));
         }
     }
-    let (i, k) = k_idx?;
-    let rest: Vec<MathStructure> = vars
-        .iter()
-        .enumerate()
-        .filter(|(j, _)| *j != i)
-        .map(|(_, v)| v.clone())
-        .collect();
-    let g = mul(rest);
-    let big_g = int_rec(&g, x, depth + 1)?;
-    let u = vars[i].clone();
-    let next_u = if k == 1 {
-        num(1)
-    } else {
-        pow(x.clone(), num(k - 1))
-    };
-    let tail = int_rec(&mul(vec![next_u, big_g.clone()]), x, depth + 1)?;
-    Some(add(vec![
-        mul(vec![u, big_g]),
-        neg(mul(vec![num(k), tail])),
-    ]))
+    None
+}
+
+/// LIATE: logarithmic, inverse-trigonometric, algebraic, trigonometric,
+/// exponential — the order in which a factor is worth choosing as the `u`
+/// that gets differentiated. Lower sorts first.
+fn parts_rank(m: &MathStructure, x: &MathStructure) -> u8 {
+    if let MathStructure::Function { id, .. } = m {
+        return match id.0 {
+            bid::LN | bid::LOG | bid::LOG2 | bid::LOG10 => 0,
+            bid::ASIN | bid::ACOS | bid::ATAN | bid::ACOT | bid::ASINH | bid::ACOSH
+            | bid::ATANH => 1,
+            bid::SIN | bid::COS | bid::TAN | bid::COT | bid::SINH | bid::COSH | bid::TANH => 3,
+            bid::EXP => 4,
+            _ => 2,
+        };
+    }
+    if small_power_of_x(m, x).is_some() || monomial(m, x).is_some() {
+        return 2;
+    }
+    if let MathStructure::Power { base, exponent } = m {
+        // `b^(f(x))`: exponential.
+        if !contains(base, x) && contains(exponent, x) {
+            return 4;
+        }
+    }
+    2
 }
 
 // ----------------------------------------------------------------------
@@ -588,6 +1445,10 @@ const MAX_PF_DEGREE: usize = 6;
 /// This is the small, safe corner of `MathStructure-decompose.cc`: `Q` is
 /// searched for rational roots by the rational-root theorem, and each simple
 /// root contributes `c ln|x - r|`.
+///
+/// An improper fraction is divided first — `P = D Q + R` — and the quotient
+/// polynomial `D` integrated term by term. That is what makes `int x ln(4x+5)`
+/// come out: by parts turns it into `int 2x^2/(4x+5)`, which is improper.
 fn int_partial_fractions(
     m: &MathStructure,
     x: &MathStructure,
@@ -596,19 +1457,33 @@ fn int_partial_fractions(
     if depth + 1 > MAX_DEPTH {
         return None;
     }
-    let (num_poly, den_poly) = as_rational_function(m, x)?;
+    let (mut num_poly, den_poly) = as_rational_function(m, x)?;
     if den_poly.len() < 2 || den_poly.len() > MAX_PF_DEGREE + 1 {
         return None;
     }
-    // Only a proper fraction: the reference divides first, and polynomial
-    // division is not needed by any transcript here.
+    let mut whole: Option<MathStructure> = None;
     if num_poly.len() >= den_poly.len() {
-        return None;
+        let (q, r) = poly_divmod(&num_poly, &den_poly)?;
+        whole = Some(integrate_poly(&q, x)?);
+        num_poly = r;
     }
-    let roots = distinct_rational_roots(&den_poly)?;
-    if roots.len() + 1 != den_poly.len() {
-        return None;
+    if num_poly.iter().all(Number::is_zero) {
+        return whole;
     }
+    let roots = match distinct_rational_roots(&den_poly) {
+        Some(r) if r.len() + 1 == den_poly.len() => r,
+        // No rational split. A quadratic denominator still has a closed form
+        // — an arctangent or an argument-hyperbolic-tangent — and that is the
+        // one irrational case worth carrying, because `1/(2x^2+5)` and the
+        // `x^2/(x^2+1)` that `int x atan(x)` reduces to are both it.
+        _ => {
+            let q = int_quadratic(&num_poly, &den_poly, x)?;
+            return Some(match whole {
+                Some(w) => add(vec![w, q]),
+                None => q,
+            });
+        }
+    };
     // Residue at a simple root: `P(r) / Q'(r)`.
     let dq = derivative_coeffs(&den_poly);
     let mut parts: Vec<(Number, MathStructure)> = Vec::with_capacity(roots.len());
@@ -629,7 +1504,166 @@ fn int_partial_fractions(
         let arg = func(bid::ABS, vec![add(vec![x.clone(), nr(shifted)])]);
         parts.push((c, arg));
     }
-    Some(combine_logs(parts))
+    let logs = combine_logs(parts);
+    Some(match whole {
+        Some(w) => add(vec![w, logs]),
+        None => logs,
+    })
+}
+
+/// `int (p1 x + p0) / (a x^2 + b x + c) dx`.
+///
+/// Split as `p1/(2a) ln|Q| + (p0 - p1 b/(2a)) int dx/Q`, and the remaining
+/// `int dx/Q` by completing the square: an arctangent when the discriminant is
+/// negative, a logarithm of a ratio when it is positive, and `-2/(2ax+b)` at
+/// the double root. Only reached when the residue expansion could not split
+/// `Q` into distinct rational linear factors, so the positive-discriminant
+/// branch is the irrational-roots case.
+fn int_quadratic(
+    num_poly: &[Number],
+    den: &[Number],
+    x: &MathStructure,
+) -> Option<MathStructure> {
+    if den.len() != 3 || num_poly.len() > 2 {
+        return None;
+    }
+    let (c, b, a) = (den[0].clone(), den[1].clone(), den[2].clone());
+    if a.is_zero() || !a.is_real() || !b.is_real() || !c.is_real() {
+        return None;
+    }
+    let p1 = num_poly.get(1).cloned().unwrap_or_else(Number::new);
+    let p0 = num_poly.first().cloned().unwrap_or_else(Number::new);
+
+    let mut two_a = a.clone();
+    if !two_a.multiply(&Number::from_i64(2)) {
+        return None;
+    }
+    // `p1 / (2a)`, the coefficient of `ln|Q|`.
+    let mut log_coef = p1.clone();
+    if !log_coef.divide(&two_a) {
+        return None;
+    }
+    // `p0 - p1 b / (2a)`, the coefficient of `int dx/Q`.
+    let mut lin_coef = log_coef.clone();
+    if !lin_coef.multiply(&b) || !lin_coef.negate() || !lin_coef.add(&p0) {
+        return None;
+    }
+    // `b^2 - 4ac`.
+    let mut disc = b.clone();
+    let mut four_ac = a.clone();
+    if !disc.multiply(&b) || !four_ac.multiply(&c) || !four_ac.multiply(&Number::from_i64(4)) {
+        return None;
+    }
+    if !four_ac.negate() || !disc.add(&four_ac) {
+        return None;
+    }
+
+    let mut terms: Vec<MathStructure> = Vec::new();
+    if !log_coef.is_zero() {
+        let q = poly_structure(den, x);
+        terms.push(mul(vec![
+            nr(log_coef),
+            func(bid::LN, vec![func(bid::ABS, vec![q])]),
+        ]));
+    }
+    if !lin_coef.is_zero() {
+        // `2 a x + b`, the derivative of `Q`.
+        let lin = add(vec![mul(vec![nr(two_a), x.clone()]), nr(b)]);
+        let base = if disc.is_zero() {
+            mul(vec![num(-2), inv(lin)])
+        } else if disc.is_negative() {
+            let mut m = disc.clone();
+            if !m.negate() {
+                return None;
+            }
+            let s = func(bid::SQRT, vec![nr(m)]);
+            mul(vec![
+                num(2),
+                inv(s.clone()),
+                func(bid::ATAN, vec![mul(vec![lin, inv(s)])]),
+            ])
+        } else {
+            let s = func(bid::SQRT, vec![nr(disc)]);
+            let ratio_arg = mul(vec![
+                add(vec![lin.clone(), neg(s.clone())]),
+                inv(add(vec![lin, s.clone()])),
+            ]);
+            mul(vec![
+                inv(s),
+                func(bid::LN, vec![func(bid::ABS, vec![ratio_arg])]),
+            ])
+        };
+        terms.push(mul(vec![nr(lin_coef), base]));
+    }
+    if terms.is_empty() {
+        return None;
+    }
+    Some(add(terms))
+}
+
+/// A dense coefficient vector as an expression in `x`.
+fn poly_structure(p: &[Number], x: &MathStructure) -> MathStructure {
+    let mut terms: Vec<MathStructure> = Vec::new();
+    for (i, c) in p.iter().enumerate() {
+        if c.is_zero() {
+            continue;
+        }
+        terms.push(match i {
+            0 => nr(c.clone()),
+            1 => mul(vec![nr(c.clone()), x.clone()]),
+            _ => mul(vec![nr(c.clone()), pow(x.clone(), num(i as i64))]),
+        });
+    }
+    add(terms)
+}
+
+/// `p = q d + r` with `deg r < deg d`, over the rationals. Both arguments are
+/// dense coefficient vectors, lowest power first.
+fn poly_divmod(p: &[Number], d: &[Number]) -> Option<(Vec<Number>, Vec<Number>)> {
+    let dn = d.len().checked_sub(1)?;
+    let lead = d.last()?;
+    if lead.is_zero() {
+        return None;
+    }
+    let mut r: Vec<Number> = p.to_vec();
+    if r.len() <= dn {
+        return Some((vec![Number::new()], r));
+    }
+    let mut q = vec![Number::new(); r.len() - dn];
+    while r.len() > dn {
+        let i = r.len() - 1 - dn;
+        let mut c = r.last()?.clone();
+        if !c.divide(lead) {
+            return None;
+        }
+        if !c.is_zero() {
+            for (j, dc) in d.iter().enumerate() {
+                let mut t = c.clone();
+                if !t.multiply(dc) || !t.negate() || !r[i + j].add(&t) {
+                    return None;
+                }
+            }
+            q[i] = c;
+        }
+        r.pop();
+    }
+    Some((trim(q), trim(r)))
+}
+
+/// `int P(x) dx` for a dense coefficient vector.
+fn integrate_poly(p: &[Number], x: &MathStructure) -> Option<MathStructure> {
+    let mut terms: Vec<MathStructure> = Vec::new();
+    for (i, c) in p.iter().enumerate() {
+        if c.is_zero() {
+            continue;
+        }
+        let mut t = c.clone();
+        if !t.divide(&Number::from_i64(i as i64 + 1)) {
+            return None;
+        }
+        terms.push(mul(vec![nr(t), pow(x.clone(), num(i as i64 + 1))]));
+    }
+    Some(add(terms))
 }
 
 /// `c ln a - c ln b` becomes `c ln(a/b)`, which is the shape `simplify_ln`
@@ -719,9 +1753,98 @@ fn as_rational_function(
     if denom.is_empty() {
         return None;
     }
-    let n_poly = crate::polynomial::to_dense(&mul(numer), x)?;
-    let d_poly = crate::polynomial::to_dense(&mul(denom), x)?;
+    let n_poly = dense_of(&mul(numer), x)?;
+    let d_poly = dense_of(&mul(denom), x)?;
     Some((trim(n_poly), trim(d_poly)))
+}
+
+/// Largest integer exponent [`dense_of`] will expand, and the largest degree
+/// it will produce. `(4x+5)^3 / x` has to be multiplied out before it is a
+/// polynomial over a polynomial, and nothing stops a user writing
+/// `(4x+5)^10000`.
+const MAX_EXPAND_POWER: i64 = 12;
+const MAX_EXPAND_DEGREE: usize = 24;
+
+/// `m` as a dense coefficient vector, *expanding* powers and products.
+///
+/// [`crate::polynomial::to_dense`] reads an already-expanded sum; the
+/// integrand here has usually not been expanded, because the merge engine
+/// leaves `(4x+5)^3` and `1 - (4x+5)^2` alone, and both are polynomials that
+/// the residue expansion can handle once multiplied out.
+fn dense_of(m: &MathStructure, x: &MathStructure) -> Option<Vec<Number>> {
+    if m.equals(x) {
+        return Some(vec![Number::new(), Number::from_i64(1)]);
+    }
+    if !contains(m, x) {
+        let MathStructure::Number(n) = m else {
+            return None;
+        };
+        return Some(vec![n.clone()]);
+    }
+    match m {
+        MathStructure::Addition(terms) => {
+            let mut acc = vec![Number::new()];
+            for t in terms {
+                acc = poly_add(&acc, &dense_of(t, x)?)?;
+            }
+            Some(trim(acc))
+        }
+        MathStructure::Multiplication(factors) => {
+            let mut acc = vec![Number::from_i64(1)];
+            for f in factors {
+                acc = poly_mul(&acc, &dense_of(f, x)?)?;
+            }
+            Some(trim(acc))
+        }
+        MathStructure::Power { base, exponent } => {
+            let MathStructure::Number(e) = exponent.as_ref() else {
+                return None;
+            };
+            let k = e.to_i64()?;
+            if !(0..=MAX_EXPAND_POWER).contains(&k) {
+                return None;
+            }
+            let b = dense_of(base, x)?;
+            let mut acc = vec![Number::from_i64(1)];
+            for _ in 0..k {
+                acc = poly_mul(&acc, &b)?;
+            }
+            Some(trim(acc))
+        }
+        _ => None,
+    }
+}
+
+fn poly_add(a: &[Number], b: &[Number]) -> Option<Vec<Number>> {
+    let mut out = vec![Number::new(); a.len().max(b.len())];
+    for (i, c) in a.iter().chain(std::iter::empty()).enumerate() {
+        out[i] = c.clone();
+    }
+    for (i, c) in b.iter().enumerate() {
+        if !out[i].add(c) {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+fn poly_mul(a: &[Number], b: &[Number]) -> Option<Vec<Number>> {
+    if a.len() + b.len() > MAX_EXPAND_DEGREE + 2 {
+        return None;
+    }
+    let mut out = vec![Number::new(); a.len() + b.len() - 1];
+    for (i, ca) in a.iter().enumerate() {
+        if ca.is_zero() {
+            continue;
+        }
+        for (j, cb) in b.iter().enumerate() {
+            let mut t = ca.clone();
+            if !t.multiply(cb) || !out[i + j].add(&t) {
+                return None;
+            }
+        }
+    }
+    Some(out)
 }
 
 fn trim(mut v: Vec<Number>) -> Vec<Number> {
@@ -779,17 +1902,23 @@ fn distinct_rational_roots(p: &[Number]) -> Option<Vec<Number>> {
         }
         ints.push(t.to_i64()?);
     }
+    let mut roots: Vec<Number> = Vec::new();
+    if ints.first() == Some(&0) {
+        // `Q(0) = 0`: deflate the zero root and search the rest. A *repeated*
+        // zero root is not a simple pole, so the caller's
+        // `roots.len() + 1 == deg Q` check must be allowed to fail; bail out
+        // here rather than return a root list that would pass it.
+        if ints.get(1) == Some(&0) {
+            return None;
+        }
+        roots.push(Number::new());
+        ints.remove(0);
+    }
     let a0 = *ints.first()?;
     let an = *ints.last()?;
-    if an == 0 {
+    if an == 0 || a0 == 0 {
         return None;
     }
-    if a0 == 0 {
-        // A zero root; the transcripts do not need this case and handling it
-        // would require deflation, so bail out rather than guess.
-        return None;
-    }
-    let mut roots: Vec<Number> = Vec::new();
     for q in 1..=MAX_DIVISOR {
         if an % q != 0 {
             continue;

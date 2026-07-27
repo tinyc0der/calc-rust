@@ -44,9 +44,9 @@ fn eo() -> EvaluationOptions {
     current_eo()
 }
 
-/// The options in force for the current top-level evaluation. The C++ passes
-/// `EvaluationOptions` explicitly through `isolate_x`; this port stashes them
-/// so the (recursive, structure-shaped) helpers stay simple.
+// The options in force for the current top-level evaluation. The C++ passes
+// `EvaluationOptions` explicitly through `isolate_x`; this port stashes them
+// so the (recursive, structure-shaped) helpers stay simple.
 thread_local! {
     static CURRENT_EO: std::cell::RefCell<EvaluationOptions> =
         std::cell::RefCell::new(EvaluationOptions::default());
@@ -1462,7 +1462,7 @@ fn unit_roots(coef: &[f64]) -> Vec<f64> {
     const SAMPLES: usize = 4000;
     let eval = |x: f64| coef.iter().rev().fold(0.0, |acc, c| acc * x + c);
     let mut out: Vec<f64> = Vec::new();
-    let mut push = |out: &mut Vec<f64>, r: f64| {
+    let push = |out: &mut Vec<f64>, r: f64| {
         if !out.iter().any(|o: &f64| (o - r).abs() < 1e-7) {
             out.push(r);
         }

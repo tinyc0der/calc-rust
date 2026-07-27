@@ -44,42 +44,32 @@
 //!
 //! # KNOWN_DIVERGENCES
 //!
-//! Same contract as `crates/qalc/tests/transcripts.rs`, one size up: 1 539 of
+//! Same contract as `crates/qalc/tests/transcripts.rs`, one size up: 461 of
 //! the 16 324 rows do not match yet, so the ledger lives in a second golden
 //! file (`interval_closure_divergences.txt`, `key<TAB>diagnosis`) rather than
-//! in a 1 500-element array literal. A new divergence fails the test; so does a
+//! in a 461-element array literal. A new divergence fails the test; so does a
 //! listed one that has started matching. The set can only shrink.
 //!
 //! Fixing the arithmetic is not this suite's job — keeping the set from growing
 //! is. What the ledger says, by operation:
 //!
-//! * **511 rows: `log`** (and 15 more for bare `ln`). Most of them are a base
-//!   the port refuses — zero, negative, or an interval containing zero — where
-//!   the reference divides `ln(x)` by `ln(base)` and carries `ln(0)`'s infinite
-//!   endpoint through; the rest are an operand that includes an infinity, or a
-//!   complex `ln` composed out of real-interval operations that mention each
-//!   part more than once.
-//! * **352 rows: `^`.** It drops an imaginary component the reference keeps,
-//!   composes `exp(w·ln z)` where the reference has a dedicated complex power
-//!   formula, and answers some indeterminate powers (`0` or an infinity to an
-//!   exponent that is not known non-zero) that the reference refuses outright.
-//! * **230 rows: `/`, 7 more for `recip`.** `z/w` goes through `z·(1/w)` with
-//!   `1/w = conj(w)/|w|²`, which mentions `w`'s parts more than once, so the
-//!   enclosure comes out wider than the reference's — and for an unbounded `w`
-//!   it fails altogether, where the reference has an interval reciprocal that
-//!   stays finite (Number.cc:3662).
-//! * **154 rows: `atan2`**, composed as `atan(y/x)` where the reference calls
-//!   `mpfr_atan2` on each corner: it runs past +π when `y` straddles zero and
-//!   `x` may be negative, and an operand that reaches infinity either collapses
-//!   the arc to its limiting angle or is refused.
-//! * **~120 rows: the port refuses where the reference leaves the real line.**
-//!   `sqrt`, `cbrt`, `root`, `asin`, `acos`, `acosh`, `atanh`, `erf`, `erfc`
-//!   return false on an interval whose image is complex or unbounded, instead
-//!   of continuing into the complex plane.
-//! * A long tail of individually diagnosed rows: `besselj`/`bessely` stubs (43),
-//!   `gamma` evaluated only at the endpoints (so it misses the minimum near
-//!   1.4616), an interval straddling zero squared to a range that dips below
-//!   zero, and the four rows where the *reference* segfaults.
+//! * **256 rows: `^`.** Half of them are the reference's own rounding dust: its
+//!   complex power formula leaves a ~1e-40 residue where a component should
+//!   cancel exactly, and this port — same 133 bits, different library — leaves
+//!   ~1e-58 or nothing, so the ten printed digits of the residue differ. The
+//!   rest are structural: the port drops an imaginary component the reference
+//!   keeps, composes `exp(w·ln z)` where the reference has a dedicated a,b,c,d
+//!   formula, and answers some powers the reference refuses.
+//! * **~120 rows: the port leaves the real line differently.** `sqrt`, `cbrt`,
+//!   `asin`, `acos`, `acosh`, `asinh`, `atanh`, `erf`, `erfc`, `tan`, `tanh`
+//!   either refuse an argument whose image is complex or compose it out of
+//!   real-interval operations that mention each part more than once.
+//! * **43 rows: `besselj`/`bessely`**, still unimplemented stubs.
+//! * **13 rows: `log`**, mostly the same rounding dust as `^`, plus a base of
+//!   -1 whose `ln` is purely imaginary.
+//! * A long tail: the four rows where the *reference* segfaults on
+//!   `root(-infinity, odd)`, and a handful of `/` and `atan` rows where one
+//!   side leaves dust the other cancels.
 //!
 //! # Diagnosing one row
 //!
@@ -685,7 +675,7 @@ fn the_divergence_ledger_is_well_formed() {
             "ledger entry for {key} is not a diagnosis: {why:?}"
         );
     }
-    assert_eq!(seen.len(), 1539, "the recorded divergence count changed");
+    assert_eq!(seen.len(), 461, "the recorded divergence count changed");
 
     for key in closure_table::NON_TERMINATING {
         assert!(

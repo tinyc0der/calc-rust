@@ -375,9 +375,20 @@ fn nary_mut(m: &mut MathStructure) -> Option<&mut Vec<MathStructure>> {
     }
 }
 
-/// `MERGE_ALL2` / the tail of `MERGE_INDEX2`: an n-ary structure that
-/// shrank to one child becomes that child (`setToChild(1)`), and an empty
-/// one becomes zero (`clear()`).
+/// `MERGE_ALL2` / the tail of `MERGE_INDEX2` (MathStructure-calculate.cc:5311):
+/// an n-ary structure that shrank to one child becomes that child
+/// (`setToChild(1)`), an empty one becomes zero (`clear()`), and anything
+/// still n-ary is left in `evalSort` order.
+///
+/// That last arm is what makes a single merge pass a fixpoint. `calculatesub`
+/// works bottom-up, so by the time an addition merges its own terms every
+/// nested sum below it has already been through this, and two subtrees built
+/// from the same terms in different order — `x - y` as written versus the
+/// `-y + x` that `abs`'s argument negation produces — have been brought to one
+/// spelling and compare equal. Leaving it out is not a lost optimisation: the
+/// terms simply never cancel until the print-time sort at the end of
+/// `eval::evaluate_calculated_with` canonicalises them and a *second* pass
+/// runs.
 fn collapse_nary(m: &mut MathStructure) {
     let size = match nary_mut(m) {
         Some(v) => v.len(),
@@ -388,6 +399,8 @@ fn collapse_nary(m: &mut MathStructure) {
         *m = child;
     } else if size == 0 {
         m.clear();
+    } else {
+        crate::sort::eval_sort(m);
     }
 }
 
@@ -1315,9 +1328,14 @@ impl MathStructure {
             // C++ logs "This is a bug. Please report it." and returns false.
             _ => return false,
         };
-        // MERGE_INDEX2
+        // MERGE_INDEX2 (MathStructure-calculate.cc:6698). Both arms of the
+        // macro end in `evalSort()`, so an incremental merge leaves the
+        // structure ordered even when it merged nothing — `collapse_nary`
+        // supplies it on the one path, this `else` on the other.
         if b && check_size {
             collapse_nary(self);
+        } else {
+            crate::sort::eval_sort(self);
         }
         b
     }
@@ -1930,13 +1948,15 @@ mod tests {
 
     #[test]
     fn symbol_plus_symbol_collects_coefficient() {
-        // x+x=2x. Without evalSort (not ported) the numeric factor is
-        // appended, so the result is Multiplication[x, 2].
+        // x+x=2x. `merge_addition` appends the numeric factor, and the
+        // `evalSort` that ends `MERGE_INDEX2` moves it to the front — under a
+        // multiplication parent `evalSortCompare` sorts a number first, which
+        // is where `merge_addition` then reads a coefficient from.
         let r = eval_add(sym("x"), sym("x"));
         assert!(r.is_multiplication());
         assert_eq!(r.size(), 2);
-        assert!(r.get(0).expect("factor").equals(&sym("x")));
-        assert!(r.get(1).expect("factor").equals(&num(2)));
+        assert!(r.get(0).expect("factor").equals(&num(2)));
+        assert!(r.get(1).expect("factor").equals(&sym("x")));
     }
 
     #[test]

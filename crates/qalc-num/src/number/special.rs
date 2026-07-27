@@ -115,6 +115,19 @@ fn f_i(i: i64, p: usize) -> BigFloat {
     BigFloat::from_i64(i, p)
 }
 
+/// The real part of `n` as a `[lower, upper]` pair of floats at precision `p`
+/// — the same widening [`Number::apply_special`] applies to its argument, for
+/// the two-argument functions that cannot go through it.
+fn real_bounds(n: &Number, p: usize) -> (BigFloat, BigFloat) {
+    match &n.value {
+        RealValue::Rational(r) => {
+            let x = bigfloat_from_ratio(r.numer(), r.denom(), p, RM);
+            (x.clone(), x)
+        }
+        _ => (n.lower_bound_float(p), n.upper_bound_float(p)),
+    }
+}
+
 /// `|term|` is below the working precision relative to `reference`.
 fn negligible(term: &BigFloat, reference: &BigFloat, wp: usize) -> bool {
     if term.is_zero() {
@@ -578,6 +591,79 @@ fn zeta_float(s: &BigFloat, wp: usize, cc: &mut Consts) -> BigFloat {
         .mul(&z, wp, RM)
 }
 
+/// `ζ(s, a) = Σ_{n≥0} (a+n)^{−s}` by Euler–Maclaurin, for real `s > 1`,
+/// `a > 0`.
+///
+/// The C++ (`Number::zeta(const Number&)`, Number.cc:5634) sums the defining
+/// series term by term and stops when the relative change falls under its
+/// tolerance. That series converges like `N^{1−s}`: at `s` just above 1 it
+/// needs more terms than there are atoms, and even at `s = 2` ten digits cost
+/// 10¹⁰ of them. Euler–Maclaurin sums the first `N` terms directly and
+/// replaces the tail with
+/// `(a+N)^{1−s}/(s−1) + ½(a+N)^{−s} + Σ_k B_{2k}/(2k)! · (s)_{2k−1} ·
+/// (a+N)^{−s−2k+1}`,
+/// which reaches the same answer in `N ≈ wp/2` terms and a handful of
+/// Bernoulli corrections.
+fn hurwitz_zeta_float(s: &BigFloat, a: &BigFloat, wp: usize, cc: &mut Consts) -> BigFloat {
+    if s.is_nan() || a.is_nan() || s.is_inf() || a.is_inf() {
+        return BigFloat::nan(None);
+    }
+    let one = f_i(1, wp);
+    let two = f_i(2, wp);
+    let neg_s = s.neg();
+    // Enough head terms that the Bernoulli corrections fall off like
+    // (2k)!/(2πN)^{2k}; N also has to clear |s| for the rising factorial not
+    // to outrun the powers of (a+N).
+    let n_terms: usize = (wp / 2 + 24).max(32);
+    let mut sum = f_i(0, wp);
+    for j in 0..n_terms {
+        let x = a.add(&f_i(j as i64, wp), wp, RM);
+        if x.is_zero() || x.is_negative() {
+            return BigFloat::nan(None); // a pole of the summand
+        }
+        sum = sum.add(&x.pow(&neg_s, wp, RM, cc), wp, RM);
+    }
+    let b = a.add(&f_i(n_terms as i64, wp), wp, RM); // a + N
+    let bpow = b.pow(&neg_s, wp, RM, cc); // (a+N)^{−s}
+    // (a+N)^{1−s}/(s−1), written as (a+N)·(a+N)^{−s}/(s−1).
+    sum = sum.add(
+        &b.mul(&bpow, wp, RM).div(&s.sub(&one, wp, RM), wp, RM),
+        wp,
+        RM,
+    );
+    sum = sum.add(&bpow.div(&two, wp, RM), wp, RM);
+
+    let b2 = b.mul(&b, wp, RM);
+    let mut rising = s.clone(); // (s)_{2k−1}, k = 1
+    let mut bp = bpow.div(&b, wp, RM); // (a+N)^{−s−2k+1}, k = 1
+    let mut prev = BigFloat::from_f64(f64::INFINITY, wp);
+    for k in 1..=(wp / 4 + 8) {
+        let bern = match bernoulli_rational(2 * k) {
+            Some(v) => v,
+            None => break,
+        };
+        let den = bern.denom() * fact_bigint(2 * k as u64);
+        let coef = bigfloat_from_ratio(bern.numer(), &den, wp, RM);
+        let term = coef.mul(&rising, wp, RM).mul(&bp, wp, RM);
+        let at = term.abs();
+        // The expansion is asymptotic: past its smallest term it diverges.
+        if matches!(at.cmp(&prev), Some(c) if c > 0) {
+            break;
+        }
+        sum = sum.add(&term, wp, RM);
+        if negligible(&at, &sum, wp) {
+            break;
+        }
+        prev = at;
+        let k2 = f_i(2 * k as i64, wp);
+        rising = rising
+            .mul(&s.add(&k2.sub(&one, wp, RM), wp, RM), wp, RM)
+            .mul(&s.add(&k2, wp, RM), wp, RM);
+        bp = bp.div(&b2, wp, RM);
+    }
+    sum
+}
+
 // ----------------------------------------------------------------------
 // exponential / trigonometric integrals
 // ----------------------------------------------------------------------
@@ -688,6 +774,26 @@ fn gaussian_derivative(x: &Number, c: i64, negate_exponent: bool) -> Option<Numb
     let mut root_pi = Number::new();
     root_pi.pi();
     (root_pi.sqrt() && d.multiply(&Number::from_i64(c)) && d.divide(&root_pi)).then_some(d)
+}
+
+/// The abscissa of Γ's minimum on the positive reals, 1.46163214496836234…,
+/// and the value there, 0.88560319441088870… Both are the reference's own
+/// literals (Number.cc:5755, :5765) — Γ turns around here, so an interval
+/// bracketing this point has its lower bound *at* it rather than at either
+/// end.
+const GAMMA_MIN_X: &str = "1.46163214496836234126265954232572132846819620400644635129598840859878644035380181024307499273372559";
+const GAMMA_MIN_Y: &str = "0.88560319441088870027881590058258873320795153366990344887120016587513622741739634666479828021420359";
+
+fn gamma_min_x(p: usize) -> BigFloat {
+    context::with_consts(|cc| {
+        BigFloat::parse(GAMMA_MIN_X, astro_float::Radix::Dec, p, RoundingMode::None, cc)
+    })
+}
+
+fn gamma_min_y(p: usize) -> BigFloat {
+    context::with_consts(|cc| {
+        BigFloat::parse(GAMMA_MIN_Y, astro_float::Radix::Dec, p, RoundingMode::Down, cc)
+    })
 }
 
 impl Number {
@@ -858,7 +964,34 @@ impl Number {
             return false;
         }
         let wp = context::bit_precision() + GUARD;
-        self.apply_special(wp, gamma_float)
+        // Γ is *not* monotone on the positive reals: it falls to a minimum of
+        // 0.8856031944… at x = 1.46163214… and climbs again. Evaluating the
+        // two endpoints alone therefore misses the minimum whenever the
+        // interval brackets it, and returns an enclosure that does not contain
+        // values the function actually takes — `gamma([1:2])` came out `[1:1]`
+        // where the true range is [0.8856031944:1]. The reference pins the
+        // turning point as a literal and does the same (Number.cc:5750).
+        let straddles_min = context::create_interval()
+            && self.is_interval(true)
+            && matches!(&self.value, RealValue::Float { lower, upper }
+                if lower.is_positive()
+                    && matches!(lower.cmp(&gamma_min_x(wp)), Some(c) if c < 0)
+                    && matches!(upper.cmp(&gamma_min_x(wp)), Some(c) if c >= 0));
+        if !self.apply_special(wp, gamma_float) {
+            return false;
+        }
+        if straddles_min {
+            if let RealValue::Float { lower, upper } = &mut self.value {
+                let p = context::bit_precision();
+                // `apply_special` ordered the two endpoint values; the larger
+                // is the true upper bound, and the minimum replaces the lower.
+                if matches!(lower.cmp(upper), Some(c) if c > 0) {
+                    std::mem::swap(lower, upper);
+                }
+                *lower = gamma_min_y(p);
+            }
+        }
+        true
     }
 
     /// `digamma()` — ψ(x) = Γ′(x)/Γ(x).
@@ -896,7 +1029,7 @@ impl Number {
 
     fn erf_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
-            return false; // TODO(port): complex erf
+            return self.erf_complex();
         }
         if self.is_plus_infinity() {
             self.take_keeping_flags(Number::from_i64(1));
@@ -928,7 +1061,11 @@ impl Number {
 
     fn erfc_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
-            return false; // TODO(port): complex erfc
+            // `erfc(z) = 1 − erf(z)` (Number.cc:6123). Unlike the real case
+            // there is no cancellation to dodge: the complex `erf` is a Taylor
+            // series that already loses its digits to the alternating signs and
+            // buys them back with doubled precision.
+            return self.erf_complex() && self.negate() && self.add(&Number::from_i64(1));
         }
         if self.is_plus_infinity() {
             self.take_keeping_flags(Number::new());
@@ -960,7 +1097,26 @@ impl Number {
 
     fn erfi_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
-            return false; // TODO(port): complex erfi
+            if !self.has_real_part() {
+                // `erfi(x·i) = erf(x)·i` (Number.cc:6043) — worth taking
+                // separately from the general identity below, which would
+                // leave a rounding-noise real part on a value that has none.
+                let mut re = self.imaginary_part();
+                if !re.erf() {
+                    return false;
+                }
+                let mut out = Number::new();
+                out.set_imaginary_part(&re);
+                self.take_keeping_flags(out);
+                return true;
+            }
+            // `erfi(z) = −i·erf(i·z)` (Number.cc:6039).
+            let i = imaginary_unit();
+            let mut minus_i = i.clone();
+            if !minus_i.negate() {
+                return false;
+            }
+            return self.multiply(&i) && self.erf() && self.multiply(&minus_i);
         }
         if self.is_plus_infinity() || self.is_minus_infinity() {
             return true;
@@ -974,6 +1130,89 @@ impl Number {
         }
         let wp = context::bit_precision() + GUARD + ((m * m) * 1.4427).ceil() as usize;
         self.apply_special(wp, erfi_float)
+    }
+
+    /// `erf(z)` for complex `z` (Number.cc:5893).
+    ///
+    /// `erf(z) = 2/√π · Σ_{k≥0} (−1)^k z^{2k+1}/((2k+1)·k!)`, the same Taylor
+    /// series the C++ falls back to because MPFR's `mpfr_erf` is real-only.
+    /// The terms alternate and peak near `e^{|z|²}`, so the sum is taken at
+    /// double the working precision — again as the C++ does
+    /// (`setPrecision(PRECISION * 2 + 20)`).
+    fn erf_complex(&mut self) -> bool {
+        if self.includes_infinity() {
+            return false;
+        }
+        // The series below runs in *point* mode (`with_series_precision`
+        // turns interval arithmetic off so the alternating cancellation does
+        // not blow the enclosure up), which means an interval argument would
+        // be silently evaluated at one corner and returned as if it were the
+        // answer for the whole box. That is an unsound enclosure, not a loose
+        // one, so refuse instead.
+        if self.is_interval(true)
+            || self.imag.as_ref().is_some_and(|i| i.is_interval(true))
+        {
+            return false;
+        }
+        if !self.has_real_part() {
+            // `erf(x·i) = erfi(x)·i` (Number.cc:6014).
+            let mut im = self.imaginary_part();
+            if !im.erfi() {
+                return false;
+            }
+            let mut out = Number::new();
+            out.set_imaginary_part(&im);
+            self.take_keeping_flags(out);
+            return true;
+        }
+        // The largest term is ≈ e^{|z|²}; everything above the answer's own
+        // size is cancellation, and has to be bought back up front.
+        let m = complex_magnitude(self);
+        if !m.is_finite() || m * m > INTEGRAL_ARG_MAX {
+            return false; // TODO(port): asymptotic expansion for large |z|
+        }
+        let result = with_series_precision(m * m, || self.erf_complex_series());
+        match result {
+            Some(v) => {
+                *self = v;
+                self.approx = true;
+                self.test_float_result(true);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn erf_complex_series(&self) -> Option<Number> {
+        let z = self.clone();
+        let mut z2 = z.clone();
+        if !z2.square() || !z2.negate() {
+            return None;
+        }
+        let mut term = z.clone(); // (−1)^k z^{2k+1}/k!
+        let mut sum = z.clone(); // …divided by (2k+1) as it is added
+        let tolerance = series_tolerance()?;
+        for k in 1..MAX_EXPINT_TERMS {
+            if !term.multiply(&z2) || !term.divide_i64(k) {
+                return None;
+            }
+            let mut t = term.clone();
+            if !t.divide_i64(2 * k + 1) || !sum.add(&t) {
+                return None;
+            }
+            if sum.is_infinite(false) {
+                return None;
+            }
+            if term_is_negligible(&t, &sum, &tolerance)? {
+                let mut root_pi = Number::new();
+                root_pi.pi();
+                if !root_pi.sqrt() || !sum.multiply_i64(2) || !sum.divide(&root_pi) {
+                    return None;
+                }
+                return Some(sum);
+            }
+        }
+        None
     }
 
     // ------------------------------------------------------------------
@@ -1056,6 +1295,137 @@ impl Number {
         }
         let wp = context::bit_precision() + GUARD;
         self.apply_special(wp, zeta_float)
+    }
+
+    /// `zeta(o)` — the Hurwitz zeta `ζ(s, a)`, with `s = self` and `a = o`
+    /// (`Number::zeta(const Number&)`, Number.cc:5634).
+    ///
+    /// The reference's domain, and the reason it is this narrow: the series
+    /// `Σ (a+n)^{−s}` only converges for `s > 1`, and only has real terms for
+    /// `a > 0`. `a = 1` is the Riemann zeta and is handed straight to it.
+    pub fn hurwitz_zeta(&mut self, o: &Number) -> bool {
+        self.resolve_variance_uncertainty();
+        if o.is_one() {
+            return self.zeta();
+        }
+        if o.includes_infinity() || !o.is_positive() {
+            return false;
+        }
+        if !self.is_greater_than(&Number::from_i64(1)) {
+            // The defining series diverges here, but the reference still
+            // answers when `a` is a small integer: `ZetaFunction::calculate`
+            // (BuiltinFunctions-special.cc:133) rewrites `ζ(s, a)` as the
+            // Riemann zeta less its first `a−1` terms, which is defined
+            // wherever `ζ(s)` is. That is how `zeta(0.5, 2)` reaches
+            // −2.460354509 rather than declining. The bounds are the C++'s.
+            return self.zeta_by_shifting_riemann(o);
+        }
+        if self.is_plus_infinity() {
+            self.take_keeping_flags(Number::from_i64(1));
+            self.approx = true;
+            return true;
+        }
+        if self.is_minus_infinity() {
+            return false;
+        }
+        let wp = context::bit_precision() + GUARD;
+        let (s_lo, s_hi) = real_bounds(self, wp);
+        let (a_lo, a_hi) = real_bounds(o, wp);
+        let same = s_lo == s_hi && a_lo == a_hi;
+        let (mut lo, mut hi) = context::with_consts(|cc| {
+            let x = hurwitz_zeta_float(&s_lo, &a_lo, wp, cc);
+            let y = if same {
+                x.clone()
+            } else {
+                hurwitz_zeta_float(&s_hi, &a_hi, wp, cc)
+            };
+            (x, y)
+        });
+        if lo.is_nan() || hi.is_nan() {
+            return false;
+        }
+        if matches!(lo.cmp(&hi), Some(c) if c > 0) {
+            std::mem::swap(&mut lo, &mut hi);
+        }
+        let keep = (self.approx, self.precision);
+        if !self.set_from_float_bounds(lo, hi) {
+            return false;
+        }
+        self.approx = true;
+        if keep.1 >= 0 && (self.precision < 0 || keep.1 < self.precision) {
+            self.precision = keep.1;
+        }
+        true
+    }
+
+    /// `ζ(s, a) = ζ(s) − Σ_{n=1}^{a−1} n^{−s}` for an integer `a ≥ 2`.
+    ///
+    /// Only reached below the defining series' domain; `false` outside the
+    /// window the reference allows itself (`a ≤ 50`, `|s| ≤ 10`), where
+    /// subtracting `a` large terms from `ζ(s)` would cost more digits than it
+    /// is worth.
+    fn zeta_by_shifting_riemann(&mut self, o: &Number) -> bool {
+        if !o.is_integer() {
+            return false;
+        }
+        let Some(a) = o.to_i64() else {
+            return false;
+        };
+        if !(2..=50).contains(&a) {
+            return false;
+        }
+        // The ±10 window is the one the C++ puts on its general rewrite. A
+        // negative integer `s` is exempt because the reference reaches it by a
+        // different, unbounded route (Bernoulli polynomials,
+        // BuiltinFunctions-special.cc:121) that agrees with this one:
+        // `zeta(-11, 2)` is −0.9789072039 either way.
+        let negative_integer_order = self.is_integer() && self.is_negative();
+        if !negative_integer_order
+            && (self.is_greater_than(&Number::from_i64(10))
+                || self.is_less_than(&Number::from_i64(-10)))
+        {
+            return false;
+        }
+        let mut neg_s = self.clone();
+        if !neg_s.negate() {
+            return false;
+        }
+        let mut acc = self.clone();
+        if !acc.zeta() {
+            return false;
+        }
+        for n in 1..a {
+            let mut term = Number::from_i64(n);
+            if !term.raise(&neg_s, false) || !acc.subtract(&term) {
+                return false;
+            }
+        }
+        *self = acc;
+        true
+    }
+
+    /// Store `[lo, hi]` as this number's value, narrowed to the working
+    /// precision the way [`Number::apply_special`] does (outward in interval
+    /// mode, to-nearest otherwise).
+    fn set_from_float_bounds(&mut self, mut lo: BigFloat, mut hi: BigFloat) -> bool {
+        let p = context::bit_precision();
+        let (lower, upper) = if context::create_interval() {
+            if lo.set_precision(p, RoundingMode::Down).is_err()
+                || hi.set_precision(p, RoundingMode::Up).is_err()
+            {
+                return false;
+            }
+            (lo, hi)
+        } else {
+            if lo.set_precision(p, RM).is_err() {
+                return false;
+            }
+            (lo.clone(), lo)
+        };
+        self.value = RealValue::Float { lower, upper };
+        self.imag = None;
+        self.approx = true;
+        self.test_float_result(true)
     }
 
     /// `bernoulli()` — replace an integer `n` with the exact rational `B_n`.
@@ -1266,7 +1636,7 @@ impl Number {
 
     fn sinint_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
-            return false; // TODO(port): complex Si
+            return self.sinint_complex();
         }
         if self.is_plus_infinity() || self.is_minus_infinity() {
             let neg = self.is_minus_infinity();
@@ -1309,7 +1679,7 @@ impl Number {
 
     fn cosint_impl(&mut self) -> bool {
         if self.has_imaginary_part() {
-            return false; // TODO(port): complex Ci
+            return self.cosint_complex();
         }
         if self.is_plus_infinity() {
             self.clear(true);
@@ -1325,7 +1695,20 @@ impl Number {
             return true;
         }
         if !self.real_part_is_positive() {
-            return false; // TODO(port): Ci(x) is complex for x < 0
+            // `Ci(−x) = Ci(x) + πi` for x > 0. The reference applies it in
+            // `CosIntFunction::calculate` (BuiltinFunctions-calculus.cc:218)
+            // rather than in `Number::cosint`, but it is the same branch of the
+            // same logarithm, and the port has only the one entry point.
+            if !self.real_part_is_negative() {
+                return false; // an interval straddling zero
+            }
+            if !self.negate() || !self.cosint_impl() {
+                return false;
+            }
+            let mut pi = Number::new();
+            pi.pi();
+            self.set_imaginary_part(&pi);
+            return true;
         }
         let g = match self.integral_guard() {
             Some(g) => g,
@@ -1333,6 +1716,120 @@ impl Number {
         };
         let wp = context::bit_precision() + GUARD + g;
         self.apply_special(wp, ci_float)
+    }
+
+    /// `Si(z)` for complex `z` (Number.cc:8976).
+    ///
+    /// `Si(z) = z·Σ_{k≥0} (−1)^k z^{2k}/((2k+1)(2k+1)!)`, summed at doubled
+    /// precision like the C++ — the terms alternate and peak near `e^{|z|}`.
+    fn sinint_complex(&mut self) -> bool {
+        if self.includes_infinity() {
+            return false;
+        }
+        let m = complex_magnitude(self);
+        if !m.is_finite() || m > INTEGRAL_ARG_MAX {
+            return false; // TODO(port): asymptotic Si for large |z|
+        }
+        let result = with_series_precision(m, || self.sinint_complex_series());
+        match result {
+            Some(v) => {
+                *self = v;
+                self.approx = true;
+                self.test_float_result(true);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn sinint_complex_series(&self) -> Option<Number> {
+        let z = self.clone();
+        let mut mz2 = z.clone();
+        if !mz2.square() || !mz2.negate() {
+            return None;
+        }
+        // t_k/t_{k−1} = −z²(2k−1)/((2k+1)²·2k).
+        let mut term = Number::from_i64(1);
+        let mut sum = Number::from_i64(1);
+        let tolerance = series_tolerance()?;
+        for k in 1..MAX_EXPINT_TERMS {
+            if !term.multiply(&mz2)
+                || !term.multiply_i64(2 * k - 1)
+                || !term.divide_i64((2 * k + 1) * (2 * k + 1))
+                || !term.divide_i64(2 * k)
+                || !sum.add(&term)
+            {
+                return None;
+            }
+            if sum.is_infinite(false) {
+                return None;
+            }
+            if term_is_negligible(&term, &sum, &tolerance)? {
+                return sum.multiply(&z).then_some(sum);
+            }
+        }
+        None
+    }
+
+    /// `Ci(z)` for complex `z` (Number.cc:9406).
+    ///
+    /// `Ci(z) = γ + ln z + Σ_{k≥1} (−1)^k z^{2k}/((2k)(2k)!)`, with `ln` on its
+    /// principal branch — which is what carries the `+πi` onto a negative real
+    /// argument and the `+πi/2` onto a positive imaginary one.
+    fn cosint_complex(&mut self) -> bool {
+        if self.includes_infinity() {
+            return false;
+        }
+        let m = complex_magnitude(self);
+        if !m.is_finite() || m > INTEGRAL_ARG_MAX {
+            return false; // TODO(port): asymptotic Ci for large |z|
+        }
+        let result = with_series_precision(m, || self.cosint_complex_series());
+        match result {
+            Some(v) => {
+                *self = v;
+                self.approx = true;
+                self.test_float_result(true);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn cosint_complex_series(&self) -> Option<Number> {
+        let z = self.clone();
+        let mut mz2 = z.clone();
+        if !mz2.square() || !mz2.negate() {
+            return None;
+        }
+        // b_1 = −z²/4; b_k/b_{k−1} = −z²(2k−2)/((2k)²(2k−1)).
+        let mut term = mz2.clone();
+        if !term.divide_i64(4) {
+            return None;
+        }
+        let mut sum = term.clone();
+        let tolerance = series_tolerance()?;
+        for k in 2..MAX_EXPINT_TERMS {
+            if !term.multiply(&mz2)
+                || !term.multiply_i64(2 * k - 2)
+                || !term.divide_i64((2 * k) * (2 * k))
+                || !term.divide_i64(2 * k - 1)
+                || !sum.add(&term)
+            {
+                return None;
+            }
+            if sum.is_infinite(false) {
+                return None;
+            }
+            if term_is_negligible(&term, &sum, &tolerance)? {
+                let mut log = z;
+                if !log.ln() || !sum.add(&log) || !sum.add(&euler_gamma_number()) {
+                    return None;
+                }
+                return Some(sum);
+            }
+        }
+        None
     }
 
     // ------------------------------------------------------------------
@@ -1831,10 +2328,125 @@ mod tests {
         assert_eq!(s(&n), "1.658347594");
     }
 
+    /// `Ci(x)` is complex for x < 0, and the port now says so with a value
+    /// rather than by declining: `Ci(−x) = Ci(x) + πi`, which is what the
+    /// reference prints for `Ci(-1)`.
     #[test]
-    fn cosint_domain() {
+    fn cosint_negative_is_complex() {
         let mut n = Number::from_i64(-1);
-        assert!(!n.cosint(), "Ci(x) is complex for x < 0");
+        assert!(n.cosint());
+        assert_eq!(s(&n.real_part()), "0.3374039229");
+        assert_eq!(s(&n.imaginary_part()), "3.141592654");
+    }
+
+    /// The complex branches of the erf family and of the trigonometric
+    /// integrals, against the reference binary.
+    #[test]
+    fn complex_special_functions() {
+        let z = |a: i64, b: i64| {
+            let mut n = Number::from_i64(a);
+            n.set_imaginary_part(&Number::from_i64(b));
+            n
+        };
+        type F = fn(&mut Number) -> bool;
+        let cases: &[(F, Number, &str, &str)] = &[
+            (Number::erf, z(1, 1), "1.316151282", "0.1904534692"),
+            (Number::erfc, z(1, 1), "-0.3161512817", "-0.1904534692"),
+            (Number::erfi, z(1, 1), "0.1904534692", "1.316151282"),
+            (Number::sinint, z(1, 1), "1.104222658", "0.8824538050"),
+            (Number::cosint, z(1, 1), "0.8821721806", "0.2872491335"),
+            (Number::erf, z(3, 4), "-120.1869914", "-27.75033729"),
+            (Number::sinint, z(-2, 3), "-4.547513890", "1.399196581"),
+            // Pure imaginary: `erf(x·i) = erfi(x)·i` leaves an exactly zero
+            // real part rather than a rounding-noise one (it prints as
+            // `0.000000000` only because the value carries the approximate
+            // flag; the composite prints as plain `18.56480241i`).
+            (Number::erf, z(0, 2), "0.000000000", "18.56480241"),
+            (Number::cosint, z(0, 2), "2.452666923", "1.570796327"),
+        ];
+        for (f, arg, re, im) in cases {
+            let mut n = arg.clone();
+            assert!(f(&mut n), "declined {}", s(arg));
+            assert_eq!(s(&n.real_part()), *re, "real part of f({})", s(arg));
+            assert_eq!(s(&n.imaginary_part()), *im, "imaginary part of f({})", s(arg));
+        }
+    }
+
+    /// Ten digits are not enough to catch a series that stops one term early:
+    /// a convergence test stated relative to the *caller's* precision will
+    /// agree with the reference at 10 digits and be wrong at 30. These are
+    /// mpmath's values at 30 digits.
+    #[test]
+    fn the_new_series_hold_up_at_higher_precision() {
+        let bak = context::precision();
+        context::set_precision(30);
+        let mut z = Number::from_i64(1);
+        z.set_imaginary_part(&Number::from_i64(1));
+
+        let mut n = z.clone();
+        assert!(n.erf());
+        let erf = (s(&n.real_part()), s(&n.imaginary_part()));
+
+        let mut n = z.clone();
+        assert!(n.sinint());
+        let si = (s(&n.real_part()), s(&n.imaginary_part()));
+
+        let mut n = z.clone();
+        assert!(n.cosint());
+        let ci = (s(&n.real_part()), s(&n.imaginary_part()));
+
+        let mut n = Number::from_i64(3);
+        assert!(n.hurwitz_zeta(&num(1, 2)));
+        let hz = s(&n);
+
+        context::set_precision(bak);
+        assert_eq!(erf.0, "1.31615128169794764488027108024");
+        assert_eq!(erf.1, "0.190453469237834686284108861969");
+        assert_eq!(si.0, "1.10422265823558173955875396985");
+        assert_eq!(si.1, "0.882453805007917743376124044695");
+        assert_eq!(ci.0, "0.882172180555936325050614116656");
+        assert_eq!(ci.1, "0.287249133519955939527283572386");
+        assert_eq!(hz, "8.41439832211715999779816713058");
+    }
+
+    /// The Hurwitz zeta, on its reference domain (`s > 1`, `a > 0`).
+    #[test]
+    fn hurwitz_zeta_values() {
+        let cases: &[(Number, Number, &str)] = &[
+            (Number::from_i64(2), Number::from_i64(2), "0.6449340668"),
+            (Number::from_i64(2), Number::from_i64(3), "0.3949340668"),
+            (Number::from_i64(3), num(1, 2), "8.414398322"),
+            (num(3, 2), num(5, 2), "1.403779769"),
+            (Number::from_i64(2), num(1, 4), "17.19732915"),
+            // a = 1 is the Riemann zeta, and is handed to it.
+            (Number::from_i64(2), Number::from_i64(1), "1.644934067"),
+            // Below s = 1 the defining series diverges and the value comes
+            // from ζ(s) less its first a−1 terms instead.
+            (num(1, 2), Number::from_i64(2), "-2.460354509"),
+            (Number::new(), Number::from_i64(2), "-1.5"),
+            (Number::from_i64(-1), Number::from_i64(3), "-3.083333333"),
+            (Number::from_i64(-11), Number::from_i64(2), "-0.9789072039"),
+            (Number::from_i64(-31), Number::from_i64(3), "-1675098781"),
+        ];
+        for (sv, a, want) in cases {
+            let mut n = sv.clone();
+            assert!(n.hurwitz_zeta(a), "declined zeta({}, {})", s(sv), s(a));
+            assert_eq!(s(&n), *want, "zeta({}, {})", s(sv), s(a));
+        }
+        // Outside the domain the series does not converge, and the reference
+        // declines rather than guess.
+        let mut n = Number::from_i64(1);
+        assert!(!n.hurwitz_zeta(&Number::from_i64(2)), "ζ(1) is a pole");
+        // Below s = 1 only the integer-a shortcut is available, and only
+        // inside the window the reference allows itself.
+        let mut n = num(1, 2);
+        assert!(!n.hurwitz_zeta(&num(5, 2)), "a must be an integer below s = 1");
+        let mut n = num(1, 2);
+        assert!(!n.hurwitz_zeta(&Number::from_i64(60)), "a is capped at 50");
+        let mut n = Number::from_i64(2);
+        assert!(!n.hurwitz_zeta(&Number::from_i64(0)), "a must be positive");
+        let mut n = Number::from_i64(2);
+        assert!(!n.hurwitz_zeta(&Number::from_i64(-1)), "a must be positive");
     }
 
     // ---------------- precision ----------------
@@ -1889,6 +2501,72 @@ fn euler_gamma_number() -> Number {
     let wp = context::bit_precision();
     let g = context::with_consts(|cc| euler_gamma(wp, cc));
     Number::from_interval(g.clone(), g)
+}
+
+/// The imaginary unit, `i`.
+fn imaginary_unit() -> Number {
+    let mut n = Number::new();
+    n.set_imaginary_part(&Number::from_i64(1));
+    n
+}
+
+/// `|z|` as an `f64`, for sizing the guard digits a series needs.  Infinite
+/// or NaN when either component is out of `f64` range, which the callers
+/// treat as "out of the series' reach".
+fn complex_magnitude(z: &Number) -> f64 {
+    let re = z.real_part().float_value();
+    let im = z.imaginary_part().float_value();
+    (re * re + im * im).sqrt()
+}
+
+/// Run `f` with the working precision raised the way the C++ raises it around
+/// its complex Taylor series — `CALCULATOR->setPrecision(PRECISION * 2 + 20)`
+/// — plus `ln(peak_term)` digits on top.
+///
+/// The extra term is not in the C++ and is the difference between a wrong
+/// answer and no answer: an alternating series whose largest term is `e^peak`
+/// cancels away `peak·log₁₀e` digits before it reaches its sum, and at
+/// doubled precision alone `erf(4+4i)` would print digits that are not there.
+/// The context is restored whether or not `f` succeeds.
+fn with_series_precision<T>(peak: f64, f: impl FnOnce() -> T) -> T {
+    let saved_precision = context::precision();
+    let saved_interval = context::create_interval();
+    let extra = if peak.is_finite() && peak > 0.0 {
+        (peak * std::f64::consts::LOG10_E).ceil() as i32
+    } else {
+        0
+    };
+    context::set_precision(saved_precision * 2 + 20 + extra);
+    context::set_create_interval(false);
+    let out = f();
+    context::set_precision(saved_precision);
+    context::set_create_interval(saved_interval);
+    out
+}
+
+/// The relative size below which a series term no longer moves the sum.
+/// Read at the *raised* precision the series runs at, so it is stated in terms
+/// of the caller's precision, as the C++ `wprec` is.
+fn series_tolerance() -> Option<Number> {
+    let mut t = Number::from_i64(10);
+    t.raise(
+        &Number::from_i64(-(context::precision() as i64 / 2 + 10)),
+        false,
+    )
+    .then_some(t)
+}
+
+/// Has `term` stopped moving `sum`, in both components?  `None` if the
+/// comparison itself could not be formed.
+fn term_is_negligible(term: &Number, sum: &Number, tolerance: &Number) -> Option<bool> {
+    let mut relative = term.clone();
+    if sum.is_nonzero() && !relative.divide(sum) {
+        return None;
+    }
+    Some(
+        magnitude_below(&relative.real_part(), tolerance)
+            && magnitude_below(&relative.imaginary_part(), tolerance),
+    )
 }
 
 /// Is `|value|` below `tolerance`? Used to decide that a series term no

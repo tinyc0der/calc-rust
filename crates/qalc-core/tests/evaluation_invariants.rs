@@ -41,8 +41,8 @@
 //!
 //! | property | checked | violations |
 //! |---|---|---|
-//! | P1 | 674 | 7, in two classes — all of them spellings, none a wrong value |
-//! | P2 | 44  | 1 |
+//! | P1 | 675 | 6, one class — all of them spellings, none a wrong value |
+//! | P2 | 45  | 0 |
 //! | P3 | 60 of 63 equations | 0 |
 //! | P8 | 693 | 0 |
 //!
@@ -768,8 +768,7 @@ mod p1_exact_then_approximate {
 
     /// `(case id, diagnosis)`. See the module docs on `KNOWN_VIOLATIONS`.
     ///
-    /// Two defects remain, in descending order of how wrong they are. Three
-    /// classes have been retired:
+    /// One defect remains. Four classes have been retired:
     ///
     /// Class **A** — `Approximate` mode returning a wrong limit *value* for
     /// `limits.batch:325` and `:358` — is fixed. Its cause was the generic
@@ -794,14 +793,18 @@ mod p1_exact_then_approximate {
     /// `sqrt(5) / 2 + 3/2`), which `polynomial.batch:6`, `solver.batch:7` and
     /// `solver.batch:19` pin.
     ///
-    /// **B. Evaluation is not idempotent for `abs(a) - abs(-a)`** (1 case).
-    /// Neither mode cancels `abs(x - y) - abs(y - x)` in one pass — both leave
-    /// `|x - y| - |x - y|`, two structurally distinct terms the printer
-    /// renders identically. A *second* pass folds them to `0`, which is why
-    /// this shows up as an exact-versus-approximate difference here and why
-    /// the transcript still passes: `eval::apply_conversion` runs the
-    /// optimal-SI post-conversion afterwards, and that gives the CLI its
-    /// second pass.
+    /// Class **B** — evaluation not being idempotent for
+    /// `abs(x - y) - abs(y - x)`, which one pass left as `|x - y| - |x - y|`
+    /// and a second folded to `0` — is fixed, together with P2's only entry
+    /// and all three of `calculus_properties.rs`'s. The port had dropped the
+    /// `else evalSort()` arm of the C++ `MERGE_ALL2`/`MERGE_INDEX2` macros, so
+    /// nothing put a sum's terms or a product's factors in a canonical order
+    /// *during* the merge loop; two subtrees built from the same parts in
+    /// different order — `x - y` as written against the `-y + x` that `abs`'s
+    /// argument negation produces — compared unequal and never cancelled until
+    /// the print-time sort at the end of `eval::evaluate_calculated_with`
+    /// canonicalised them and a second pass ran. See
+    /// `calculate::collapse_nary` and `sort::eval_sort`.
     ///
     /// **D. `Approximate` numerifies what `Exact` leaves symbolic** (6 cases).
     /// `ln(x) + x = 3` gives `x = 2.207940032` directly but `x = lambertw(e^3)`
@@ -815,19 +818,6 @@ mod p1_exact_then_approximate {
     /// part of the two-phase TRY_EXACT question the CLI's
     /// `approximation = Approximate` stand-in defers, not a solver bug.
     pub const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
-        // --- B: missing cancellation under Approximate -------------------
-        (
-            "polynomial.batch:23",
-            "B: abs(x - y) - abs(y - x). One evaluation pass leaves \
-             `|x - y| - |x - y|` in *either* mode; the second pass that \
-             exact-then-approximate performs folds it to 0. The `abs` \
-             argument-negation normalisation that makes the two terms equal \
-             runs after the addition has already been merged, so within a \
-             single pass they are never re-offered to the merge engine. \
-             Verified directly: evaluating the expression once under \
-             Approximate, once under Exact, and once more under Approximate \
-             all print `|x - y| - |x - y|`.",
-        ),
         // --- D: exact output left symbolic by the second pass ------------
         (
             "solver.batch:16",
@@ -915,16 +905,17 @@ fn exact_then_approximate_equals_direct_approximate() {
 mod p2_substitution_commutes {
     use super::*;
 
-    /// One entry, and it is the same defect P1 records as class B.
-    pub const KNOWN_VIOLATIONS: &[(&str, &str)] = &[(
-        "polynomial.batch:23",
-        "abs(x - y) - abs(y - x). The same non-idempotence P1 records as class \
-         B, seen from the other side: substituting x := 3 first gives the \
-         expression one evaluation pass, which leaves `|y - 3| - |y - 3|`, \
-         while evaluating first and substituting after gives it two, and the \
-         second pass cancels to 0. Two independent predicates landing on one \
-         bug is the useful thing about having both.",
-    )];
+    /// Empty.
+    ///
+    /// It held one entry, `polynomial.batch:23` — `abs(x - y) - abs(y - x)`,
+    /// the same non-idempotence P1 recorded as class B, seen from the other
+    /// side: substituting `x := 3` first gave the expression one evaluation
+    /// pass, which left `|y - 3| - |y - 3|`, while evaluating first and
+    /// substituting after gave it two, and the second pass cancelled to 0.
+    /// Two independent predicates landing on one bug is the useful thing about
+    /// having both. Fixed by restoring the `evalSort` the C++ `MERGE_ALL2` and
+    /// `MERGE_INDEX2` macros end with; see P1's table.
+    pub const KNOWN_VIOLATIONS: &[(&str, &str)] = &[];
 
     /// The values substituted for the unknown.
     ///

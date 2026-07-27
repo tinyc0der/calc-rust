@@ -54,20 +54,50 @@ impl ComparisonResult {
 }
 
 /// Rounding modes for `Number::round`. Mirrors `RoundingMode` in includes.h.
+///
+/// The declaration order is load-bearing: `round(x, n, m)` passes `m` through
+/// `(RoundingMode) vargs[2].number().intValue()`
+/// (BuiltinFunctions-number.cc:1031), so the position of a variant *is* the
+/// number a user writes. Variants 4-6 used to read
+/// `HalfRandom, HalfUp, HalfDown`, which is not the includes.h order and would
+/// have made `round(2.5, 0, 4)` pick the coin-flip mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
 pub enum RoundingMode {
     #[default]
-    HalfAwayFromZero,
-    HalfToEven,
-    HalfToOdd,
-    HalfTowardZero,
-    HalfRandom,
-    HalfUp,
-    HalfDown,
-    TowardZero,
-    AwayFromZero,
-    Up,
-    Down,
+    HalfAwayFromZero = 0,
+    HalfToEven = 1,
+    HalfToOdd = 2,
+    HalfTowardZero = 3,
+    HalfUp = 4,
+    HalfDown = 5,
+    HalfRandom = 6,
+    TowardZero = 7,
+    AwayFromZero = 8,
+    Up = 9,
+    Down = 10,
+}
+
+impl RoundingMode {
+    /// The mode `round`'s third argument names, or `None` outside the range
+    /// the reference's `IntegerArgument` accepts (min
+    /// `ROUNDING_HALF_AWAY_FROM_ZERO`, max `ROUNDING_DOWN`).
+    pub fn from_index(i: i64) -> Option<Self> {
+        Some(match i {
+            0 => RoundingMode::HalfAwayFromZero,
+            1 => RoundingMode::HalfToEven,
+            2 => RoundingMode::HalfToOdd,
+            3 => RoundingMode::HalfTowardZero,
+            4 => RoundingMode::HalfUp,
+            5 => RoundingMode::HalfDown,
+            6 => RoundingMode::HalfRandom,
+            7 => RoundingMode::TowardZero,
+            8 => RoundingMode::AwayFromZero,
+            9 => RoundingMode::Up,
+            10 => RoundingMode::Down,
+            _ => return None,
+        })
+    }
 }
 
 /// How approximate numbers are displayed. Mirrors `IntervalDisplay`.

@@ -744,10 +744,6 @@ fn is_compound(m: &MathStructure) -> bool {
     )
 }
 
-fn is_additive(m: &MathStructure) -> bool {
-    matches!(m, MathStructure::Addition(_))
-}
-
 /// A rational shown as `n/d` needs parentheses as a factor (`(3/2)x`).
 fn is_displayed_fraction(m: &MathStructure, po: &PrintOptions) -> bool {
     use qalc_num::options::NumberFractionFormat as F;
@@ -1165,8 +1161,22 @@ fn function_name(id: crate::ids::FunctionId) -> &'static str {
             .or_else(|| crate::strings::function_name(other))
             .or_else(|| crate::datetime::function_name(other))
             .or_else(|| crate::stats::function_name(other))
+            .or_else(|| registry_function_name(id))
             .unwrap_or("f"),
     }
+}
+
+/// The name of a function that lives only in the definition registry.
+///
+/// The parser builds these for calls it recognises but cannot evaluate (see
+/// `parser::unimplemented_function`), and they survive evaluation untouched,
+/// so printing them by name is what makes `airy(0)` come back as `airy(0)`.
+fn registry_function_name(id: crate::ids::FunctionId) -> Option<&'static str> {
+    let index = id.registry_index()?;
+    // The store outlives the process, so its names are `'static`.
+    let store = crate::units::store_if_ready()?;
+    let name = store.registry().functions().get(index)?.reference_name();
+    (!name.is_empty()).then_some(name)
 }
 
 #[cfg(test)]

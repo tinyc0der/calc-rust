@@ -267,9 +267,15 @@ fn numeric_prefix(v: &[MathStructure]) -> usize {
 
 /// The ladder of `if(mstruct2.isX()) return -1; if(mstruct1.isX()) return 1;`
 /// tests at MathStructure-calculate.cc:7495. The *first* type named there
-/// sorts last, so these ranks run in the reverse of the C++ order. Numbers
-/// are handled ahead of the ladder (and sort last in a sum), so they get the
-/// highest rank here.
+/// sorts last, so these ranks run in the reverse of the C++ order.
+///
+/// `STRUCT_NUMBER` is not in the ladder at all. In a sum it never reaches
+/// here — the test above the ladder sends it to the end — so the high rank
+/// below only documents that. In a *product* it does reach here, and because
+/// a number answers none of the ladder's tests the ladder always resolves in
+/// its favour: whatever it is compared against is the type that fires, and
+/// fires as "the other one sorts later". That is a rank below every named
+/// type, which is why [`eval_type_rank_in`] moves it there.
 fn eval_type_rank(m: &MathStructure) -> u8 {
     match m {
         MathStructure::DateTime(_) => 0,
@@ -298,9 +304,40 @@ fn eval_type_rank(m: &MathStructure) -> u8 {
     }
 }
 
-/// `evalSortCompare` (MathStructure-calculate.cc:7415) with an *addition*
-/// parent, which is the only parent this port's caller has. `Less` means `a`
-/// is stored before `b`.
+/// [`eval_type_rank`] with the parent's number rule applied.
+fn eval_type_rank_in(m: &MathStructure, parent: EvalParent) -> i16 {
+    if parent == EvalParent::Multiplication && m.is_number() {
+        return -1;
+    }
+    i16::from(eval_type_rank(m))
+}
+
+/// Which n-ary structure the two operands are children of. `evalSortCompare`
+/// takes the parent itself and only ever asks it `isAddition()` /
+/// `isMultiplication()`, and it passes the *same* parent down every recursive
+/// call, so one flag carries the whole comparison.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EvalParent {
+    Addition,
+    Multiplication,
+}
+
+/// [`eval_compare_in`] under an addition parent — the ordering
+/// [`eval_order`] and [`crate::absolute::has_predominately_negative_sign`]
+/// want.
+fn eval_compare(a: &MathStructure, b: &MathStructure) -> std::cmp::Ordering {
+    eval_compare_in(a, b, EvalParent::Addition)
+}
+
+/// `evalSortCompare` (MathStructure-calculate.cc:7415). `Less` means `a` is
+/// stored before `b`.
+///
+/// The parent decides three things. Under an *addition* parent a product is
+/// compared by what is left after its numeric coefficient (so `2x` and `-x`
+/// land next to each other) and a bare number sorts last; under a
+/// *multiplication* parent neither happens — products are compared as plain
+/// structures, and the number sorts first, which is the position
+/// [`crate::calculate`]'s `merge_addition` reads a coefficient from.
 ///
 /// Two identity comparisons of the C++ have no faithful analogue here and are
 /// approximated by this port's own ids: `STRUCT_UNIT` and `STRUCT_VARIABLE`
@@ -310,92 +347,114 @@ fn eval_type_rank(m: &MathStructure) -> u8 {
 /// sit in memory (empirically `y`, `z`, `x`). `Symbolic` compares by name
 /// here, which is what the C++ `STRUCT_SYMBOLIC` case does for the symbols it
 /// really does hold.
-fn eval_compare(a: &MathStructure, b: &MathStructure) -> std::cmp::Ordering {
+fn eval_compare_in(
+    a: &MathStructure,
+    b: &MathStructure,
+    parent: EvalParent,
+) -> std::cmp::Ordering {
     use qalc_num::ComparisonResult as CR;
     use std::cmp::Ordering;
 
+    let in_mul = parent == EvalParent::Multiplication;
+    let eval_compare = |x: &MathStructure, y: &MathStructure| eval_compare_in(x, y, parent);
+
+    // Matrix factors do not commute, so a multiplication leaves them where
+    // they are (`if((!m1.representsNonMatrix() && !m2.representsScalar()) ||
+    // …) return 0;`).
+    if in_mul && (!crate::calculate::represents::non_matrix(a) || !crate::calculate::represents::non_matrix(b)) {
+        return Ordering::Equal;
+    }
+
     // A product is compared by what is left after its numeric coefficient,
-    // so `2x` and `-x` land next to each other.
-    if let MathStructure::Multiplication(va) = a {
-        if !va.is_empty() {
-            let start = numeric_prefix(va);
-            if let MathStructure::Multiplication(vb) = b {
-                if vb.is_empty() {
-                    return Ordering::Less;
-                }
-                let start2 = numeric_prefix(vb);
-                let mut i = 0;
-                loop {
-                    if i + start2 >= vb.len() {
-                        if i + start >= va.len() {
-                            if start2 == start {
-                                for i3 in 0..start {
-                                    let c = eval_compare(&va[i3], &vb[i3]);
-                                    if c != Ordering::Equal {
-                                        return c;
-                                    }
-                                }
-                                return Ordering::Equal;
-                            }
-                            if start2 > start {
-                                return Ordering::Less;
-                            }
-                        }
-                        return Ordering::Greater;
-                    }
-                    if i + start >= va.len() {
+    // so `2x` and `-x` land next to each other. Addition parent only.
+    if !in_mul {
+        if let MathStructure::Multiplication(va) = a {
+            if !va.is_empty() {
+                let start = numeric_prefix(va);
+                if let MathStructure::Multiplication(vb) = b {
+                    if vb.is_empty() {
                         return Ordering::Less;
                     }
-                    let c = eval_compare(&va[i + start], &vb[i + start2]);
-                    if c != Ordering::Equal {
-                        return c;
+                    let start2 = numeric_prefix(vb);
+                    let mut i = 0;
+                    loop {
+                        if i + start2 >= vb.len() {
+                            if i + start >= va.len() {
+                                if start2 == start {
+                                    for i3 in 0..start {
+                                        let c = eval_compare(&va[i3], &vb[i3]);
+                                        if c != Ordering::Equal {
+                                            return c;
+                                        }
+                                    }
+                                    return Ordering::Equal;
+                                }
+                                if start2 > start {
+                                    return Ordering::Less;
+                                }
+                            }
+                            return Ordering::Greater;
+                        }
+                        if i + start >= va.len() {
+                            return Ordering::Less;
+                        }
+                        let c = eval_compare(&va[i + start], &vb[i + start2]);
+                        if c != Ordering::Equal {
+                            return c;
+                        }
+                        i += 1;
                     }
-                    i += 1;
                 }
+                let c = eval_compare(&va[start], b);
+                if c != Ordering::Equal {
+                    return c;
+                }
+                return Ordering::Greater;
             }
-            let c = eval_compare(&va[start], b);
-            if c != Ordering::Equal {
-                return c;
-            }
-            return Ordering::Greater;
         }
-    }
-    if let MathStructure::Multiplication(vb) = b {
-        if !vb.is_empty() {
-            let start2 = numeric_prefix(vb);
-            let c = eval_compare(a, &vb[start2]);
-            if c != Ordering::Equal {
-                return c;
+        if let MathStructure::Multiplication(vb) = b {
+            if !vb.is_empty() {
+                let start2 = numeric_prefix(vb);
+                let c = eval_compare(a, &vb[start2]);
+                if c != Ordering::Equal {
+                    return c;
+                }
+                return Ordering::Less;
             }
-            return Ordering::Less;
         }
     }
 
     if std::mem::discriminant(a) != std::mem::discriminant(b) {
-        // A number is the last term of a sum.
-        if b.is_number() {
-            return Ordering::Less;
-        }
-        if a.is_number() {
-            return Ordering::Greater;
+        // A number is the last term of a sum, and the first factor of a
+        // product — but in a product the ladder below already gets it there,
+        // because a number answers none of the ladder's type tests.
+        if !in_mul {
+            if b.is_number() {
+                return Ordering::Less;
+            }
+            if a.is_number() {
+                return Ordering::Greater;
+            }
         }
         // `x` against `x^2` compares the bases first, then 1 against the
-        // exponent.
-        if let MathStructure::Power { base, exponent } = b {
-            let c = eval_compare(a, base);
-            if c != Ordering::Equal {
-                return c;
+        // exponent. Skipped in a product when one side is the coefficient.
+        if !in_mul || (!a.is_number() && !b.is_number()) {
+            if let MathStructure::Power { base, exponent } = b {
+                let c = eval_compare(a, base);
+                if c != Ordering::Equal {
+                    return c;
+                }
+                return eval_compare(&MathStructure::from(1), exponent);
             }
-            return eval_compare(&MathStructure::from(1), exponent);
-        }
-        if let MathStructure::Power { base, exponent } = a {
-            let c = eval_compare(base, b);
-            if c != Ordering::Equal {
-                return c;
+            if let MathStructure::Power { base, exponent } = a {
+                let c = eval_compare(base, b);
+                if c != Ordering::Equal {
+                    return c;
+                }
+                return eval_compare(exponent, &MathStructure::from(1));
             }
-            return eval_compare(exponent, &MathStructure::from(1));
         }
-        return eval_type_rank(a).cmp(&eval_type_rank(b));
+        return eval_type_rank_in(a, parent).cmp(&eval_type_rank_in(b, parent));
     }
 
     match (a, b) {
@@ -483,15 +542,79 @@ fn eval_compare(a: &MathStructure, b: &MathStructure) -> std::cmp::Ordering {
 /// scans backwards from the tail for the first element the new one does not
 /// compare less than, which keeps indistinguishable elements in input order.
 pub(crate) fn eval_order(terms: &[MathStructure]) -> Vec<usize> {
+    eval_order_in(terms, EvalParent::Addition)
+}
+
+/// [`eval_order`] for either kind of parent.
+fn eval_order_in(terms: &[MathStructure], parent: EvalParent) -> Vec<usize> {
     let mut sorted: Vec<usize> = Vec::with_capacity(terms.len());
     for (i, term) in terms.iter().enumerate() {
         let pos = sorted
             .iter()
-            .rposition(|&j| eval_compare(term, &terms[j]) != std::cmp::Ordering::Less)
+            .rposition(|&j| eval_compare_in(term, &terms[j], parent) != std::cmp::Ordering::Less)
             .map_or(0, |p| p + 1);
         sorted.insert(pos, i);
     }
     sorted
+}
+
+/// `MathStructure::evalSort(recursive = false)`
+/// (MathStructure-calculate.cc:7656), the *evaluation* ordering — not the
+/// print ordering [`sort`] applies.
+///
+/// This is the `else` arm of the C++ `MERGE_ALL2` macro
+/// (MathStructure-calculate.cc:5311): every `calculatesub` of an addition or
+/// a multiplication leaves its children in `evalSort` order, so that the next
+/// pairwise merge compares canonical spellings. Without it two sums with the
+/// same terms in different order — `x - y` from the source and `-y + x` from
+/// `abs`'s argument negation — are structurally distinct and never cancel.
+///
+/// Products need it just as much: `merge_addition` compares two products
+/// factor by factor from a fixed offset, so `x·(1-x²)^-½` and
+/// `-1·(1-x²)^-½·x` — the two halves of `d/dx ∫acos(x) dx` — only cancel once
+/// their factors are in one order.
+pub(crate) fn eval_sort(m: &mut MathStructure) {
+    let (terms, parent) = match m {
+        MathStructure::Addition(v) => (v, EvalParent::Addition),
+        MathStructure::Multiplication(v) => (v, EvalParent::Multiplication),
+        _ => return,
+    };
+    if terms.len() < 2 {
+        return;
+    }
+    // `if(m_type == STRUCT_ADDITION && containsType(STRUCT_DATETIME, false,
+    // true, false) > 0) return;` — a sum containing a date keeps its written
+    // order, because `date - date` is read positionally.
+    if parent == EvalParent::Addition && terms.iter().any(contains_date) {
+        return;
+    }
+    let order = eval_order_in(terms, parent);
+    if order.iter().enumerate().all(|(i, &j)| i == j) {
+        return;
+    }
+    let mut taken: Vec<Option<MathStructure>> = terms.drain(..).map(Some).collect();
+    *terms = order
+        .into_iter()
+        .map(|i| taken[i].take().expect("each index appears once"))
+        .collect();
+}
+
+/// `containsType(STRUCT_DATETIME, false, true, false)`, widened to the text
+/// values this port still spells a date with.
+///
+/// The C++ parser produces a `STRUCT_DATETIME` for `"2020-11-05"` before
+/// `calculatesub` ever sees it, so its bare type test is enough. Here
+/// `datetime::apply` runs *after* the merge loop, so at sort time a date is
+/// still a `Text` leaf — and `datetime::merge_addition` reads `date - date`
+/// positionally, taking the first date term as the later one. Reordering
+/// `"2020-11-05" - "2020-10-05"` would turn its answer into a negative
+/// duration, or lose it entirely.
+fn contains_date(m: &MathStructure) -> bool {
+    match m {
+        MathStructure::DateTime(_) => true,
+        MathStructure::Text(t) => crate::datetime::parse_date(t).is_some(),
+        _ => (0..m.size()).filter_map(|i| m.get(i)).any(contains_date),
+    }
 }
 
 /// The insertion sort of `MathStructure::sort` (MathStructure-print.cc:556):
@@ -547,8 +670,48 @@ pub fn sort(m: &mut MathStructure) {
                     (Some(x), Some(y)) => x.cmp(y),
                     _ => std::cmp::Ordering::Equal,
                 })
+                .then_with(|| sums_in_a_product(a, b))
         });
     }
+}
+
+/// Two *sums* multiplied together, ordered as the C++ print `sortCompare`
+/// orders them: its `default:` arm (MathStructure-print.cc:539) walks the two
+/// structures child by child, and its `STRUCT_NUMBER` arm sorts numbers
+/// *increasing* under a multiplication parent (`bool inc_order =
+/// parent.isMultiplication()`) where a sum sorts them decreasing. That is why
+/// `factor x^2+3x+2` prints `(x + 1)(x + 2)`.
+///
+/// This only became visible once [`eval_sort`] started ordering products:
+/// `evalSortCompare` has no `inc_order`, so it leaves the factors as
+/// `(x + 2)(x + 1)` and the print pass is what turns them back round. Before,
+/// nothing reordered them and the input order happened to be right.
+///
+/// Restricted to a pair of additions on purpose — every other pair of factors
+/// is already decided by the rank, unit and name keys above, and widening the
+/// child walk to them would re-order products this port prints correctly
+/// today.
+fn sums_in_a_product(a: &MathStructure, b: &MathStructure) -> std::cmp::Ordering {
+    let (MathStructure::Addition(va), MathStructure::Addition(vb)) = (a, b) else {
+        return std::cmp::Ordering::Equal;
+    };
+    for (x, y) in va.iter().zip(vb.iter()) {
+        let c = match (x, y) {
+            // `inc_order`: the smaller constant term names the first factor.
+            (MathStructure::Number(p), MathStructure::Number(q)) => match q.compare(p) {
+                qalc_num::ComparisonResult::Less => std::cmp::Ordering::Less,
+                qalc_num::ComparisonResult::Greater => std::cmp::Ordering::Greater,
+                _ => std::cmp::Ordering::Equal,
+            },
+            (MathStructure::Symbolic(p), MathStructure::Symbolic(q)) => p.cmp(q),
+            _ => std::cmp::Ordering::Equal,
+        };
+        if c != std::cmp::Ordering::Equal {
+            return c;
+        }
+    }
+    // "place MathStructure with less children first".
+    va.len().cmp(&vb.len())
 }
 
 #[cfg(test)]

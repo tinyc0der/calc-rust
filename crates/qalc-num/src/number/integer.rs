@@ -209,6 +209,26 @@ impl Number {
         if self.has_imaginary_part() {
             return false;
         }
+        // The four directed modes are not tie-breaking rules: they apply to
+        // *every* value, not just to an exact half (`Number::round`,
+        // Number.cc:5110-5118, dispatches them before it ever looks at the
+        // fractional part). Reaching them only from the tie branch below made
+        // `round(2.4, 0, 9)` answer 2 where the reference answers 3.
+        match mode {
+            RoundingMode::Up => return self.ceil(),
+            RoundingMode::Down => return self.floor(),
+            RoundingMode::TowardZero => return self.trunc(),
+            RoundingMode::AwayFromZero => {
+                return if self.is_non_negative() {
+                    self.ceil()
+                } else if self.is_non_positive() {
+                    self.floor()
+                } else {
+                    false // an interval straddling zero has no defined sign
+                };
+            }
+            _ => {}
+        }
         match &self.value {
             RealValue::PlusInfinity | RealValue::MinusInfinity => true,
             RealValue::Rational(r) => {
@@ -258,15 +278,15 @@ impl Number {
                                 }
                                 RoundingMode::HalfUp => upper,
                                 RoundingMode::HalfDown => lower,
-                                RoundingMode::Up => upper,
-                                RoundingMode::Down => lower,
-                                RoundingMode::TowardZero => {
-                                    if neg { upper } else { lower }
-                                }
-                                RoundingMode::AwayFromZero => {
-                                    if neg { lower } else { upper }
-                                }
+                                // `::rand() % 2` in the C++; the port picks a
+                                // side so the result is reproducible.
                                 RoundingMode::HalfRandom => lower,
+                                // Handled above, before the fractional part
+                                // is looked at.
+                                RoundingMode::Up
+                                | RoundingMode::Down
+                                | RoundingMode::TowardZero
+                                | RoundingMode::AwayFromZero => lower,
                             }
                         }
                     }
