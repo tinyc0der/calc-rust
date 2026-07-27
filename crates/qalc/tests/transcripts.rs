@@ -49,6 +49,11 @@ fn transcripts_dir() -> Option<PathBuf> {
         "../../../libqalculate/tests",
         "../../../../libqalculate/tests",
         "../../../../../libqalculate/tests",
+        "../Demo/libqalculate/tests",
+        "../../Demo/libqalculate/tests",
+        "../../../Demo/libqalculate/tests",
+        "../../../../Demo/libqalculate/tests",
+        "../../../../../Demo/libqalculate/tests",
     ] {
         let path = resolve_candidate(manifest_dir, Path::new(candidate));
         if is_transcripts_dir(&path) {
