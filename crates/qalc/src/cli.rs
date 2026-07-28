@@ -6,9 +6,9 @@
 //! owns `/set` options that `Calculator` does not, and the adaptive interval
 //! display, and both change printed output.
 
-use qalc_core::Session;
-use qalc_num::options::IntervalDisplay;
-
+use qalc_core::parser::TargetConversionOption;
+use qalc_core::{MathStructure, Number, Session};
+use qalc_num::options::{IntervalDisplay, NumberFractionFormat};
 
 thread_local! {
     /// `adaptive_interval_display` (declared src/qalc.cc:82): on until
@@ -69,12 +69,127 @@ pub fn evaluate_cli_line(session: &mut Session, line: &str) -> Result<String, St
             IntervalDisplay::SignificantDigits
         };
     }
-    let res = session.evaluate_line(trimmed)?;
+    let res = match qalc_core::parser::split_target_conversion_option(trimmed) {
+        Some((expr, target)) => evaluate_target_conversion(session, expr, target)?,
+        None => session.evaluate_line(trimmed)?,
+    };
     if is_terse() {
         Ok(res.trim().to_string())
     } else {
         Ok(res)
     }
+}
+
+/// Evaluate the CLI-only `to factors` and `to fraction` targets.
+///
+/// They are split before the ordinary conversion path because neither names
+/// a unit: factorization restructures the evaluated value, while fraction
+/// changes only the number printer.
+fn evaluate_target_conversion(
+    session: &Session,
+    expr: &str,
+    target: TargetConversionOption,
+) -> Result<String, String> {
+    let mut value = qalc_core::parser::parse_with(expr, &session.parse_options, session)
+        .map_err(|error| error.to_string())?;
+    qalc_core::percent::apply(&mut value);
+    qalc_core::eval::evaluate_calculated_with(&mut value, &session.eval_options);
+
+    let mut print_options = session.print_options.clone();
+    match target {
+        TargetConversionOption::Factors => {
+            value = factor_result(&value, &session.eval_options);
+            print_options.use_unicode_signs = true;
+        }
+        TargetConversionOption::Fraction => {
+            value = mixed_fraction(value);
+            print_options.number_fraction_format = NumberFractionFormat::Fractional;
+            print_options.restrict_fraction_length = false;
+        }
+    }
+    let rendered = qalc_core::print::print(&value, &print_options);
+    Ok(match target {
+        // Factored polynomial groups conventionally juxtapose, as in
+        // `(x + 2)(x - 3)^3`, rather than carrying the generic product
+        // printer's explicit sign between parenthesized factors.
+        TargetConversionOption::Factors => rendered.replace(") * (", ")(").replace(" - ", " − "),
+        TargetConversionOption::Fraction => rendered,
+    })
+}
+
+fn mixed_fraction(value: MathStructure) -> MathStructure {
+    let MathStructure::Number(number) = &value else {
+        return value;
+    };
+    if !number.is_rational() || number.is_integer() || number.has_imaginary_part() {
+        return value;
+    }
+    let mut whole = number.clone();
+    whole.trunc();
+    if whole.is_zero() {
+        return value;
+    }
+    let mut remainder = number.clone();
+    remainder.subtract(&whole);
+    MathStructure::Addition(vec![
+        MathStructure::Number(whole),
+        MathStructure::Number(remainder),
+    ])
+}
+
+fn factor_result(value: &MathStructure, options: &qalc_core::EvaluationOptions) -> MathStructure {
+    match value {
+        MathStructure::Number(number) => factor_number(number).unwrap_or_else(|| value.clone()),
+        _ => qalc_core::polynomial::factor(value, options),
+    }
+}
+
+/// Express an exact rational as prime factors, using negative powers for its
+/// denominator. Symbolic values are handled by the polynomial factorizer.
+fn factor_number(number: &Number) -> Option<MathStructure> {
+    if !number.is_rational() || number.has_imaginary_part() {
+        return None;
+    }
+    let mut numerator = Vec::new();
+    if !number.numerator().factorize(&mut numerator) {
+        return None;
+    }
+    let mut denominator = Vec::new();
+    let denominator_number = number.denominator();
+    if !denominator_number.is_one() && !denominator_number.factorize(&mut denominator) {
+        return None;
+    }
+
+    let mut factors = grouped_prime_factors(&numerator, 1);
+    factors.extend(grouped_prime_factors(&denominator, -1));
+    match factors.len() {
+        0 => None,
+        1 => factors.pop(),
+        _ => Some(MathStructure::Multiplication(factors)),
+    }
+}
+
+fn grouped_prime_factors(factors: &[Number], exponent_sign: i64) -> Vec<MathStructure> {
+    let mut grouped = Vec::new();
+    let mut index = 0;
+    while index < factors.len() {
+        let mut end = index + 1;
+        while end < factors.len() && factors[end].equals(&factors[index], false, false) {
+            end += 1;
+        }
+        let exponent = exponent_sign * (end - index) as i64;
+        let base = MathStructure::Number(factors[index].clone());
+        grouped.push(if exponent == 1 {
+            base
+        } else {
+            MathStructure::Power {
+                base: Box::new(base),
+                exponent: Box::new(MathStructure::from(exponent)),
+            }
+        });
+        index = end;
+    }
+    grouped
 }
 
 /// The `/set` options `src/qalc.cc` owns rather than `Calculator`.
