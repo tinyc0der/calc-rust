@@ -917,7 +917,25 @@ impl<'a> Parser<'a> {
                 | Tok::LBracket
                 | Tok::LBrace
                 | Tok::BinExp
-        )
+        ) || self.starts_escaped_variable()
+    }
+
+    /// Is the cursor at the variable-escape form `\name`?
+    ///
+    /// The lexer deliberately gives a backslash one token meaning. Its
+    /// adjacency to the following identifier is what distinguishes an
+    /// escaped variable from integer division, including after another
+    /// factor (`5\a` is `5 * 'a'`, while `5\2` is integer division).
+    fn starts_escaped_variable(&self) -> bool {
+        *self.peek() == Tok::IntDivide
+            && matches!(
+                self.toks.get(self.i + 1),
+                Some(Token {
+                    tok: Tok::Ident(_),
+                    space_before: false,
+                    ..
+                })
+            )
     }
 
     /// `p` in base 16 — the binary exponent of `Calculator::parseOperators`
@@ -1184,6 +1202,17 @@ impl<'a> Parser<'a> {
                     Some(m) => Ok(m),
                     None => self.err(format!("unknown name `{name}`")),
                 }
+            }
+            // A backslash immediately followed by a name forces that name to
+            // be a variable instead of letting the resolver interpret it as
+            // a unit or another predefined value. When no adjacent name
+            // follows, the same token remains integer division (`5\2`).
+            Tok::IntDivide if self.starts_escaped_variable() => {
+                self.bump();
+                let Tok::Ident(name) = self.bump() else {
+                    unreachable!("escaped variable lookahead checked the identifier")
+                };
+                Ok(MathStructure::symbolic(format!("'{name}'")))
             }
             Tok::Str(ref s) => {
                 self.bump();
@@ -1862,6 +1891,26 @@ mod tests {
         assert!(m.is_addition(), "got {}", render(&m));
         assert_eq!(m.size(), 2);
         assert!(m.get(1).unwrap().is_multiplication());
+    }
+
+    #[test]
+    fn backslash_distinguishes_escaped_variables_from_integer_division() {
+        assert_eq!(render(&p("\\name")), "'name'");
+
+        let product = p("5\\name");
+        assert!(product.is_multiplication(), "got {}", render(&product));
+        assert!(product.get(0).unwrap().number().unwrap().equals_i64(5));
+        assert_eq!(render(product.get(1).unwrap()), "'name'");
+
+        let division = p("5\\2");
+        assert!(
+            matches!(
+                division,
+                MathStructure::Function { id, .. } if id == BuiltinOp::IntDivide.function_id()
+            ),
+            "got {}",
+            render(&division)
+        );
     }
 
     #[test]

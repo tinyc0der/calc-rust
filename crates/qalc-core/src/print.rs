@@ -380,6 +380,11 @@ fn wrap_vector_element(m: &MathStructure, po: &PrintOptions, depth: usize) -> St
 /// `x + -1 * y`).
 fn print_addition(terms: &[MathStructure], po: &PrintOptions, depth: usize) -> String {
     let mut out = String::new();
+    // Escaped variables carry their display quotes in the symbolic name.
+    // The reference renders subtraction between those variables with the
+    // mathematical minus sign even when ordinary library output is ASCII.
+    let use_unicode_binary_minus =
+        po.use_unicode_signs || terms.iter().any(contains_escaped_variable);
     for (i, term) in terms.iter().enumerate() {
         let (negated, body) = split_negation(term);
         let text = {
@@ -392,11 +397,17 @@ fn print_addition(terms: &[MathStructure], po: &PrintOptions, depth: usize) -> S
         };
         if i == 0 {
             if negated {
-                out.push('-');
+                out.push(if po.use_unicode_signs { '−' } else { '-' });
             }
             out.push_str(&text);
         } else {
-            let sign = if negated { '-' } else { '+' };
+            let sign = if negated && use_unicode_binary_minus {
+                '−'
+            } else if negated {
+                '-'
+            } else {
+                '+'
+            };
             if po.spacious {
                 out.push(' ');
                 out.push(sign);
@@ -408,6 +419,13 @@ fn print_addition(terms: &[MathStructure], po: &PrintOptions, depth: usize) -> S
         }
     }
     out
+}
+
+fn contains_escaped_variable(m: &MathStructure) -> bool {
+    match m {
+        MathStructure::Symbolic(name) => name.starts_with('\'') && name.ends_with('\''),
+        _ => m.children().any(contains_escaped_variable),
+    }
 }
 
 /// If `m` is `Multiplication[-1, rest…]` or a negative number, return the
@@ -1209,6 +1227,7 @@ mod tests {
         // Parser builds Addition[x, Multiplication[-1, y]]; the printer must
         // recover `x - y` (reference output).
         assert_eq!(roundtrip("x-y"), "x - y");
+        assert_eq!(roundtrip("\\a-\\b"), "'a' − 'b'");
     }
 
     #[test]
