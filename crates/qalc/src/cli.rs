@@ -40,6 +40,10 @@ pub fn is_terse() -> bool {
 pub fn new_session() -> Session {
     let mut session = Session::new();
     session.eval_options.approximation = qalc_core::ApproximationMode::Approximate;
+    // libqalculate's DEFAULT_PRECISION is 8. qalc-num keeps a wider default
+    // for library callers and its numeric golden corpus, while the CLI must
+    // use the reference program's user-facing default.
+    qalc_num::context::set_precision(8);
     qalc_num::context::set_interval_calculation(
         qalc_num::context::IntervalCalculation::VarianceFormula,
     );

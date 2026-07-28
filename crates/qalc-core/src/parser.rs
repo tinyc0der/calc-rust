@@ -545,7 +545,10 @@ impl<'a> Parser<'a> {
         // re-enters the ladder here, so this is where a grouping level is
         // counted, exactly once per level.
         let _depth = self.enter()?;
-        let left = self.parse_dot()?;
+        let mut left = self.parse_dot()?;
+        if self.eat(&Tok::Where) {
+            self.parse_where_clause(&mut left)?;
+        }
         // `expr to <target>` — the conversion operator binds loosest of all
         // (`Calculator::separateToExpression` splits it off before parsing).
         if *self.peek() == Tok::To {
@@ -557,6 +560,35 @@ impl<'a> Parser<'a> {
             });
         }
         Ok(left)
+    }
+
+    /// Apply the substitutions following `where` to the expression on its
+    /// left. A semicolon separates substitutions rather than creating a
+    /// vector while this clause is being parsed.
+    fn parse_where_clause(&mut self, value: &mut MathStructure) -> Result<(), ParseError> {
+        loop {
+            // Stop before comparison precedence consumes the `=` that
+            // separates the substitution target from its replacement.
+            let target = self.parse_shift()?;
+            let valid_target = match &target {
+                MathStructure::Symbolic(_) | MathStructure::Variable(_) => true,
+                MathStructure::Function { args, .. } => args.is_empty(),
+                _ => false,
+            };
+            if !valid_target {
+                return self.err("where target must be a variable or zero-argument function");
+            }
+            if !self.eat(&Tok::Equals) {
+                return self.err("expected `=` after where target");
+            }
+            let replacement = self.parse_expression()?;
+            value.replace_where(&target, &replacement);
+
+            if !self.eat(&Tok::Semicolon) {
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// Parse what follows `to`: a base name, `base N`, or a unit expression.
@@ -2074,6 +2106,31 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn where_clause_substitutes_variables() {
+        let m = p("x+y where x=2; y=3");
+        assert_eq!(render(&m), "(2 + 3)");
+    }
+
+    #[test]
+    fn where_clause_substitutes_function_names_and_preserves_arguments() {
+        let m = p("sinh(0.5) where sinh()=cosh()");
+        let MathStructure::Function { id, args } = m else {
+            panic!("expected a function call");
+        };
+        assert_eq!(id.0, crate::builtins::id::COSH);
+        assert_eq!(args.len(), 1);
+        assert!(args[0]
+            .number()
+            .is_some_and(|n| n.equals(&Number::from_ints(1, 2, 0), false, false)));
+    }
+
+    #[test]
+    fn where_clause_rejects_non_substitution_targets() {
+        let error = parse("x where x+1=2", &ParseOptions::default()).expect_err("invalid target");
+        assert!(error.message.contains("where target"), "{error}");
     }
 
     #[test]
