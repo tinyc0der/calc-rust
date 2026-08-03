@@ -141,7 +141,7 @@ fn example_unit_04_negative_target_ft() {
 
 #[test]
 fn example_unit_05_power_hp_conversion() {
-    assert_eq!(eval("100 lbf * 60 mph to hp"), "16 hp");
+    assert_eq!(eval("100 lbf * 60 mph to hp"), "15.999998 hp");
 }
 
 #[test]

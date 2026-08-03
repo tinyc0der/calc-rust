@@ -95,6 +95,128 @@ fn atan2_bf(y: &BigFloat, x: &BigFloat, p: usize, rm: RoundingMode) -> BigFloat 
     }
 }
 
+fn canonical_base_exp(x: &num_bigint::BigUint) -> (num_bigint::BigUint, u32) {
+    use num_traits::One;
+    if x <= &num_bigint::BigUint::one() {
+        return (x.clone(), 1);
+    }
+    let max_p = x.bits() as u32;
+    for p in (2..=max_p).rev() {
+        let root = x.nth_root(p);
+        if root.pow(p) == *x {
+            return (root, p);
+        }
+    }
+    (x.clone(), 1)
+}
+
+fn exact_rational_log(
+    self_rat: &num_rational::BigRational,
+    base_rat: &num_rational::BigRational,
+) -> Option<num_rational::BigRational> {
+    use num_traits::{One, Zero};
+    if self_rat.is_zero()
+        || base_rat.is_zero()
+        || base_rat.is_one()
+        || self_rat <= &num_rational::BigRational::zero()
+        || base_rat <= &num_rational::BigRational::zero()
+    {
+        return None;
+    }
+    if self_rat.is_one() {
+        return Some(num_rational::BigRational::zero());
+    }
+    if self_rat == base_rat {
+        return Some(num_rational::BigRational::one());
+    }
+    let a = self_rat.numer().to_biguint()?;
+    let b = self_rat.denom().to_biguint()?;
+    let m = base_rat.numer().to_biguint()?;
+    let n = base_rat.denom().to_biguint()?;
+
+    if b.is_one() && n.is_one() {
+        let (c_base, q) = canonical_base_exp(&m);
+        let (c_self, p) = canonical_base_exp(&a);
+        if c_base > num_bigint::BigUint::one() && c_base == c_self {
+            return Some(num_rational::BigRational::new(
+                num_bigint::BigInt::from(p),
+                num_bigint::BigInt::from(q),
+            ));
+        }
+    } else if a.is_one() && n.is_one() {
+        let (c_base, q) = canonical_base_exp(&m);
+        let (c_self, p) = canonical_base_exp(&b);
+        if c_base > num_bigint::BigUint::one() && c_base == c_self {
+            return Some(num_rational::BigRational::new(
+                -num_bigint::BigInt::from(p),
+                num_bigint::BigInt::from(q),
+            ));
+        }
+    } else if b.is_one() && m.is_one() {
+        let (c_base, q) = canonical_base_exp(&n);
+        let (c_self, p) = canonical_base_exp(&a);
+        if c_base > num_bigint::BigUint::one() && c_base == c_self {
+            return Some(num_rational::BigRational::new(
+                -num_bigint::BigInt::from(p),
+                num_bigint::BigInt::from(q),
+            ));
+        }
+    } else if a.is_one() && m.is_one() {
+        let (c_base, q) = canonical_base_exp(&n);
+        let (c_self, p) = canonical_base_exp(&b);
+        if c_base > num_bigint::BigUint::one() && c_base == c_self {
+            return Some(num_rational::BigRational::new(
+                num_bigint::BigInt::from(p),
+                num_bigint::BigInt::from(q),
+            ));
+        }
+    } else {
+        let (c_m, q_m) = canonical_base_exp(&m);
+        let (c_n, q_n) = canonical_base_exp(&n);
+        let (c_a, p_a) = canonical_base_exp(&a);
+        let (c_b, p_b) = canonical_base_exp(&b);
+
+        if self_rat > &num_rational::BigRational::one()
+            && base_rat > &num_rational::BigRational::one()
+        {
+            if c_m == c_a && c_n == c_b && q_m == q_n && p_a == p_b && c_m > num_bigint::BigUint::one() {
+                return Some(num_rational::BigRational::new(
+                    num_bigint::BigInt::from(p_a),
+                    num_bigint::BigInt::from(q_m),
+                ));
+            }
+        } else if self_rat < &num_rational::BigRational::one()
+            && base_rat > &num_rational::BigRational::one()
+        {
+            if c_m == c_b && c_n == c_a && q_m == q_n && p_a == p_b && c_m > num_bigint::BigUint::one() {
+                return Some(num_rational::BigRational::new(
+                    -num_bigint::BigInt::from(p_a),
+                    num_bigint::BigInt::from(q_m),
+                ));
+            }
+        } else if self_rat > &num_rational::BigRational::one()
+            && base_rat < &num_rational::BigRational::one()
+        {
+            if c_n == c_a && c_m == c_b && q_m == q_n && p_a == p_b && c_n > num_bigint::BigUint::one() {
+                return Some(num_rational::BigRational::new(
+                    -num_bigint::BigInt::from(p_a),
+                    num_bigint::BigInt::from(q_m),
+                ));
+            }
+        } else if self_rat < &num_rational::BigRational::one()
+            && base_rat < &num_rational::BigRational::one()
+        {
+            if c_n == c_b && c_m == c_a && q_m == q_n && p_a == p_b && c_n > num_bigint::BigUint::one() {
+                return Some(num_rational::BigRational::new(
+                    num_bigint::BigInt::from(p_a),
+                    num_bigint::BigInt::from(q_m),
+                ));
+            }
+        }
+    }
+    None
+}
+
 impl Number {
     /// Apply a monotone-increasing function to the real interval.
     /// Returns false if any resulting bound is NaN (domain error).
@@ -275,6 +397,17 @@ impl Number {
             self.approx = keep;
             self.set_precision_and_approximate_from(base);
             return true;
+        }
+        if let (Some(self_rat), Some(base_rat)) = (self.internal_rational(), base.internal_rational()) {
+            if !self.has_imaginary_part() && !base.has_imaginary_part() && !self.is_approximate() && !base.is_approximate() {
+                if let Some(res_rat) = exact_rational_log(self_rat, base_rat) {
+                    let mut res = Number::from_rational(res_rat);
+                    res.approx = false;
+                    res.set_precision_and_approximate_from(base);
+                    *self = res;
+                    return true;
+                }
+            }
         }
         let mut num = self.clone();
         let mut den = base.clone();
@@ -1365,8 +1498,25 @@ mod tests {
     fn log_base() {
         let mut n = Number::from_i64(8);
         assert!(n.log(&Number::from_i64(2)));
-        // log2(8) = 3 — float path, should be very close to 3
-        assert!(n.is_greater_than(&Number::from_ints(299, 100, 0)));
-        assert!(n.is_less_than(&Number::from_ints(301, 100, 0)));
+        assert_eq!(n, Number::from_i64(3));
+        assert!(!n.is_approximate());
+    }
+
+    #[test]
+    fn exact_rational_log_test() {
+        let mut n = Number::from_i64(4);
+        assert!(n.log(&Number::from_i64(2)));
+        assert_eq!(n, Number::from_i64(2));
+        assert!(!n.is_approximate());
+
+        let mut n2 = Number::from_i64(100);
+        assert!(n2.log(&Number::from_i64(10)));
+        assert_eq!(n2, Number::from_i64(2));
+        assert!(!n2.is_approximate());
+
+        let mut n3 = Number::from_rational(num_rational::BigRational::new(1.into(), 100.into()));
+        assert!(n3.log(&Number::from_i64(10)));
+        assert_eq!(n3, Number::from_i64(-2));
+        assert!(!n3.is_approximate());
     }
 }

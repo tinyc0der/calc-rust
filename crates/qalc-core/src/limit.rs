@@ -1475,15 +1475,49 @@ fn lim_function(
 // ----------------------------------------------------------------------
 
 /// `v = k * pi` → `Some(k)`.
-fn pi_multiple(v: &MathStructure) -> Option<Number> {
+pub(crate) fn pi_multiple(v: &MathStructure) -> Option<Number> {
     match v {
         MathStructure::Number(n) if n.is_zero() => Some(Number::new()),
         MathStructure::Symbolic(s) if s == "pi" => Some(Number::from_i64(1)),
         MathStructure::Multiplication(f) if f.len() == 2 => {
-            let (MathStructure::Number(k), MathStructure::Symbolic(s)) = (&f[0], &f[1]) else {
-                return None;
-            };
-            (s == "pi").then(|| k.clone())
+            if let (MathStructure::Number(k), MathStructure::Symbolic(s)) = (&f[0], &f[1]) {
+                if s == "pi" {
+                    return Some(k.clone());
+                }
+            }
+            if let (MathStructure::Symbolic(s), MathStructure::Number(k)) = (&f[0], &f[1]) {
+                if s == "pi" {
+                    return Some(k.clone());
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn eval_trig_exact(id: u32, arg: &MathStructure) -> Option<MathStructure> {
+    let k = pi_multiple(arg)?;
+    match id {
+        bid::SIN => sin_pi(&k),
+        bid::COS => cos_pi(&k),
+        bid::TAN => {
+            let s = sin_pi(&k)?;
+            let c = cos_pi(&k)?;
+            if c.is_zero() {
+                None
+            } else {
+                Some(evd(mul(vec![s, inv(c)])))
+            }
+        }
+        bid::COT => {
+            let s = sin_pi(&k)?;
+            let c = cos_pi(&k)?;
+            if s.is_zero() {
+                None
+            } else {
+                Some(evd(mul(vec![c, inv(s)])))
+            }
         }
         _ => None,
     }
@@ -1541,31 +1575,8 @@ fn cos_pi(k: &Number) -> Option<MathStructure> {
 /// The exact value of `sin`/`cos`/`tan`/`cot` at a limit point, falling back
 /// to the ordinary (exact-mode) evaluation of the call.
 fn trig_value(id: u32, v: &MathStructure) -> Option<Lim> {
-    if let Some(k) = pi_multiple(v) {
-        let value = match id {
-            bid::SIN => sin_pi(&k),
-            bid::COS => cos_pi(&k),
-            bid::TAN => {
-                let s = sin_pi(&k)?;
-                let c = cos_pi(&k)?;
-                if c.is_zero() {
-                    return None;
-                }
-                Some(evd(mul(vec![s, inv(c)])))
-            }
-            bid::COT => {
-                let s = sin_pi(&k)?;
-                let c = cos_pi(&k)?;
-                if s.is_zero() {
-                    return None;
-                }
-                Some(evd(mul(vec![c, inv(s)])))
-            }
-            _ => None,
-        };
-        if let Some(value) = value {
-            return Some(Lim::Val(value));
-        }
+    if let Some(value) = eval_trig_exact(id, v) {
+        return Some(Lim::Val(value));
     }
     let r = evd(func(id, vec![v.clone()]));
     Some(Lim::Val(r))
@@ -1995,7 +2006,7 @@ thread_local! {
 }
 
 /// Is `m` a `limit(…)` call this module would evaluate?
-fn is_limit_call(m: &MathStructure) -> bool {
+pub(crate) fn is_limit_call(m: &MathStructure) -> bool {
     matches!(m, MathStructure::Function { id, args }
         if id.0 == id::LIMIT && (2..=4).contains(&args.len()))
 }

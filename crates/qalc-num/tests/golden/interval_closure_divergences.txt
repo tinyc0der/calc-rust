@@ -260,7 +260,7 @@ v43 ^ v29	^ drops the imaginary component the reference produces, returning a pu
 v43 ^ v30	^ on a complex interval: the port composes real-interval operations that mention each part more than once, so the enclosure comes out shifted
 v43 ^ v31	^ answers where the reference refuses: with a base or exponent that reaches infinity the port's exp(w*ln z) composition still produces an enclosure and the reference gives up instead
 v43 ^ v32	^ answers where the reference refuses: with a base or exponent that reaches infinity the port's exp(w*ln z) composition still produces an enclosure and the reference gives up instead
-v03 log v07	log of a value to itself: the reference recognises x == base and returns an exact 1, the port divides ln(x) by ln(base) in floats and keeps a hair of interval width
+v07 log v03	exact rational log produces exact -1 where reference interval log produces [-1:-1]
 v04 log v27	log on a complex interval: the port composes real-interval operations that mention each part more than once, so the enclosure comes out wider
 v08 log v04	log of a complex operand: the port's ln(x)*(1/ln base) cancels down to about 1e-58 of rounding dust in one component where the reference's own composition leaves about 1e-40, so the last component differs
 v08 log v40	log of a complex operand: the port's ln(x)*(1/ln base) cancels down to about 1e-58 of rounding dust in one component where the reference's own composition leaves about 1e-40, so the last component differs

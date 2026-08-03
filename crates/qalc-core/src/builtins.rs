@@ -210,6 +210,12 @@ pub fn calculate_function_exact(m: &mut MathStructure, exact: bool) -> bool {
         return false;
     };
     let id = id.0;
+    if args.len() == 1 {
+        if let Some(r) = crate::limit::eval_trig_exact(id, &args[0]) {
+            *m = r;
+            return true;
+        }
+    }
     // Every builtin here is numeric: bail out unless all arguments reduced
     // to numbers.
     let mut nums: Vec<Number> = Vec::with_capacity(args.len());

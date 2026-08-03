@@ -204,8 +204,13 @@ pub fn evaluate_calculated_with(m: &mut MathStructure, eo: &EvaluationOptions) {
     // already become `1.732050808` no longer looks indeterminate. See
     // `limit::resolve_exactly`. Under `Exact` the ordinary loop below already
     // does exactly this, so the pre-pass only runs when it would differ.
+    let is_limit = crate::limit::is_limit_call(m);
     if eo.approximation != crate::options::ApproximationMode::Exact {
         crate::limit::resolve_exactly(m);
+        if is_limit && !crate::limit::is_limit_call(m) {
+            crate::sort::sort(m);
+            return;
+        }
     }
     for _ in 0..MAX_EVAL_PASSES {
         let ranges_changed = evaluate_ranges(m);

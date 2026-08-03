@@ -1560,18 +1560,10 @@ impl MathStructure {
         // first would make `cos(pi)` merely close to -1, and the approximate
         // residue would survive into otherwise exact arithmetic.
         if let MathStructure::Function { id, args } = self {
-            if args.len() == 1 && matches!(&args[0], MathStructure::Symbolic(name) if name == "pi")
-            {
-                match id.0 {
-                    crate::builtins::id::SIN => {
-                        *self = MathStructure::Number(Number::new());
-                        return true;
-                    }
-                    crate::builtins::id::COS => {
-                        *self = MathStructure::Number(Number::from_i64(-1));
-                        return true;
-                    }
-                    _ => {}
+            if args.len() == 1 {
+                if let Some(r) = crate::limit::eval_trig_exact(id.0, &args[0]) {
+                    *self = r;
+                    return true;
                 }
             }
         }
