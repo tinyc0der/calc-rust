@@ -65,6 +65,43 @@ fn print_unit(
     }
 }
 
+fn to_superscript(mut e: i32) -> String {
+    if e == 0 {
+        return "⁰".to_string();
+    }
+    let neg = e < 0;
+    if neg {
+        e = -e;
+    }
+    let mut digits = Vec::new();
+    while e > 0 {
+        let d = (e % 10) as usize;
+        let super_d = match d {
+            0 => '⁰',
+            1 => '¹',
+            2 => '²',
+            3 => '³',
+            4 => '⁴',
+            5 => '⁵',
+            6 => '⁶',
+            7 => '⁷',
+            8 => '⁸',
+            9 => '⁹',
+            _ => unreachable!(),
+        };
+        digits.push(super_d);
+        e /= 10;
+    }
+    let mut res = String::new();
+    if neg {
+        res.push('⁻');
+    }
+    for ch in digits.into_iter().rev() {
+        res.push(ch);
+    }
+    res
+}
+
 /// Print a run of `unit`/`unit^n` factors the way the reference does: factors
 /// joined with `*`, a `/` before the negative-exponent ones (parenthesized
 /// when there is more than one), and plain negative exponents when there is
@@ -79,6 +116,8 @@ fn print_units_group(units: &[MathStructure], po: &PrintOptions) -> String {
         let name = print_unit(*id, *p, po);
         if *e == 1 {
             name
+        } else if po.use_unicode_signs {
+            format!("{name}{}", to_superscript(*e))
         } else {
             format!("{name}^{e}")
         }

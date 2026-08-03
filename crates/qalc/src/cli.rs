@@ -40,6 +40,7 @@ pub fn is_terse() -> bool {
 pub fn new_session() -> Session {
     let mut session = Session::new();
     session.eval_options.approximation = qalc_core::ApproximationMode::Approximate;
+    session.print_options.use_unicode_signs = true;
     // libqalculate's DEFAULT_PRECISION is 8. qalc-num keeps a wider default
     // for library callers and its numeric golden corpus, while the CLI must
     // use the reference program's user-facing default.
@@ -78,7 +79,12 @@ pub fn evaluate_cli_line(session: &mut Session, line: &str) -> Result<String, St
         None => session.evaluate_line(trimmed)?,
     };
     if is_terse() {
-        Ok(res.trim().to_string())
+        let trimmed = res.trim();
+        if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
+            Ok(trimmed[1..trimmed.len() - 1].to_string())
+        } else {
+            Ok(trimmed.to_string())
+        }
     } else {
         Ok(res)
     }
@@ -305,6 +311,8 @@ pub fn run_transcript_file(path: &std::path::Path) -> std::io::Result<crate::bat
     }
     let transcript = crate::batch::parse_transcript(&source);
     let mut session = new_session();
+    session.print_options = qalc_core::eval::batch_print_options();
+    qalc_num::context::set_precision(qalc_num::context::DEFAULT_PRECISION);
     Ok(crate::batch::run_transcript(
         &path.display().to_string(),
         &transcript,

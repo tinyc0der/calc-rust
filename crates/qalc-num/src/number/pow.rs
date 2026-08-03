@@ -521,6 +521,9 @@ impl Number {
             self.clear(true);
             return true;
         }
+        let orig_base = self.clone();
+        let orig_exp = o.clone();
+
         let mut l = self.clone();
         if !l.ln() {
             return false;
@@ -541,6 +544,50 @@ impl Number {
         // small-but-significant part survives.
         self.drop_negligible_parts();
         self.set_precision_and_approximate_from(o);
+
+        if let RealValue::Rational(base_r) = &orig_base.value {
+            if base_r.is_negative() && !orig_base.has_imaginary_part() {
+                if let RealValue::Rational(exp_r) = &orig_exp.value {
+                    if !orig_exp.has_imaginary_part() {
+                        let mut abs_base = Number::from_rational(-base_r);
+                        let n_big = exp_r.denom();
+                        let m_big = exp_r.numer();
+                        if let Some(n) = n_big.to_u32() {
+                            if abs_base.exact_root(n) {
+                                let mut r_base = abs_base;
+                                if let Some(m) = m_big.to_i64() {
+                                    if r_base.raise(&Number::from_i64(m), true) {
+                                        if let RealValue::Rational(r_val) = &r_base.value {
+                                            let n_i64 = n as i64;
+                                            let m_mod = ((m % (2 * n_i64)) + 2 * n_i64) % (2 * n_i64);
+                                            let cos_rat = if m_mod == 0 {
+                                                Some(BigRational::from_integer(BigInt::from(1)))
+                                            } else if m_mod == n_i64 {
+                                                Some(BigRational::from_integer(BigInt::from(-1)))
+                                            } else if 2 * m_mod == n_i64 || 2 * m_mod == 3 * n_i64 {
+                                                Some(BigRational::from_integer(BigInt::from(0)))
+                                            } else if 3 * m_mod == n_i64 || 3 * m_mod == 5 * n_i64 {
+                                                Some(BigRational::new(BigInt::from(1), BigInt::from(2)))
+                                            } else if 3 * m_mod == 2 * n_i64 || 3 * m_mod == 4 * n_i64 {
+                                                Some(BigRational::new(BigInt::from(-1), BigInt::from(2)))
+                                            } else {
+                                                None
+                                            };
+                                            if let Some(c) = cos_rat {
+                                                let exact_re = r_val * c;
+                                                self.value = RealValue::Rational(exact_re);
+                                                self.approx = false;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         true
     }
 

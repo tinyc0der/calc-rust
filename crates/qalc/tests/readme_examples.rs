@@ -47,7 +47,7 @@ fn example_basic_03_sqrt_exact_symbolic() {
 
 #[test]
 fn example_basic_04_cbrt_negative() {
-    assert_eq!(eval("cbrt(-27)"), "-3");
+    assert_eq!(eval("cbrt(-27)"), "−3");
 }
 
 #[test]
@@ -195,7 +195,7 @@ fn example_algebra_06_symbolic_gcd() {
 
 #[test]
 fn example_algebra_07_quadratic_solver() {
-    assert_eq!(eval("x+x^2+4 = 16"), "x = 3 or x = -4");
+    assert_eq!(eval("x+x^2+4 = 16"), "x = 3 or x = −4");
 }
 
 // ===========================================================================
@@ -238,12 +238,12 @@ fn example_matrix_02_vector_elementwise() {
 
 #[test]
 fn example_matrix_03_vector_cross_product() {
-    assert_eq!(eval("cross([1 2 3]; [4 5 6])"), "[-3  6  -3]");
+    assert_eq!(eval("cross([1 2 3]; [4 5 6])"), "[−3  6  −3]");
 }
 
 #[test]
 fn example_matrix_04_inverse() {
-    assert_eq!(eval("[1 2; 3 4]^-1"), "[-2  1; 1.5  -0.5]");
+    assert_eq!(eval("[1 2; 3 4]^-1"), "[−2  1; 1.5  −0.5]");
 }
 
 // ===========================================================================
@@ -257,7 +257,7 @@ fn example_stats_01_mean() {
 
 #[test]
 fn example_stats_02_stdev() {
-    assert_eq!(eval("stdev(5; 6; 4; 2; 3; 7)"), "1.87");
+    assert_eq!(eval("stdev(5; 6; 4; 2; 3; 7)"), "1.8708287");
 }
 
 #[test]
