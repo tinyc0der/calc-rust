@@ -883,8 +883,39 @@ impl MathStructure {
             return Failed;
         }
 
-        // TODO(port): eo.reduce_divisions — cancelling common factors of a
-        // numerator against a polynomial denominator.
+        if eo.reduce_divisions {
+            if let MathStructure::Power { base: den_base, exponent: den_exp } = &*other {
+                if den_exp.is_minus_one() {
+                    if let Some(xvar) = crate::polynomial::first_symbol(den_base)
+                        .or_else(|| crate::polynomial::first_symbol(self))
+                    {
+                        let numdeg = crate::polynomial::degree(self, &xvar);
+                        let dendeg = crate::polynomial::degree(den_base, &xvar);
+                        if numdeg.is_greater_than_or_equal_to(&dendeg) && !dendeg.is_zero() {
+                            if let Some((mut quotient, remainder)) =
+                                crate::polynomial::polynomial_division_remainder(
+                                    self, den_base, &xvar, eo,
+                                )
+                            {
+                                if remainder.is_zero() {
+                                    *self = quotient;
+                                } else {
+                                    let mut rem_term = remainder;
+                                    rem_term.calculate_divide(*den_base.clone(), eo);
+                                    if quotient.is_zero() {
+                                        *self = rem_term;
+                                    } else {
+                                        quotient.calculate_add(rem_term, eo);
+                                        *self = quotient;
+                                    }
+                                }
+                                return Merged;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // STRUCT_VECTOR: scalar broadcasting and matrix products.
         if self.is_vector() || (other.is_vector() && !self.is_addition()) {
             return crate::matrix::merge_multiplication_vector(self, other, eo);
@@ -1363,6 +1394,19 @@ impl MathStructure {
                 if let Some(factored) = factor_to_power(self, root, eo) {
                     *self = factored;
                     return self.merge_power(other, eo);
+                }
+            }
+        }
+
+        if self.is_addition() && eo.expand != 0 {
+            if let Some(n) = other.number().filter(|x| x.is_integer()).and_then(|x| x.to_i64()) {
+                if (2..=100).contains(&n) {
+                    let base = self.clone();
+                    for _ in 1..n {
+                        let mut factor = base.clone();
+                        self.expand_over(&mut factor, eo, false);
+                    }
+                    return Merged;
                 }
             }
         }

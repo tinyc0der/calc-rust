@@ -30,7 +30,7 @@ fn test_m4_6_symbolic_gcd_required_case_2() {
 #[test]
 fn test_m4_6_denest_and_sqrt1_simplification() {
     let res = eval_exact("sqrt(3 - 2*sqrt(2))");
-    assert_eq!(res, "sqrt(2) - 1", "sqrt(3 - 2*sqrt(2)) should denest to 'sqrt(2) - 1', got: {}", res);
+    assert_eq!(res, "sqrt(2) − 1", "sqrt(3 - 2*sqrt(2)) should denest to 'sqrt(2) − 1', got: {}", res);
 }
 
 #[test]

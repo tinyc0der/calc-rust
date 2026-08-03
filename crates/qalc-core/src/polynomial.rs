@@ -401,21 +401,31 @@ pub fn polynomial_quotient(
     xvar: &MathStructure,
     eo: &EvaluationOptions,
 ) -> Option<MathStructure> {
+    polynomial_division_remainder(num, den, xvar, eo).map(|(q, _)| q)
+}
+
+/// Calculates quotient and remainder of polynomial long division.
+pub fn polynomial_division_remainder(
+    num: &MathStructure,
+    den: &MathStructure,
+    xvar: &MathStructure,
+    eo: &EvaluationOptions,
+) -> Option<(MathStructure, MathStructure)> {
     if den.is_zero() {
         return None;
     }
     if num.is_zero() {
-        return Some(MathStructure::new());
+        return Some((MathStructure::new(), MathStructure::new()));
     }
     if let (MathStructure::Number(a), MathStructure::Number(b)) = (num, den) {
         let mut q = a.clone();
         if !q.divide(b) {
             return None;
         }
-        return Some(MathStructure::Number(q));
+        return Some((MathStructure::Number(q), MathStructure::new()));
     }
     if num.equals(den) {
-        return Some(MathStructure::from(1));
+        return Some((MathStructure::from(1), MathStructure::new()));
     }
 
     let mut numdeg = degree(num, xvar);
@@ -473,7 +483,7 @@ pub fn polynomial_quotient(
         }
         numdeg = degree(&rem, xvar);
     }
-    Some(quotient)
+    Some((quotient, rem))
 }
 
 /// `xvar^n`, collapsing `n == 1` to the bare symbol.
