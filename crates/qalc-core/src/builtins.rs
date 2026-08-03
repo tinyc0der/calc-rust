@@ -241,21 +241,46 @@ fn handle_vector(m: &mut MathStructure) -> bool {
         return false;
     };
     let fid = id.0;
-    let [MathStructure::Vector(items)] = args.as_slice() else {
-        return false;
-    };
-    let mut out = Vec::with_capacity(items.len());
-    for item in items {
-        let MathStructure::Number(n) = item else {
+    if args.len() == 1 {
+        let MathStructure::Vector(items) = &args[0] else {
             return false;
         };
-        match apply(fid, std::slice::from_ref(n)) {
-            Some(r) => out.push(MathStructure::Number(r)),
-            None => return false,
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            let MathStructure::Number(n) = item else {
+                return false;
+            };
+            match apply(fid, std::slice::from_ref(n)) {
+                Some(r) => out.push(MathStructure::Number(r)),
+                None => return false,
+            }
         }
+        *m = MathStructure::Vector(out);
+        return true;
+    } else if args.len() > 1 {
+        let mut nums = Vec::with_capacity(args.len());
+        for a in args.iter() {
+            match a {
+                MathStructure::Number(n) => nums.push(n.clone()),
+                _ => return false,
+            }
+        }
+        // If applying fid to all arguments together succeeds (e.g. log(100, 10), atan2(y, x), gcd(a, b)),
+        // then this is a valid multi-argument call, not vector distribution.
+        if apply(fid, &nums).is_some() {
+            return false;
+        }
+        let mut out = Vec::with_capacity(nums.len());
+        for n in &nums {
+            match apply(fid, std::slice::from_ref(n)) {
+                Some(r) => out.push(MathStructure::Number(r)),
+                None => return false,
+            }
+        }
+        *m = MathStructure::Vector(out);
+        return true;
     }
-    *m = MathStructure::Vector(out);
-    true
+    false
 }
 
 /// Apply the builtin with id `id` to numeric arguments.

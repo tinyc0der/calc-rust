@@ -1275,6 +1275,21 @@ impl<'a> Parser<'a> {
                     // Anything else falls through to name resolution: nothing
                     // knows `zzz`, so `zzz(2)` is `z*z*z*2`, as in the C++.
                 }
+                let is_unit = crate::units::store().is_some_and(|s| s.resolve_name(name).is_some());
+                if !is_unit && (self.starts_implicit_factor() || matches!(self.peek(), Tok::Minus | Tok::Plus | Tok::BitNot | Tok::LogicalNot)) {
+                    if let Some(fid) = self.resolver.resolve_function(name).or_else(|| unimplemented_function(name)) {
+                        if crate::strings::has_text_args(fid.0)
+                            || crate::datetime::has_date_args(fid.0)
+                        {
+                            return self.parse_text_call(fid);
+                        }
+                        let arg = self.parse_implicit_product_opt(true)?;
+                        return Ok(MathStructure::Function {
+                            id: fid,
+                            args: vec![arg],
+                        });
+                    }
+                }
                 match self.resolver.resolve(name) {
                     Some(m) => Ok(m),
                     None => self.err(format!("unknown name `{name}`")),
