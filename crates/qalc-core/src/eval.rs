@@ -68,12 +68,11 @@ pub fn apply_conversion(m: &mut MathStructure, po: &mut PrintOptions) -> Result<
         }
         ConversionTarget::Base(expr) => {
             let mut b = (**expr).clone();
-            evaluate(&mut b);
+            let mut eo2 = crate::options::EvaluationOptions::default();
+            eo2.approximation = crate::options::ApproximationMode::Approximate;
+            eo2.split_squares = false;
+            evaluate_calculated_with(&mut b, &eo2);
             match &b {
-                // Anything that is not a plain integer base becomes the
-                // custom output base, which `Number::print` renders by
-                // repeated division: `to base sqrt(2)` is a real base, not an
-                // error (Number.cc:10840).
                 MathStructure::Number(n) => match n.to_i64() {
                     Some(v) if (2..=36).contains(&v) => po.base = v as i32,
                     _ if n.is_real() && n.is_greater_than(&qalc_num::Number::from_i64(1)) => {
@@ -84,7 +83,10 @@ pub fn apply_conversion(m: &mut MathStructure, po: &mut PrintOptions) -> Result<
                 },
                 _ => return Err("number base must evaluate to a number".to_string()),
             }
-            let v = (**value).clone();
+            let mut v = (**value).clone();
+            if po.base == qalc_num::options::base::CUSTOM {
+                evaluate_calculated_with(&mut v, &eo2);
+            }
             *m = v;
         }
         ConversionTarget::BaseUnits => {

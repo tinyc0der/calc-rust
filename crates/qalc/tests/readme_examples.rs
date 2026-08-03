@@ -37,7 +37,7 @@ fn example_basic_01_sqrt_implicit_parens() {
 
 #[test]
 fn example_basic_02_sqrt_vector_distrib() {
-    assert_eq!(eval("sqrt(25; 16; 9; 4)"), "[5 4 3 2]");
+    assert_eq!(eval("sqrt(25; 16; 9; 4)"), "[5  4  3  2]");
 }
 
 #[test]

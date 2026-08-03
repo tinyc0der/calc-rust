@@ -142,6 +142,15 @@ pub fn calculate_function(m: &mut MathStructure) -> bool {
 /// [`calculate_function`], refusing an approximate numeric result when
 /// `exact` is set (`/set approximation exact`).
 pub fn calculate_function_exact(m: &mut MathStructure, exact: bool) -> bool {
+    let mut eo = crate::options::EvaluationOptions::default();
+    if exact {
+        eo.approximation = crate::options::ApproximationMode::Exact;
+    }
+    calculate_function_eo(m, &eo)
+}
+
+pub fn calculate_function_eo(m: &mut MathStructure, eo: &crate::options::EvaluationOptions) -> bool {
+    let exact = eo.approximation == crate::options::ApproximationMode::Exact;
     // Matrix/vector builtins take structured (non-numeric) arguments, so
     // they are dispatched before the numeric fast path below.
     if crate::matrix::calculate_function(m) {
@@ -209,13 +218,53 @@ pub fn calculate_function_exact(m: &mut MathStructure, exact: bool) -> bool {
     let MathStructure::Function { id, args } = m else {
         return false;
     };
-    let id = id.0;
+    let fid = id.0;
     if args.len() == 1 {
-        if let Some(r) = crate::limit::eval_trig_exact(id, &args[0]) {
+        if let Some(r) = crate::limit::eval_trig_exact(fid, &args[0]) {
             *m = r;
             return true;
         }
     }
+
+    if fid == crate::builtins::id::SQRT && args.len() == 1 {
+        if let MathStructure::Number(ref n) = args[0] {
+            if eo.split_squares || eo.approximation < crate::options::ApproximationMode::Approximate {
+                if let Some((k, rem)) = n.extract_square_factor() {
+                    let is_neg = rem.is_negative();
+                    let mut rem_abs = rem.clone();
+                    if is_neg {
+                        rem_abs.negate();
+                    }
+                    let coeff = if is_neg {
+                        let mut c = Number::from_i64(0);
+                        c.set_imaginary_part(&k);
+                        c
+                    } else {
+                        k.clone()
+                    };
+
+                    if !k.is_one() || is_neg {
+                        if rem_abs.is_one() {
+                            *m = MathStructure::Number(coeff);
+                            return true;
+                        } else {
+                            *m = MathStructure::Multiplication(vec![
+                                MathStructure::Number(coeff),
+                                MathStructure::Function {
+                                    id: crate::ids::FunctionId(crate::builtins::id::SQRT),
+                                    args: vec![MathStructure::Number(rem_abs)],
+                                },
+                            ]);
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+
+
     // Every builtin here is numeric: bail out unless all arguments reduced
     // to numbers.
     let mut nums: Vec<Number> = Vec::with_capacity(args.len());
@@ -225,7 +274,7 @@ pub fn calculate_function_exact(m: &mut MathStructure, exact: bool) -> bool {
             _ => return false,
         }
     }
-    let Some(result) = apply(id, &nums) else {
+    let Some(result) = apply(fid, &nums) else {
         return false;
     };
     // `numeric_result_ok` in the merge engine: an exact-mode calculation
@@ -851,16 +900,17 @@ pub fn calculate_functions_eo(
     m: &mut MathStructure,
     eo: &crate::options::EvaluationOptions,
 ) -> bool {
-    let exact = eo.approximation == crate::options::ApproximationMode::Exact;
-    calculate_functions_inner(m, exact)
+    calculate_functions_inner(m, eo)
 }
 
-fn calculate_functions_inner(m: &mut MathStructure, exact: bool) -> bool {
+fn calculate_functions_inner(
+    m: &mut MathStructure,
+    eo: &crate::options::EvaluationOptions,
+) -> bool {
     let mut changed = false;
     match m {
         MathStructure::Vector(v)
         | MathStructure::Addition(v)
-        | MathStructure::Multiplication(v)
         | MathStructure::BitwiseAnd(v)
         | MathStructure::BitwiseOr(v)
         | MathStructure::BitwiseXor(v)
@@ -868,32 +918,43 @@ fn calculate_functions_inner(m: &mut MathStructure, exact: bool) -> bool {
         | MathStructure::LogicalOr(v)
         | MathStructure::LogicalXor(v) => {
             for child in v.iter_mut() {
-                changed |= calculate_functions_inner(child, exact);
+                changed |= calculate_functions_inner(child, eo);
+            }
+        }
+        MathStructure::Multiplication(v) => {
+            let is_factored_radical = eo.split_squares
+                && v.len() == 2
+                && v[0].is_number()
+                && matches!(&v[1], MathStructure::Function { id, args } if id.0 == crate::builtins::id::SQRT && args.len() == 1 && args[0].number().is_some_and(|n| n.extract_square_factor().is_some_and(|(k, rem)| k.is_one() && !rem.is_one())));
+            if !is_factored_radical {
+                for child in v.iter_mut() {
+                    changed |= calculate_functions_inner(child, eo);
+                }
             }
         }
         MathStructure::Power { base, exponent } => {
-            changed |= calculate_functions_inner(base, exact);
-            changed |= calculate_functions_inner(exponent, exact);
+            changed |= calculate_functions_inner(base, eo);
+            changed |= calculate_functions_inner(exponent, eo);
         }
         MathStructure::Comparison { left, right, .. } => {
-            changed |= calculate_functions_inner(left, exact);
-            changed |= calculate_functions_inner(right, exact);
+            changed |= calculate_functions_inner(left, eo);
+            changed |= calculate_functions_inner(right, eo);
         }
         MathStructure::BitwiseNot(x) | MathStructure::LogicalNot(x) => {
-            changed |= calculate_functions_inner(x, exact);
+            changed |= calculate_functions_inner(x, eo);
         }
         MathStructure::Conversion { value, .. } => {
-            changed |= calculate_functions_inner(value, exact);
+            changed |= calculate_functions_inner(value, eo);
         }
         MathStructure::Function { args, .. } => {
             for a in args.iter_mut() {
-                changed |= calculate_functions_inner(a, exact);
+                changed |= calculate_functions_inner(a, eo);
             }
         }
         _ => {}
     }
     if matches!(m, MathStructure::Function { .. }) {
-        changed |= calculate_function_exact(m, exact);
+        changed |= calculate_function_eo(m, eo);
     }
     // Bitwise/logical operators are dedicated node types rather than calls,
     // but their numeric evaluation belongs here.

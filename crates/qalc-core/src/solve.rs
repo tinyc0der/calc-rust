@@ -1238,8 +1238,9 @@ fn const_value(m: &MathStructure) -> Option<f64> {
     let mut c = m.clone();
     let mut eo2 = eo();
     eo2.approximation = crate::options::ApproximationMode::Approximate;
+    eo2.split_squares = false;
     for _ in 0..8 {
-        let changed = crate::builtins::calculate_functions(&mut c);
+        let changed = crate::builtins::calculate_functions_eo(&mut c, &eo2);
         let merged = c.calculatesub(&eo2);
         if !changed && !merged {
             break;
@@ -2001,8 +2002,9 @@ pub fn eval_at(expr: &MathStructure, xvar: &MathStructure, x: &Number) -> Option
     replace(&mut m, xvar, &MathStructure::Number(x.clone()));
     let mut eo2 = eo();
     eo2.approximation = crate::options::ApproximationMode::Approximate;
+    eo2.split_squares = false;
     for _ in 0..8 {
-        let changed = crate::builtins::calculate_functions(&mut m);
+        let changed = crate::builtins::calculate_functions_eo(&mut m, &eo2);
         let merged = m.calculatesub(&eo2);
         if !changed && !merged {
             break;

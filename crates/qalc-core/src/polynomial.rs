@@ -649,7 +649,12 @@ pub fn gcd(
         to_dense(m2, &xvar)?,
     );
     let g = dense_gcd(&a, &b)?;
-    Some(from_dense(&g, &xvar))
+    let cont_a = dense_content(&a);
+    let cont_b = dense_content(&b);
+    let mut cont_gcd = cont_a;
+    cont_gcd.gcd(&cont_b);
+    let scaled_g = dense_scale(&g, &cont_gcd);
+    Some(from_dense(&scaled_g, &xvar))
 }
 
 trait MaxOf {
@@ -1290,6 +1295,35 @@ pub fn calculate_function(m: &mut MathStructure) -> bool {
     if function_name(fid).is_none() {
         return false;
     }
+    if fid == crate::builtins::id::GCD {
+        if args.len() < 2
+            || args.iter().all(|a| matches!(a, MathStructure::Number(_)))
+            || args.iter().any(|a| a.is_zero())
+        {
+            return false;
+        }
+        let mut eval_args = Vec::with_capacity(args.len());
+        for a in args {
+            let mut p = a.clone();
+            crate::eval::evaluate_calculated(&mut p);
+            if p.is_zero() {
+                return false;
+            }
+            eval_args.push(p);
+        }
+        if eval_args.iter().all(|a| matches!(a, MathStructure::Number(_))) {
+            return false;
+        }
+        let mut acc = eval_args[0].clone();
+        for next in &eval_args[1..] {
+            let Some(g) = gcd(&acc, next, &eo) else {
+                return false;
+            };
+            acc = g;
+        }
+        *m = acc;
+        return true;
+    }
     // The C++ `MathFunction::calculate` receives fully evaluated arguments
     // (`vargs`); this port's function dispatch runs before the merge engine,
     // so the polynomial argument is normalized here.
@@ -1378,6 +1412,7 @@ pub fn function_id_for_name(name: &str) -> Option<crate::ids::FunctionId> {
         "punit" => id::POLYNOMIAL_UNIT,
         "factorize" | "factor" => id::FACTORIZE,
         "expand" | "multiply" => id::EXPAND,
+        "gcd" => crate::builtins::id::GCD,
         _ => return None,
     };
     Some(crate::ids::FunctionId(id))
@@ -1396,6 +1431,7 @@ pub fn function_name(id: u32) -> Option<&'static str> {
         id::POLYNOMIAL_UNIT => "punit",
         id::FACTORIZE => "factorize",
         id::EXPAND => "expand",
+        crate::builtins::id::GCD => "gcd",
         _ => return None,
     })
 }

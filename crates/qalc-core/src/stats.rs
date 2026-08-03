@@ -249,7 +249,7 @@ fn abs_of(a: &Number) -> Option<Number> {
 /// `x^(1/2)` — the form the XML formulas use, so the rounding matches.
 fn sqrt_of(a: &Number) -> Option<Number> {
     let mut r = a.clone();
-    r.raise(&Number::from_ints(1, 2, 0), true).then_some(r)
+    r.raise(&Number::from_ints(1, 2, 0), false).then_some(r)
 }
 fn from_f64(v: f64) -> Option<Number> {
     if !v.is_finite() {

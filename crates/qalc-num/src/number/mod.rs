@@ -572,6 +572,62 @@ impl Number {
             && matches!(&self.value, RealValue::Rational(r) if r.is_one())
     }
 
+    /// Extract perfect square factors from a rational number.
+    /// Returns `Some((k, rem))` where `k` is the extracted positive square root factor
+    /// and `rem` is the square-free remainder such that `self` (magnitude) = `k^2 * rem`.
+    pub fn extract_square_factor(&self) -> Option<(Number, Number)> {
+        if self.has_imaginary_part() || !self.is_rational() || self.is_zero() {
+            return None;
+        }
+        let RealValue::Rational(r) = &self.value else {
+            return None;
+        };
+
+        fn factor_square(x: &BigInt) -> (BigInt, BigInt) {
+            let mut curr = x.abs();
+            if curr.is_zero() || curr.is_one() {
+                return (BigInt::one(), curr);
+            }
+            let mut k = BigInt::one();
+            let mut rem = BigInt::one();
+            let mut d = 2u64;
+            while &BigInt::from(d * d) <= &curr {
+                let d_sq = BigInt::from(d * d);
+                while &curr % &d_sq == BigInt::zero() {
+                    curr /= &d_sq;
+                    k *= d;
+                }
+                let d_bi = BigInt::from(d);
+                if &curr % &d_bi == BigInt::zero() {
+                    curr /= &d_bi;
+                    rem *= d;
+                }
+                d += 1;
+                if d > 100_000 {
+                    break;
+                }
+            }
+            rem *= curr;
+            (k, rem)
+        }
+
+        let (num_k, num_rem) = factor_square(r.numer());
+        let (den_k, den_rem) = factor_square(r.denom());
+
+        let new_den_k = den_k * &den_rem;
+        let k_rat = BigRational::new(num_k, new_den_k);
+        let final_rem = num_rem * den_rem;
+        let rem_rat = if r.is_negative() {
+            BigRational::new(-final_rem, BigInt::one())
+        } else {
+            BigRational::new(final_rem, BigInt::one())
+        };
+
+        let k_num = Number::from_rational(k_rat);
+        let rem_num = Number::from_rational(rem_rat);
+        Some((k_num, rem_num))
+    }
+
     pub fn is_two(&self) -> bool {
         !self.has_imaginary_part()
             && matches!(&self.value, RealValue::Rational(r) if r.denom().is_one() && *r.numer() == BigInt::from(2))

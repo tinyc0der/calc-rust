@@ -1187,16 +1187,49 @@ impl MathStructure {
 
         // number ^ number
         if let Some((a, b)) = number_pair(self, other) {
+            let is_half = b.is_rational() && b.equals(&half(), false, false);
+            if is_half {
+                if let Some((k, rem)) = a.extract_square_factor() {
+                    let is_neg = rem.is_negative();
+                    let mut rem_abs = rem.clone();
+                    if is_neg {
+                        rem_abs.negate();
+                    }
+                    let coeff = if is_neg {
+                        let mut c = Number::from_i64(0);
+                        c.set_imaginary_part(&k);
+                        c
+                    } else {
+                        k.clone()
+                    };
+
+                    if rem_abs.is_one() {
+                        *self = MathStructure::Number(coeff);
+                        return Merged;
+                    } else if (!coeff.is_one() || is_neg)
+                        && (eo.split_squares
+                            || eo.approximation < ApproximationMode::Approximate)
+                    {
+                        *self = MathStructure::Multiplication(vec![
+                            MathStructure::Number(coeff),
+                            MathStructure::Power {
+                                base: Box::new(MathStructure::Number(rem_abs)),
+                                exponent: Box::new(MathStructure::Number(half())),
+                            },
+                        ]);
+                        return Merged;
+                    }
+                }
+            }
+
             let mut nr = a.clone();
-            let try_exact = eo.approximation < ApproximationMode::Approximate;
+            let try_exact = eo.approximation < ApproximationMode::Approximate
+                || (is_half && eo.split_squares);
             if nr.raise(&b, try_exact) && numeric_result_ok(&nr, &a, &b, eo, true) {
                 let unchanged = a.equals(&nr, false, false);
                 *self = MathStructure::Number(nr);
                 return if unchanged { MergedUnchanged } else { Merged };
             }
-            // TODO(port): the exact-arithmetic fallbacks
-            // (`a^(-b)=a^(-b+1)/a`, `(-a)^b=(-1)^b*a^b`, `a^(n/d)=(a^n)^(1/d)`,
-            // `eo.split_squares`) that keep roots exact.
             return Failed;
         }
 
@@ -1453,12 +1486,17 @@ impl MathStructure {
 
     /// `calculateRaise` (`MathStructure-calculate.cc:6898`).
     pub fn calculate_raise(&mut self, mexp: MathStructure, eo: &EvaluationOptions) -> bool {
-        if let Some((a, b)) = number_pair(self, &mexp) {
-            let mut nr = a.clone();
-            let try_exact = eo.approximation < ApproximationMode::Approximate;
-            if nr.raise(&b, try_exact) && numeric_result_ok(&nr, &a, &b, eo, true) {
-                *self = MathStructure::Number(nr);
-                return true;
+        let is_half = mexp
+            .number()
+            .is_some_and(|b| b.is_rational() && b.equals(&half(), false, false));
+        if !is_half {
+            if let Some((a, b)) = number_pair(self, &mexp) {
+                let mut nr = a.clone();
+                let try_exact = eo.approximation < ApproximationMode::Approximate;
+                if nr.raise(&b, try_exact) && numeric_result_ok(&nr, &a, &b, eo, true) {
+                    *self = MathStructure::Number(nr);
+                    return true;
+                }
             }
         }
         self.raise(mexp);
@@ -2533,5 +2571,12 @@ mod denest_tests {
     fn a_root_that_does_not_denest_is_left_alone() {
         let mut s = session();
         assert_eq!(s.evaluate_line("sqrt(1 + sqrt(2))").unwrap(), "sqrt(1 + sqrt(2))");
+    }
+
+    #[test]
+    fn sqrt_one_simplifies_in_multiplication() {
+        let mut s = session();
+        assert_eq!(s.evaluate_line("2 * sqrt(1)").unwrap(), "2");
+        assert_eq!(s.evaluate_line("-1 * sqrt(1)").unwrap(), "-1");
     }
 }
