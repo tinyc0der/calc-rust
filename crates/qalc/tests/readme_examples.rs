@@ -165,7 +165,7 @@ fn example_unit_08_reciprocal_speed() {
 
 #[test]
 fn example_algebra_01_polynomial_division() {
-    assert_eq!(eval("(5x^2 + 2)/(x - 3)"), "5x + 15 + 47/(x − 3)");
+    assert_eq!(eval("(5x^2 + 2)/(x - 3)"), "5x + 15 + 47 / (x − 3)");
 }
 
 #[test]

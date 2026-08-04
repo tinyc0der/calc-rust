@@ -313,6 +313,7 @@ pub fn run_transcript_file(path: &std::path::Path) -> std::io::Result<crate::bat
     let mut session = new_session();
     session.print_options = qalc_core::eval::batch_print_options();
     qalc_num::context::set_precision(qalc_num::context::DEFAULT_PRECISION);
+    qalc_core::assumptions::set_sign(qalc_core::assumptions::Sign::Unknown);
     Ok(crate::batch::run_transcript(
         &path.display().to_string(),
         &transcript,

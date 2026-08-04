@@ -899,15 +899,19 @@ impl MathStructure {
                             {
                                 if remainder.is_zero() {
                                     *self = quotient;
-                                } else {
+                                } else if !remainder.equals(self) {
+                                    let mut eo_no_div = eo.clone();
+                                    eo_no_div.reduce_divisions = false;
                                     let mut rem_term = remainder;
-                                    rem_term.calculate_divide(*den_base.clone(), eo);
+                                    rem_term.calculate_divide(*den_base.clone(), &eo_no_div);
                                     if quotient.is_zero() {
                                         *self = rem_term;
                                     } else {
                                         quotient.calculate_add(rem_term, eo);
                                         *self = quotient;
                                     }
+                                } else {
+                                    return Failed;
                                 }
                                 return Merged;
                             }
@@ -1400,7 +1404,8 @@ impl MathStructure {
 
         if self.is_addition() && eo.expand != 0 {
             if let Some(n) = other.number().filter(|x| x.is_integer()).and_then(|x| x.to_i64()) {
-                if (2..=100).contains(&n) {
+                const MAX_POWER_EXPANSION: i64 = 10;
+                if (2..=MAX_POWER_EXPANSION).contains(&n) && self.size() <= 4 {
                     let base = self.clone();
                     for _ in 1..n {
                         let mut factor = base.clone();

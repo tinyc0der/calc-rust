@@ -411,6 +411,9 @@ pub fn polynomial_division_remainder(
     xvar: &MathStructure,
     eo: &EvaluationOptions,
 ) -> Option<(MathStructure, MathStructure)> {
+    let mut inner_eo = eo.clone();
+    inner_eo.reduce_divisions = false;
+    let eo = &inner_eo;
     if den.is_zero() {
         return None;
     }

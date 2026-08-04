@@ -236,6 +236,21 @@ fn evd(mut m: MathStructure) -> MathStructure {
     m
 }
 
+fn ev_expand(mut m: MathStructure) -> MathStructure {
+    let mut o = eo();
+    o.expand = 1;
+    for _ in 0..8 {
+        let changed = crate::builtins::calculate_functions_eo(&mut m, &o);
+        let merged = m.calculatesub(&o);
+        simplify_local(&mut m, 0);
+        if !changed && !merged {
+            break;
+        }
+    }
+    crate::sort::sort(&mut m);
+    m
+}
+
 fn is_one(m: &MathStructure) -> bool {
     m.is_one()
 }
@@ -972,7 +987,14 @@ fn lhopital(
     if q.count_total_children() > MAX_SIZE {
         return None;
     }
-    lim(&q, x, at, depth + 1)
+    let (qn, qd) = together(&q, 0);
+    let qne = ev_expand(expand_sum(&qn));
+    let qde = ev_expand(expand_sum(&qd));
+    if let Some(r) = lead_quotient(&qne, &qde, x, at) {
+        return Some(r);
+    }
+    let q_clean = if is_one(&qde) { qne } else { evd(mul(vec![qne, inv(qde)])) };
+    lim(&q_clean, x, at, depth + 1)
 }
 
 fn lim_struct(m: &MathStructure, x: &MathStructure, at: At, depth: usize) -> Option<Lim> {

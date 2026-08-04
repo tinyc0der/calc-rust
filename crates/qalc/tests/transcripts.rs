@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use qalc::batch::Outcome;
+
 
 /// Cases that do not yet match the reference, as `(file, line)`.
 ///
@@ -98,28 +98,31 @@ fn relative_candidates_are_resolved_from_the_manifest_directory() {
 /// Run one transcript through the CLI's own evaluation path, returning the
 /// 1-based line of every case that differs.
 fn failing_lines(path: &Path) -> Result<Vec<(usize, String)>, String> {
-    let report = qalc::cli::run_transcript_file(path)
-        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    Ok(report
-        .results
-        .iter()
-        .filter(|(_, outcome)| *outcome != Outcome::Pass)
-        .map(|(case, outcome)| {
-            let detail = match outcome {
-                Outcome::Mismatch { got } => format!(
-                    "{}\n    expected: {}\n    got:      {}",
-                    case.expression,
-                    case.expected.as_deref().unwrap_or(""),
-                    got
-                ),
-                Outcome::Error { message } => {
-                    format!("{}\n    error: {message}", case.expression)
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_qalc"));
+    cmd.arg("-t").arg(path);
+    if let Some(dir) = std::env::var_os("QALCULATE_DEFINITIONS_DIR") {
+        cmd.env("QALCULATE_DEFINITIONS_DIR", dir);
+    }
+    let output = cmd.output().map_err(|error| format!("cannot run qalc: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if output.status.success() && !stdout.contains("Mismatch at line") && !stdout.contains("Error at line") {
+        return Ok(Vec::new());
+    }
+    let mut failures = Vec::new();
+    for line in stdout.lines() {
+        if line.starts_with("Mismatch at line ") || line.starts_with("Error at line ") {
+            if let Some(num_str) = line.split("line ").nth(1) {
+                if let Some(line_num) = num_str.trim_matches(':').parse::<usize>().ok() {
+                    failures.push((line_num, line.to_string()));
                 }
-                Outcome::Pass => unreachable!(),
-            };
-            (case.line, detail)
-        })
-        .collect())
+            }
+        }
+    }
+    if failures.is_empty() && !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("qalc failed on {}: {stdout}\n{stderr}", path.display()));
+    }
+    Ok(failures)
 }
 
 #[test]

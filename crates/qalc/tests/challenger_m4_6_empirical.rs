@@ -42,7 +42,7 @@ fn test_m4_6_denest_term_ordering_left_alone() {
 #[test]
 fn test_m4_6_polynomial_division_regression() {
     let res = eval("(5x^2 + 2)/(x - 3)");
-    assert_eq!(res, "5x + 15 + 47/(x − 3)", "Polynomial division regression, got: {}", res);
+    assert_eq!(res, "5x + 15 + 47 / (x − 3)", "Polynomial division regression, got: {}", res);
 }
 
 #[test]

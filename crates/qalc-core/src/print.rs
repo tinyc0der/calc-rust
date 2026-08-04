@@ -653,10 +653,7 @@ fn print_multiplication(factors: &[MathStructure], po: &PrintOptions, depth: usi
         n_str
     };
     let n_str = format!("{sign}{n_str}");
-    let tight_div = numer.len() == 1
-        && !is_compound(&numer[0])
-        && d_str.starts_with('(');
-    if po.spacious && !tight_div {
+    if po.spacious {
         format!("{n_str} / {d_str}")
     } else {
         format!("{n_str}/{d_str}")
