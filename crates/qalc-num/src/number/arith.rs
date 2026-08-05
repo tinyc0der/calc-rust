@@ -803,7 +803,7 @@ impl Number {
 
     /// `exp10(o)`: self = self × 10^o (exact for integer o).
     pub fn exp10_mul(&mut self, o: &Number) -> bool {
-        if o.is_integer() {
+        if o.is_integer() && !self.has_imaginary_part() {
             if let (RealValue::Rational(r), Some(exp)) = (&self.value, o.to_i64()) {
                 if exp.unsigned_abs() <= 1_000_000 {
                     let ten_pow = num_bigint::BigInt::from(10).pow(exp.unsigned_abs() as u32);
@@ -823,7 +823,7 @@ impl Number {
 
     /// `exp2(o)`: self = self × 2^o (exact for integer o).
     pub fn exp2_mul(&mut self, o: &Number) -> bool {
-        if o.is_integer() {
+        if o.is_integer() && !self.has_imaginary_part() {
             if let (RealValue::Rational(r), Some(exp)) = (&self.value, o.to_i64()) {
                 if exp.unsigned_abs() <= 10_000_000 {
                     let two_pow = num_bigint::BigInt::from(2).pow(exp.unsigned_abs() as u32);
@@ -962,7 +962,7 @@ fn recip_component(
         if bf_cmp(&fl, &absm_il) <= 0 {
             div(&absm_il, &il2_u.mul(&two, p, rnd(false)), rnd(true))
         } else {
-            div(&fl, &fl.mul(&fl, p, rnd(true)).add(&il2_d, p, rnd(true)), rnd(false))
+            div(&fl, &fl.mul(&fl, p, rnd(true)).add(&il2_d, p, rnd(true)), rnd(true))
         }
     } else if bf_cmp(&fl, &absm_iu) <= 0 {
         if bf_cmp(a_ru, &absm_iu) >= 0 {
