@@ -386,7 +386,7 @@ impl Number {
             self.set_precision_and_approximate_from(base);
             return true;
         }
-        if base.is_one() || (base.is_zero() && self.is_zero()) {
+        if base.is_one() || base.is_zero() {
             return false;
         }
         // `log_x(x)` is an exact 1 — recognised before the floats get a
@@ -825,7 +825,7 @@ impl Number {
         let one = Number::from_i64(1);
         let mone = Number::from_i64(-1);
         if self.is_greater_than(&one) || self.is_less_than(&mone) {
-            return false;
+            return self.acos_complex();
         }
         if self.is_one() {
             self.clear(true);
