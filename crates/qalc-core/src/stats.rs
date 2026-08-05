@@ -1081,7 +1081,7 @@ fn apply(fid: u32, args: &[M]) -> Option<M> {
         id::TRIMMEAN if args.len() == 2 => {
             let v = number_vector(&args[0])?;
             let p = num(&args[1])?;
-            if p < 0 || p >= 50 {
+            if p.is_negative() || !p.is_less_than(&n(50)) {
                 return None;
             }
             let s = sorted(&v);
