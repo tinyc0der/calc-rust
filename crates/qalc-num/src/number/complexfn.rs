@@ -270,6 +270,7 @@ impl Number {
         }
         if negligible_beside(&re, &im) {
             let mut cleaned = Number::new();
+            cleaned.precision = self.precision;
             cleaned.set_imaginary_part(&im);
             cleaned.approx = true;
             *self = cleaned;
