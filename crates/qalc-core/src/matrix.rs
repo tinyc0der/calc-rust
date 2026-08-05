@@ -1119,6 +1119,9 @@ fn limits(args: &[M]) -> Option<M> {
         return None;
     }
     let (lo, hi) = (i1.min(i2), i1.max(i2));
+    if hi - lo + 1 > 100_000 {
+        return None;
+    }
     let mut out: Vec<M> = ((lo as usize)..=(hi.min(n) as usize))
         .map(|i| v[i - 1].clone())
         .collect();
