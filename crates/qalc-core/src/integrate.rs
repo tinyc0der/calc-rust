@@ -1186,6 +1186,11 @@ fn int_quadratic_radical(
                 inv(s1),
                 func(bid::ASINH, vec![mul(vec![lin.clone(), inv(s2)])]),
             ])
+        } else if disc.is_zero() {
+            mul(vec![
+                inv(s1),
+                func(bid::LN, vec![func(bid::ABS, vec![lin.clone()])]),
+            ])
         } else {
             let inner = add(vec![
                 mul(vec![num(2), s1.clone(), sq.clone()]),
