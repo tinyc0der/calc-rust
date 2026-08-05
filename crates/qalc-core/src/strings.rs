@@ -224,23 +224,20 @@ fn code_of(text: &str, encoding: i32, as_vector: bool) -> Option<MathStructure> 
         ));
     }
     let radix = if encoding == 1 { 0x10000 } else { 0x1_0000_0000 };
-    Some(int_struct(fold_digits(&values, radix)))
+    Some(MathStructure::Number(fold_digits_num(&values, radix)))
 }
 
 /// Combine digit values into one number in the given radix.
-fn fold_digits(values: &[i64], radix: i64) -> i64 {
-    let mut acc = 0i64;
+fn fold_digits_num(values: &[i64], radix: i64) -> Number {
+    let mut acc = num_bigint::BigInt::from(0);
+    let r = num_bigint::BigInt::from(radix);
     for (i, v) in values.iter().enumerate() {
         if i > 0 {
-            acc = acc.saturating_mul(radix);
+            acc *= &r;
         }
-        acc = acc.saturating_add(*v);
+        acc += num_bigint::BigInt::from(*v);
     }
-    acc
-}
-
-fn int_struct(v: i64) -> MathStructure {
-    MathStructure::Number(Number::from_i64(v))
+    Number::from_bigint(acc)
 }
 
 /// `AsciiFunction`'s encoding argument (`"UTF-32"` by default).
