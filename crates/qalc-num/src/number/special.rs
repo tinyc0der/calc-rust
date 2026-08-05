@@ -931,7 +931,7 @@ impl Number {
         // applied unconditionally, which matches the reference in its default
         // mode and is stricter than the reference under `approximation=EXACT`.
         let exact_form_in_range =
-            matches!(&self.value, RealValue::Rational(r) if *r < BigRational::from_integer(BigInt::from(1000)));
+            matches!(&self.value, RealValue::Rational(r) if r.abs() < BigRational::from_integer(BigInt::from(1000)));
         if let RealValue::Rational(r) = &self.value {
             if r.denom().is_one() && exact_form_in_range {
                 if !r.is_positive() {
