@@ -186,10 +186,13 @@ fn diff_function(
     let outer = match id {
         // d/du sqrt(u) = 1 / (2 u^(1/2))
         bid::SQRT => inv(mul(vec![num(2), pow(u.clone(), ratio(1, 2))])),
-        // d/du cbrt(u) = 1 / (3 u^(2/3))
-        bid::CBRT => inv(mul(vec![num(3), pow(u.clone(), ratio(2, 3))])),
+        // d/du cbrt(u) = 1 / (3 cbrt(u)^2)
+        bid::CBRT => inv(mul(vec![num(3), pow(func(bid::CBRT, vec![u.clone()]), num(2))])),
         // d/du root(u, n) = (1/n) u^(1/n - 1)
         bid::ROOT => {
+            if args.len() < 2 {
+                return None;
+            }
             let n = args[1].clone();
             mul(vec![
                 inv(n.clone()),
