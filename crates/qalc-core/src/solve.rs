@@ -1600,9 +1600,13 @@ pub fn solve_trig(expr: &MathStructure, xvar: &MathStructure) -> Option<Vec<Math
         // `P^2 - Q^2 (1 - S^2) = 0`, then keep the consistent roots.
         let p2 = poly_mul(&p, &p);
         let q2 = poly_mul(&q, &q);
-        let mut rhs = poly_mul(&q2, &[1.0, 0.0, -1.0]);
-        for (i, c) in rhs.iter_mut().enumerate() {
-            *c = p2.get(i).copied().unwrap_or(0.0) - *c;
+        let rhs_poly = poly_mul(&q2, &[1.0, 0.0, -1.0]);
+        let max_len = p2.len().max(rhs_poly.len());
+        let mut rhs = vec![0.0; max_len];
+        for i in 0..max_len {
+            let p_val = p2.get(i).copied().unwrap_or(0.0);
+            let r_val = rhs_poly.get(i).copied().unwrap_or(0.0);
+            rhs[i] = p_val - r_val;
         }
         let evalp = |v: &[f64], x: f64| v.iter().rev().fold(0.0, |acc, c| acc * x + c);
         for s in unit_roots(&rhs) {
