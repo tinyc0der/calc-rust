@@ -301,7 +301,7 @@ fn evaluate_ranges(m: &mut MathStructure) -> bool {
     let Some(upper) = args[2].number().and_then(|n| n.to_i64()) else {
         return changed;
     };
-    if lower > upper {
+    if lower > upper || upper.saturating_sub(lower) > 100_000 {
         return changed;
     }
 
