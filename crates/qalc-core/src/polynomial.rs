@@ -1099,17 +1099,20 @@ pub fn dense_eval(c: &[Number], x: &Number) -> Number {
 /// Positive divisors of a non-zero integer (bounded, so a huge coefficient
 /// simply yields fewer candidate roots instead of hanging).
 fn divisors(z: i64) -> Vec<i64> {
-    let n = z.unsigned_abs().min(i64::MAX as u64) as i64;
+    let n = z.unsigned_abs();
     if n == 0 {
         return vec![1];
     }
     let mut out = Vec::new();
-    let mut d = 1i64;
+    let mut d = 1u64;
     while d.saturating_mul(d) <= n && d < 1_000_000 {
         if n % d == 0 {
-            out.push(d);
-            if n / d != d {
-                out.push(n / d);
+            if d <= i64::MAX as u64 {
+                out.push(d as i64);
+            }
+            let div = n / d;
+            if div != d && div <= i64::MAX as u64 {
+                out.push(div as i64);
             }
         }
         d += 1;
