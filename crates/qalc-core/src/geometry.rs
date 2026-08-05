@@ -184,72 +184,140 @@ fn abs_of(a: &Number) -> Option<Number> {
 /// Evaluate a geometry call over numeric arguments.
 pub fn apply(fid: u32, a: &[Number]) -> Option<Number> {
     match (fid, a.len()) {
-        // <expression>\x^2*pi</expression>
-        (id::CIRCLE, 1) => mul(&powi(&a[0], 2)?, &pi()),
+        // <expression>\x^2*pi</expression        // <expression>\x^2*pi</expression>
+        (id::CIRCLE, 1) => {
+            let r = abs_of(&a[0])?;
+            mul(&powi(&r, 2)?, &pi())
+        }
         // <expression>\x*2*pi</expression>
-        (id::CIRCUMFERENCE, 1) => mul(&mul(&a[0], &n(2))?, &pi()),
+        (id::CIRCUMFERENCE, 1) => {
+            let r = abs_of(&a[0])?;
+            mul(&mul(&r, &n(2))?, &pi())
+        }
         // <expression>\x^2*pi*\y/3</expression>
         (id::CONE, 2) => {
-            let t = mul(&mul(&powi(&a[0], 2)?, &pi())?, &a[1])?;
+            let r = abs_of(&a[0])?;
+            let h = abs_of(&a[1])?;
+            let t = mul(&mul(&powi(&r, 2)?, &pi())?, &h)?;
             div(&t, &n(3))
         }
         // <expression>\x^2*pi+pi*\x*abs((\y^2+\x^2)^(1/2))</expression>
         (id::CONE_SA, 2) => {
-            let base = mul(&powi(&a[0], 2)?, &pi())?;
-            let slant = abs_of(&sqrt_of(&add(&powi(&a[1], 2)?, &powi(&a[0], 2)?)?)?)?;
-            add(&base, &mul(&mul(&pi(), &a[0])?, &slant)?)
+            let r = abs_of(&a[0])?;
+            let h = abs_of(&a[1])?;
+            let base = mul(&powi(&r, 2)?, &pi())?;
+            let slant = abs_of(&sqrt_of(&add(&powi(&h, 2)?, &powi(&r, 2)?)?)?)?;
+            add(&base, &mul(&mul(&pi(), &r)?, &slant)?)
         }
         // <expression>\x^3</expression>
-        (id::CUBE, 1) => powi(&a[0], 3),
+        (id::CUBE, 1) => {
+            let s = abs_of(&a[0])?;
+            powi(&s, 3)
+        }
         // <expression>(\x^2)*6</expression>
-        (id::CUBE_SA, 1) => mul(&powi(&a[0], 2)?, &n(6)),
+        (id::CUBE_SA, 1) => {
+            let s = abs_of(&a[0])?;
+            mul(&powi(&s, 2)?, &n(6))
+        }
         // <expression>\x^2*pi*\y</expression>
-        (id::CYLINDER, 2) => mul(&mul(&powi(&a[0], 2)?, &pi())?, &a[1]),
+        (id::CYLINDER, 2) => {
+            let r = abs_of(&a[0])?;
+            let h = abs_of(&a[1])?;
+            mul(&mul(&powi(&r, 2)?, &pi())?, &h)
+        }
         // <expression>2*\x^2*pi+2*pi*\x*\y</expression>
         (id::CYLINDER_SA, 2) => {
-            let ends = mul(&mul(&n(2), &powi(&a[0], 2)?)?, &pi())?;
-            let side = mul(&mul(&mul(&n(2), &pi())?, &a[0])?, &a[1])?;
+            let r = abs_of(&a[0])?;
+            let h = abs_of(&a[1])?;
+            let ends = mul(&mul(&n(2), &powi(&r, 2)?)?, &pi())?;
+            let side = mul(&mul(&mul(&n(2), &pi())?, &r)?, &h)?;
             add(&ends, &side)
         }
         // <expression>\x*\y</expression>
-        (id::PARALLELOGRAM, 2) | (id::RECT, 2) => mul(&a[0], &a[1]),
+        (id::PARALLELOGRAM, 2) | (id::RECT, 2) => {
+            let w = abs_of(&a[0])?;
+            let h = abs_of(&a[1])?;
+            mul(&w, &h)
+        }
         // <expression>(\x+\y)*2</expression>
         (id::PARALLELOGRAM_PERIMETER, 2) | (id::RECT_PERIMETER, 2) => {
-            mul(&add(&a[0], &a[1])?, &n(2))
+            let w = abs_of(&a[0])?;
+            let h = abs_of(&a[1])?;
+            mul(&add(&w, &h)?, &n(2))
         }
         // <expression>\x*\y*\z</expression>
-        (id::RECTPRISM, 3) => mul(&mul(&a[0], &a[1])?, &a[2]),
+        (id::RECTPRISM, 3) => {
+            let l = abs_of(&a[0])?;
+            let w = abs_of(&a[1])?;
+            let h = abs_of(&a[2])?;
+            mul(&mul(&l, &w)?, &h)
+        }
         // <expression>(\x*\y)*2+(\x*\z)*2+(\y*\z)*2</expression>
         (id::RECTPRISM_SA, 3) => {
+            let l = abs_of(&a[0])?;
+            let w = abs_of(&a[1])?;
+            let h = abs_of(&a[2])?;
             let s = add(
-                &add(&mul(&a[0], &a[1])?, &mul(&a[0], &a[2])?)?,
-                &mul(&a[1], &a[2])?,
+                &add(&mul(&l, &w)?, &mul(&l, &h)?)?,
+                &mul(&w, &h)?,
             )?;
             mul(&s, &n(2))
         }
         // <expression>\x*\y*\z/2</expression>
-        (id::TRIANGLEPRISM, 3) => div(&mul(&mul(&a[0], &a[1])?, &a[2])?, &n(2)),
+        (id::TRIANGLEPRISM, 3) => {
+            let b = abs_of(&a[0])?;
+            let h = abs_of(&a[1])?;
+            let l = abs_of(&a[2])?;
+            div(&mul(&mul(&b, &h)?, &l)?, &n(2))
+        }
         // <expression>sqrt(2)/12*\x^3</expression>
-        (id::TETRAHEDRON, 1) => mul(&div(&sqrt_i(2)?, &n(12))?, &powi(&a[0], 3)?),
+        (id::TETRAHEDRON, 1) => {
+            let a_s = abs_of(&a[0])?;
+            mul(&div(&sqrt_i(2)?, &n(12))?, &powi(&a_s, 3)?)
+        }
         // <expression>sqrt(6)/3*\x</expression>
-        (id::TETRAHEDRON_HEIGHT, 1) => mul(&div(&sqrt_i(6)?, &n(3))?, &a[0]),
+        (id::TETRAHEDRON_HEIGHT, 1) => {
+            let a_s = abs_of(&a[0])?;
+            mul(&div(&sqrt_i(6)?, &n(3))?, &a_s)
+        }
         // <expression>sqrt(3)*\x^2</expression>
-        (id::TETRAHEDRON_SA, 1) => mul(&sqrt_i(3)?, &powi(&a[0], 2)?),
+        (id::TETRAHEDRON_SA, 1) => {
+            let a_s = abs_of(&a[0])?;
+            mul(&sqrt_i(3)?, &powi(&a_s, 2)?)
+        }
         // <expression>sqrt(2)/6*\x^3</expression>
-        (id::SQPYRAMID, 1) => mul(&div(&sqrt_i(2)?, &n(6))?, &powi(&a[0], 3)?),
+        (id::SQPYRAMID, 1) => {
+            let a_s = abs_of(&a[0])?;
+            mul(&div(&sqrt_i(2)?, &n(6))?, &powi(&a_s, 3)?)
+        }
         // <expression>sqrt(2)/2*\x</expression>
-        (id::SQPYRAMID_HEIGHT, 1) => mul(&div(&sqrt_i(2)?, &n(2))?, &a[0]),
+        (id::SQPYRAMID_HEIGHT, 1) => {
+            let a_s = abs_of(&a[0])?;
+            mul(&div(&sqrt_i(2)?, &n(2))?, &a_s)
+        }
         // <expression>(1+sqrt(3))*\x^2</expression>
-        (id::SQPYRAMID_SA, 1) => mul(&add(&n(1), &sqrt_i(3)?)?, &powi(&a[0], 2)?),
+        (id::SQPYRAMID_SA, 1) => {
+            let a_s = abs_of(&a[0])?;
+            mul(&add(&n(1), &sqrt_i(3)?)?, &powi(&a_s, 2)?)
+        }
         // <expression>\x*\y*\z/3</expression>
-        (id::PYRAMID, 3) => div(&mul(&mul(&a[0], &a[1])?, &a[2])?, &n(3)),
+        (id::PYRAMID, 3) => {
+            let l = abs_of(&a[0])?;
+            let w = abs_of(&a[1])?;
+            let h = abs_of(&a[2])?;
+            div(&mul(&mul(&l, &w)?, &h)?, &n(3))
+        }
         // <expression>\x^3*pi*4/3</expression>
         (id::SPHERE, 1) => {
-            let t = mul(&mul(&powi(&a[0], 3)?, &pi())?, &n(4))?;
+            let r = abs_of(&a[0])?;
+            let t = mul(&mul(&powi(&r, 3)?, &pi())?, &n(4))?;
             div(&t, &n(3))
         }
         // <expression>\x^2*pi*4</expression>
-        (id::SPHERE_SA, 1) => mul(&mul(&powi(&a[0], 2)?, &pi())?, &n(4)),
+        (id::SPHERE_SA, 1) => {
+            let r = abs_of(&a[0])?;
+            mul(&mul(&powi(&r, 2)?, &pi())?, &n(4))
+        }
         // <expression>\x^2</expression>
         (id::SQUARE, 1) => powi(&a[0], 2),
         // <expression>\x*4</expression>
