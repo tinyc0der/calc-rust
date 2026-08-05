@@ -313,6 +313,9 @@ fn handle_vector(m: &mut MathStructure) -> bool {
         *m = MathStructure::Vector(out);
         return true;
     } else if args.len() > 1 {
+        if !args.iter().any(|a| matches!(a, MathStructure::Vector(_))) {
+            return false;
+        }
         let mut nums = Vec::with_capacity(args.len());
         for a in args.iter() {
             match a {
@@ -574,7 +577,7 @@ fn apply(id: u32, args: &[Number]) -> Option<Number> {
         (id::MULTI_FACTORIAL, 2) => {
             let n = nonnegative_integer(&args[0])?;
             let step = nonnegative_integer(&args[1])?;
-            if step < 1 {
+            if step < 1 || n / step > 100_000 {
                 return None;
             }
             let mut acc = Number::from_i64(1);
