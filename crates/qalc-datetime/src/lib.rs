@@ -295,12 +295,10 @@ impl QalculateDateTime {
     /// minus. Fractional seconds are truncated, as in the C++.
     pub fn to_iso_string(&self) -> String {
         let mut str = String::new();
-        let mut y = self.i_year;
-        if y < 0 {
-            y = -y;
+        if self.i_year < 0 {
             str.push('-');
         }
-        str.push_str(&format!("{:04}-{:02}-{:02}", y, self.i_month, self.i_day));
+        str.push_str(&format!("{:04}-{:02}-{:02}", self.i_year.unsigned_abs(), self.i_month, self.i_day));
         if self.b_time || !self.n_sec.is_zero() || self.i_hour != 0 || self.i_min != 0 {
             let mut nsect = self.n_sec.clone();
             nsect.trunc();
@@ -1252,6 +1250,12 @@ fn parse_time(time_str: &str) -> Option<(i64, i64, i64, Option<i64>)> {
     if pos < bytes.len() && bytes[pos] == b':' {
         pos += 1;
         s = parse_digits(bytes, &mut pos, 2)?;
+    }
+    if pos < bytes.len() && (bytes[pos] == b'.' || bytes[pos] == b',') {
+        pos += 1;
+        while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+            pos += 1;
+        }
     }
     let stz: String = time_str[pos..].split_whitespace().collect();
     let tz = if stz.is_empty() {
