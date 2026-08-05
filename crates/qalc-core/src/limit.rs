@@ -906,7 +906,7 @@ fn lim_quotient(
                 }
             }
         }
-        _ => return None,
+        _ => {}
     }
     lhopital(n, d, x, at, depth)
 }
