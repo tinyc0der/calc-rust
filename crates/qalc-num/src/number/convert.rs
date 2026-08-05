@@ -37,7 +37,19 @@ impl Number {
     pub fn float_value(&self) -> f64 {
         match &self.value {
             RealValue::Rational(r) => {
-                r.numer().to_f64().unwrap_or(f64::NAN) / r.denom().to_f64().unwrap_or(f64::NAN)
+                let n_f = r.numer().to_f64().unwrap_or(f64::NAN);
+                let d_f = r.denom().to_f64().unwrap_or(f64::NAN);
+                let val = n_f / d_f;
+                if val.is_nan() && !r.numer().is_zero() && !r.denom().is_zero() {
+                    let n_bits = r.numer().bits() as i64;
+                    let d_bits = r.denom().bits() as i64;
+                    let shift = (n_bits.max(d_bits) - 1000).max(0) as u64;
+                    let n_s = (r.numer() >> shift).to_f64().unwrap_or(0.0);
+                    let d_s = (r.denom() >> shift).to_f64().unwrap_or(1.0);
+                    n_s / d_s
+                } else {
+                    val
+                }
             }
             RealValue::Float { lower, upper } => {
                 let (l, u) = (bigfloat_to_f64(lower), bigfloat_to_f64(upper));
