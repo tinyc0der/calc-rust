@@ -313,9 +313,6 @@ fn handle_vector(m: &mut MathStructure) -> bool {
         *m = MathStructure::Vector(out);
         return true;
     } else if args.len() > 1 {
-        if !args.iter().any(|a| matches!(a, MathStructure::Vector(_))) {
-            return false;
-        }
         let mut nums = Vec::with_capacity(args.len());
         for a in args.iter() {
             match a {
