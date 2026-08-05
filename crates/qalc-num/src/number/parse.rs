@@ -52,9 +52,7 @@ fn s2i(s: &str) -> i64 {
 
 /// `mpz_ui_pow_ui` helper for exponent scaling.
 fn pow_big(b: u32, e: u64) -> BigInt {
-    // TODO(port): C++ raises "Too large exponent." above ULONG_MAX/10; we
-    // additionally cap at u32::MAX for BigInt::pow.
-    BigInt::from(b).pow(e.min(u32::MAX as u64) as u32)
+    BigInt::from(b).pow(e.min(1_000_000) as u32)
 }
 
 /// `TEST_TWOS` macro (Number.cc:984): decide whether the number is a negative
@@ -277,14 +275,17 @@ impl Number {
                 while index < bytes.len() {
                     let c2 = bytes[index];
                     if c2.is_ascii_digit() {
-                        if exp > max_exp {
-                            // TODO(port): CALCULATOR->error "Too large exponent."
-                        } else {
+                        if exp < 1_000_000 {
                             exp = exp * 10 + (c2 - b'0') as u64;
-                            numbers_started = true;
+                            if exp > 1_000_000 {
+                                exp = 1_000_000;
+                            }
                         }
+                        numbers_started = true;
                     } else if !numbers_started && c2 == b'-' {
                         exp_minus = !exp_minus;
+                    } else if c2 == b'i' {
+                        b_cplx = true;
                     }
                     index += 1;
                 }
@@ -331,13 +332,18 @@ impl Number {
                     .iter()
                     .position(|&b| b == b')')
                     .map(|p| p + index + 1);
+                let mut par_len = 0u64;
                 match par_i {
                     None => {
-                        i_unc = s2i(&number[index + 1..]);
+                        let par_str = &number[index + 1..];
+                        par_len = par_str.len() as u64;
+                        i_unc = s2i(par_str);
                         index = bytes.len() - 1;
                     }
                     Some(p) if p > index + 1 => {
-                        i_unc = s2i(&number[index + 1..p]);
+                        let par_str = &number[index + 1..p];
+                        par_len = par_str.len() as u64;
+                        i_unc = s2i(par_str);
                         index = p;
                     }
                     _ => {}
@@ -345,6 +351,9 @@ impl Number {
                 if i_unc > 0 {
                     unc_num = BigInt::from(i_unc);
                     unc_den = den.clone();
+                    if par_len > 1 {
+                        unc_den *= pow_big(10, par_len - 1);
+                    }
                 }
             } else if c != b' ' && (c != b'_' || !numbers_started) {
                 // TODO(port): CALCULATOR->error "Character ... was ignored";
