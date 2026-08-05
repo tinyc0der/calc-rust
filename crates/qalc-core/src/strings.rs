@@ -202,7 +202,7 @@ fn code_of(text: &str, encoding: i32, as_vector: bool) -> Option<MathStructure> 
                 values.into_iter().map(int_struct).collect(),
             ));
         }
-        return Some(int_struct(fold_digits(&values, 0x100)));
+        return Some(MathStructure::Number(fold_digits_num(&values, 0x100)));
     }
     for ch in text.chars() {
         let c = ch as i64;
@@ -229,15 +229,18 @@ fn code_of(text: &str, encoding: i32, as_vector: bool) -> Option<MathStructure> 
 
 /// Combine digit values into one number in the given radix.
 fn fold_digits_num(values: &[i64], radix: i64) -> Number {
-    let mut acc = num_bigint::BigInt::from(0);
-    let r = num_bigint::BigInt::from(radix);
+    let mut acc = Number::from_i64(0);
     for (i, v) in values.iter().enumerate() {
         if i > 0 {
-            acc *= &r;
+            acc.multiply_i64(radix);
         }
-        acc += num_bigint::BigInt::from(*v);
+        acc.add_i64(*v);
     }
-    Number::from_bigint(acc)
+    acc
+}
+
+fn int_struct(v: i64) -> MathStructure {
+    MathStructure::Number(Number::from_i64(v))
 }
 
 /// `AsciiFunction`'s encoding argument (`"UTF-32"` by default).
