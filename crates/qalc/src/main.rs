@@ -46,7 +46,15 @@ fn main() -> ExitCode {
             println!("qalc (rust-calc) {}", env!("CARGO_PKG_VERSION"));
             return ExitCode::SUCCESS;
         } else if options_enabled && arg.starts_with('-') && arg != "-" {
-            return usage_error(&format!("unknown option: {arg}"));
+            // "-5" and "-3.14" are expressions, not options. The reference
+            // qalc accepts them as one-shot expressions (e.g. `qalc -t -- -5`
+            // or `qalc -t -5` when not an option). Treat a leading '-' followed
+            // by a digit or '.' as an expression rather than an unknown option.
+            if arg.len() > 1 && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit() || c == '.') {
+                expression.push(arg);
+            } else {
+                return usage_error(&format!("unknown option: {arg}"));
+            }
         } else {
             expression.push(arg);
         }
