@@ -854,8 +854,19 @@ fn linear_power(m: &MathStructure, x: &MathStructure) -> Option<(Number, Number,
             return None;
         };
         let (a, b, q0) = linear_power(base, x)?;
-        let mut q = q0;
+        // `(u^q0)^e = u^(q0 e)` is not an identity over the reals. When `q0`
+        // is an even integer the inner power discards the sign of `u`, so the
+        // composite is `|u|^(q0 e)`; folding the exponents turns `(x^2)^(1/3)`
+        // — real and positive at every `x` — into `x^(2/3)`, which is the
+        // principal *complex* root for `x < 0`. Only fold when the inner
+        // exponent cannot erase a sign, i.e. when `q0` is an odd integer, or
+        // when the result stays an integer power (no root is taken).
+        let mut q = q0.clone();
         if !q.multiply(e) || !q.is_rational() {
+            return None;
+        }
+        let inner_preserves_sign = q0.is_integer() && !q0.is_even();
+        if !inner_preserves_sign && !q.is_integer() {
             return None;
         }
         return Some((a, b, q));

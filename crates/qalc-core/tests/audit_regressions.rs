@@ -29,4 +29,63 @@ mod audit_regressions {
         let res = session.evaluate_line("date(-9223372036854775808)");
         assert!(res.is_ok());
     }
+
+    /// `(x^2)^(1/3)` is real and positive for every real `x`: the inner square
+    /// discards the sign before the cube root is taken. `linear_power` used to
+    /// fold the two exponents into `x^(2/3)`, which is the *principal* — and
+    /// for `x < 0` complex — root, so the substitution built an antiderivative
+    /// on the wrong branch. At `x = -5` the integrand is `cbrt(25) = 2.924...`
+    /// while the folded form gives `(-5)^(2/3) = -1.462... + 2.532...i`.
+    ///
+    /// Declining to integrate is the correct outcome: the radical substitution
+    /// does not apply to this shape. What must never happen is answering with
+    /// an antiderivative whose derivative disagrees with the integrand.
+    #[test]
+    fn test_integrate_even_inner_power_keeps_real_branch() {
+        use qalc_core::{parser, EvaluationOptions, MathStructure};
+
+        let session = Session::new();
+        let x = MathStructure::symbolic("x");
+        let eo = EvaluationOptions::default();
+        let at = MathStructure::from_i64(-5);
+
+        let mut f = parser::parse_with("(x^2)^(1/3)", &session.parse_options, &session)
+            .expect("integrand parses");
+        qalc_core::eval::evaluate_calculated_with(&mut f, &eo);
+
+        let Some(mut anti) = qalc_core::integrate::integrate(&f, &x) else {
+            return;
+        };
+        qalc_core::eval::evaluate_calculated_with(&mut anti, &eo);
+        let Some(mut back) = qalc_core::differentiate::differentiate(&anti, &x) else {
+            return;
+        };
+        qalc_core::eval::evaluate_calculated_with(&mut back, &eo);
+
+        // Both sides at x = -5, forced all the way to a number.
+        let approx = EvaluationOptions {
+            approximation: qalc_core::options::ApproximationMode::Approximate,
+            ..EvaluationOptions::default()
+        };
+        let value_at = |m: &MathStructure| -> (f64, f64) {
+            let mut v = m.clone();
+            qalc_core::solve::replace(&mut v, &x, &at);
+            qalc_core::eval::evaluate_calculated_with(&mut v, &approx);
+            match &v {
+                MathStructure::Number(n) => (
+                    n.real_part().float_value(),
+                    n.imaginary_part().float_value(),
+                ),
+                other => panic!("expected a number at x = -5, got {other:?}"),
+            }
+        };
+
+        let (got_re, got_im) = value_at(&back);
+        let (want_re, want_im) = value_at(&f);
+        assert!(
+            (got_re - want_re).abs() < 1e-6 && (got_im - want_im).abs() < 1e-6,
+            "d/dx of the antiderivative of (x^2)^(1/3) must equal the integrand \
+             at x = -5: got {got_re} + {got_im}i, want {want_re} + {want_im}i"
+        );
+    }
 }
