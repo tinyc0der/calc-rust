@@ -1698,9 +1698,33 @@ impl MathStructure {
             return b;
         }
 
-        // TODO(port): comparison evaluation, bitwise/logical merging,
-        // function calculation, variable substitution and vector operations.
-        // Everything else only propagates the recursion into its children.
+        if let MathStructure::Comparison { left, op, right } = self {
+            if recursive {
+                if left.calculatesub_opt(eo, true) {
+                    b = true;
+                }
+                if right.calculatesub_opt(eo, true) {
+                    b = true;
+                }
+            }
+            if let (MathStructure::Number(l), MathStructure::Number(r)) = (left.as_ref(), right.as_ref()) {
+                let res = match op {
+                    crate::structure::ComparisonType::Equals => l.equals(r, false, false),
+                    crate::structure::ComparisonType::NotEquals => !l.equals(r, false, false),
+                    crate::structure::ComparisonType::Less => l.is_less_than(r),
+                    crate::structure::ComparisonType::Greater => l.is_greater_than(r),
+                    crate::structure::ComparisonType::EqualsLess => l.is_less_than_or_equal_to(r),
+                    crate::structure::ComparisonType::EqualsGreater => l.is_greater_than_or_equal_to(r),
+                };
+                *self = MathStructure::Symbolic(if res { "true".to_string() } else { "false".to_string() });
+                return true;
+            }
+            return b;
+        }
+
+        // TODO(port): bitwise/logical merging, function calculation, variable
+        // substitution and vector operations. Everything else only propagates
+        // the recursion into its children.
         if recursive {
             for i in 0..self.size() {
                 if let Some(child) = self.get_mut(i) {
