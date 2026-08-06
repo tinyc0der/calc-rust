@@ -1415,7 +1415,18 @@ pub fn calculate_function(m: &mut MathStructure) -> bool {
             xvar.as_ref().expect("xvar"),
             &pow_arg.expect("power argument"),
         ),
-        id::FACTORIZE => factor(&poly, &eo),
+        id::FACTORIZE => {
+            let f = factor(&poly, &eo);
+            if f.equals(&poly) {
+                f
+            } else {
+                match f {
+                    MathStructure::Multiplication(factors) => MathStructure::Vector(factors),
+                    MathStructure::Vector(v) => MathStructure::Vector(v),
+                    other => MathStructure::Vector(vec![other]),
+                }
+            }
+        }
         id::EXPAND => {
             let mut e = poly.clone();
             let mut eo2 = eo.clone();

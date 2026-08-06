@@ -2251,7 +2251,13 @@ pub fn calculate_function(m: &mut MathStructure) -> bool {
             let Some(sols) = solve_equation(left, right, &xvar) else {
                 return false;
             };
-            *m = solutions_to_structure(&xvar, sols);
+            // `solve()` terse `qalc -t` returns a vector of values
+            // (`[1  -1]`), not `x = 1 or x = -1`.
+            if sols.len() == 1 {
+                *m = sols.into_iter().next().expect("len 1");
+            } else {
+                *m = MathStructure::Vector(sols);
+            }
             true
         }
         id::NEWTON_RAPHSON | id::SECANT_METHOD => {
@@ -2522,7 +2528,7 @@ mod tests {
 
     #[test]
     fn test_solve_zero_coefficient_quadratic() {
-        assert_eq!(ex("solve(0*x^2 + 2*x - 4 = 0)"), "x = 2");
+        assert_eq!(ex("solve(0*x^2 + 2*x - 4 = 0)"), "2");
         let a = crate::Number::from_i64(0);
         let b = crate::Number::from_i64(2);
         let c = crate::Number::from_i64(-4);
