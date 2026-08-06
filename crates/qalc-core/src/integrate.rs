@@ -2857,8 +2857,14 @@ fn calculate_integrate(m: &mut MathStructure, args: &[MathStructure]) -> bool {
     }
     let expr = args[0].clone();
     // `integrate(f, x)` names the variable; `integrate(f, a, b)` gives bounds.
-    let (xvar, bounds) = if args.len() == 2 && args[1].is_symbolic() {
-        (args[1].clone(), None)
+    // 2-arg is always indefinite: `integrate(f, x)` w.r.t. x, or `integrate(f, 2)` w.r.t. default.
+    let (xvar, bounds) = if args.len() == 2 {
+        let xv = if args[1].is_symbolic() {
+            args[1].clone()
+        } else {
+            default_x_var(&expr)
+        };
+        (xv, None)
     } else if args.len() >= 3 {
         let xv = match args.get(3) {
             Some(v) if v.is_symbolic() => v.clone(),
