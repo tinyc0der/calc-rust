@@ -1415,7 +1415,23 @@ pub fn calculate_function(m: &mut MathStructure) -> bool {
             xvar.as_ref().expect("xvar"),
             &pow_arg.expect("power argument"),
         ),
-        id::FACTORIZE => factor(&poly, &eo),
+        id::FACTORIZE => {
+            let f = factor(&poly, &eo);
+            // Function `factor` returns a vector of factors, matching
+            // `qalc -t "factor(x^2-1)" → [(x + 1)  (x - 1)]`, while
+            // `x^2-1 to factors` via the CLI keeps the product
+            // `(x - 1)(x + 1)`. If `factor` did nothing (unfactored),
+            // return the original to avoid wrapping `x^2+1` as `[x^2+1]`.
+            if f.equals(&poly) {
+                f
+            } else {
+                match f {
+                    MathStructure::Multiplication(factors) => MathStructure::Vector(factors),
+                    MathStructure::Vector(v) => MathStructure::Vector(v),
+                    other => MathStructure::Vector(vec![other]),
+                }
+            }
+        }
         id::EXPAND => {
             let mut e = poly.clone();
             let mut eo2 = eo.clone();
