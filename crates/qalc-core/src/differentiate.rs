@@ -165,6 +165,33 @@ fn diff_power(
     ]))
 }
 
+/// `m` with every `abs()` call replaced by its argument, or `None` when there
+/// was no `abs` to strip.
+///
+/// Used only for `ln` arguments: `ln|v|` and `ln(v)` have the same derivative
+/// wherever both are defined (they differ by a constant on any region where
+/// `arg v` is fixed), and the unwrapped form is the one that stays correct off
+/// the real line. See the comment at the call site.
+fn strip_abs(m: &MathStructure) -> Option<MathStructure> {
+    if let MathStructure::Function { id, args } = m {
+        if id.0 == bid::ABS && args.len() == 1 {
+            let inner = &args[0];
+            return Some(strip_abs(inner).unwrap_or_else(|| inner.clone()));
+        }
+    }
+    let mut out = m.clone();
+    let mut found = false;
+    for i in 0..out.size() {
+        let Some(child) = out.get_mut(i) else { continue };
+        if let Some(rebuilt) = strip_abs(child) {
+            *child = rebuilt;
+            found = true;
+        }
+    }
+    found.then_some(out)
+}
+
+
 fn diff_function(
     id: u32,
     args: &[MathStructure],
@@ -196,13 +223,14 @@ fn diff_function(
     // two differ by a constant (`i*pi`) on any region where `arg v` is fixed,
     // so the derivative is the same, and unlike the composed form it is
     // correct on both domains.
+    // The `abs` may also sit below a product or quotient, which is the shape
+    // the partial-fraction rules emit: `ln(|a| / |b|)`. Stripping every `abs`
+    // in the argument handles those the same way, since `|a|/|b|` and `a/b`
+    // differ only by a sign.
     if id == bid::LN && args.len() == 1 {
-        if let MathStructure::Function { id: inner_id, args: inner_args } = u {
-            if inner_id.0 == bid::ABS && inner_args.len() == 1 {
-                let v = &inner_args[0];
-                let dv = diff_depth(v, x, depth + 1)?;
-                return Some(mul(vec![dv, inv(v.clone())]));
-            }
+        if let Some(stripped) = strip_abs(u) {
+            let dv = diff_depth(&stripped, x, depth + 1)?;
+            return Some(mul(vec![dv, inv(stripped)]));
         }
     }
 

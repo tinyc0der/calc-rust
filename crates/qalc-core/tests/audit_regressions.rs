@@ -241,4 +241,33 @@ mod audit_regressions {
             }
         }
     }
+
+    /// The `abs` inside a `ln` argument may sit below a quotient, which is what
+    /// the partial-fraction rules emit: `ln(|a| / |b|)`. Those went through the
+    /// same conjugating composition that `ln|v|` did, so stripping has to reach
+    /// them too. A correct derivative of `ln(|a|/|b|)` carries no `|...|^2`
+    /// term, which is the signature the composed form leaves behind.
+    #[test]
+    fn test_ln_abs_quotient_derivative_has_no_modulus_squared() {
+        let mut session = Session::new();
+        let d = session
+            .evaluate_line("diff(ln(abs(x+1)/abs(x-1)))")
+            .expect("evaluates");
+        assert!(
+            !d.contains("|"),
+            "d/dx ln(|a|/|b|) must not differentiate through abs, got {d}"
+        );
+
+        // The plain cases stay as they were.
+        let mut session = Session::new();
+        assert_eq!(
+            session.evaluate_line("diff(ln(abs(x)))").expect("evaluates"),
+            "1 / x"
+        );
+        let mut session = Session::new();
+        assert_eq!(
+            session.evaluate_line("diff(abs(x))").expect("evaluates"),
+            "x / |x|"
+        );
+    }
 }
