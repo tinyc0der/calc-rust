@@ -563,6 +563,169 @@ fn number_pair(a: &MathStructure, b: &MathStructure) -> Option<(Number, Number)>
     }
 }
 
+fn unit_total_factor(
+    store: &crate::units::UnitStore,
+    id: crate::ids::UnitId,
+    prefix: Option<crate::defs::PrefixId>,
+) -> Option<Number> {
+    let form = store.base_form(id)?;
+    if form.nonlinear {
+        return None;
+    }
+    let mut f = form.factor.clone();
+    if let Some(pid) = prefix {
+        let pv = store.registry().prefix(pid).value_for(1);
+        if !f.multiply(&pv) {
+            return None;
+        }
+    }
+    Some(f)
+}
+
+fn find_single_unit(m: &MathStructure) -> Option<(crate::ids::UnitId, Option<crate::defs::PrefixId>)> {
+    match m {
+        MathStructure::Unit { id, prefix } => Some((*id, *prefix)),
+        MathStructure::Multiplication(v) => {
+            let mut found: Option<(crate::ids::UnitId, Option<crate::defs::PrefixId>)> = None;
+            for f in v {
+                if let MathStructure::Unit { id, prefix } = f {
+                    if found.is_none() {
+                        found = Some((*id, *prefix));
+                    } else {
+                        return None;
+                    }
+                } else if let MathStructure::Power { base, exponent } = f {
+                    if let MathStructure::Unit { id, prefix } = &**base {
+                        if exponent.is_one() {
+                            if found.is_none() {
+                                found = Some((*id, *prefix));
+                            } else {
+                                return None;
+                            }
+                        } else {
+                            return None;
+                        }
+                    }
+                }
+            }
+            found
+        }
+        MathStructure::Power { base, exponent } if exponent.is_one() => {
+            if let MathStructure::Unit { id, prefix } = &**base {
+                Some((*id, *prefix))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn pick_largest_unit(
+    store: &crate::units::UnitStore,
+    a: &MathStructure,
+    b: &MathStructure,
+) -> Option<(crate::ids::UnitId, Option<crate::defs::PrefixId>)> {
+    let ua = find_single_unit(a);
+    let ub = find_single_unit(b);
+    match (ua, ub) {
+        (Some((ida, pa)), Some((idb, pb))) => {
+            let fa = unit_total_factor(store, ida, pa)?;
+            let fb = unit_total_factor(store, idb, pb)?;
+            // Compare absolute values.
+            let mut ma = fa.clone();
+            let mut mb = fb.clone();
+            let _ = ma.abs();
+            let _ = mb.abs();
+            if ma.is_greater_than(&mb) {
+                Some((ida, pa))
+            } else {
+                Some((idb, pb))
+            }
+        }
+        (Some(u), None) | (None, Some(u)) => Some(u),
+        (None, None) => None,
+    }
+}
+
+fn try_quantity_addition_merge(
+    this: &mut MathStructure,
+    other: &mut MathStructure,
+    eo: &EvaluationOptions,
+) -> Option<MergeResult> {
+    let store = crate::units::store()?;
+    let qa = crate::units::quantity_of(store, this)?;
+    let qb = crate::units::quantity_of(store, other)?;
+    if qa.sig.is_empty() || qa.sig != qb.sig {
+        return None;
+    }
+    let mut sum = qa.coeff.clone();
+    if !sum.add(&qb.coeff) {
+        return None;
+    }
+    let target = pick_largest_unit(store, this, other);
+    let new_struct = if let Some((tid, tpref)) = target {
+        let tfactor = unit_total_factor(store, tid, tpref);
+        let mut coeff = sum.clone();
+        if let Some(tf) = tfactor {
+            if !coeff.divide(&tf) {
+                return None;
+            }
+        }
+        if coeff.is_zero() {
+            let mut z = MathStructure::Number(coeff);
+            let u = MathStructure::Unit {
+                id: tid,
+                prefix: tpref,
+            };
+            z.multiply(u, true);
+            z.calculate_multiply_index(z.size() - 1, eo, true);
+            *this = z;
+            return Some(MergeResult::Merged);
+        }
+        if coeff.is_one() {
+            MathStructure::Unit {
+                id: tid,
+                prefix: tpref,
+            }
+        } else {
+            MathStructure::Multiplication(vec![
+                MathStructure::Number(coeff),
+                MathStructure::Unit {
+                    id: tid,
+                    prefix: tpref,
+                },
+            ])
+        }
+    } else {
+        let mut factors: Vec<MathStructure> = Vec::new();
+        if !sum.is_one() || qa.sig.is_empty() {
+            factors.push(MathStructure::Number(sum));
+        }
+        for (uid, exp) in &qa.sig {
+            let u = MathStructure::Unit {
+                id: *uid,
+                prefix: None,
+            };
+            factors.push(if *exp == 1 {
+                u
+            } else {
+                MathStructure::Power {
+                    base: Box::new(u),
+                    exponent: Box::new(MathStructure::from(*exp as i64)),
+                }
+            });
+        }
+        match factors.len() {
+            0 => MathStructure::from(1),
+            1 => factors.into_iter().next().unwrap(),
+            _ => MathStructure::Multiplication(factors),
+        }
+    };
+    *this = new_struct;
+    Some(MergeResult::Merged)
+}
+
 impl MathStructure {
     /// Apply one `where`-clause substitution recursively.
     ///
@@ -677,6 +840,15 @@ impl MathStructure {
             return Failed;
         }
 
+        // Unit synchronization (`eo.sync_units`): try quantity merge before
+        // any structural branches, so `1 m` (Multiplication) + `1 cm`
+        // (Multiplication) reaches it.
+        if eo.sync_units {
+            if let Some(merged) = try_quantity_addition_merge(self, other, eo) {
+                return merged;
+            }
+        }
+
         // STRUCT_VECTOR: element-wise addition and matrix broadcasting live
         // in `crate::matrix`. (TODO(port): STRUCT_DATETIME arithmetic.)
         if self.is_vector() || (other.is_vector() && !self.is_addition()) {
@@ -764,6 +936,11 @@ impl MathStructure {
             let last = self.size() - 1;
             self.calculate_multiply_index(last, eo, true);
             return Merged;
+        }
+        if eo.sync_units {
+            if let Some(r) = try_quantity_addition_merge(self, other, eo) {
+                return r;
+            }
         }
         Failed
     }
