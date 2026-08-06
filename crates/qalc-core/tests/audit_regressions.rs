@@ -270,4 +270,41 @@ mod audit_regressions {
             "x / |x|"
         );
     }
+
+    /// A hand-written `i * sqrt(5)` must evaluate like any other product.
+    ///
+    /// The `split_squares` recursion guard protected every `number * sqrt(n)`
+    /// pair, but `extract_square_factor` only ever returns a *real* coefficient
+    /// — the sign of the radicand stays in the remainder. The `i * sqrt(rem)`
+    /// spelling is built one level up for a negative radicand, and only exact
+    /// mode keeps it; the default and approximate modes answer `sqrt(-12)` as
+    /// `3.4641016i`. Guarding it unconditionally left `i * sqrt(5)`, and every
+    /// `sin`/`ln`/`asin` of one, permanently unevaluated.
+    #[test]
+    fn test_imaginary_coefficient_radical_still_evaluates() {
+        // Approximate mode — what the CLI runs in — folds the product to a
+        // number, so a function of it can be evaluated at all.
+        let mut session = Session::new();
+        session.evaluate_line("/set approximation approximate").ok();
+        let got = session.evaluate_line("asin(i*sqrt(5))").expect("evaluates");
+        assert!(
+            got.starts_with("1.544"),
+            "asin(i*sqrt(5)) must reduce to a number under approximation, got {got}"
+        );
+
+        // A real coefficient is still protected: this is the split spelling.
+        let mut session = Session::new();
+        assert_eq!(
+            session.evaluate_line("sqrt(32)").expect("evaluates"),
+            "4 * sqrt(2)"
+        );
+
+        // Exact mode still keeps the imaginary split form.
+        let mut session = Session::new();
+        session.evaluate_line("/set approximation exact").ok();
+        assert_eq!(
+            session.evaluate_line("sqrt(-12)").expect("evaluates"),
+            "2i * sqrt(3)"
+        );
+    }
 }

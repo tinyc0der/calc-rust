@@ -941,10 +941,26 @@ fn calculate_functions_inner(
                             .extract_square_factor()
                             .is_some_and(|(k, rem)| k.is_one() && !rem.is_one())))
             };
+            // An *imaginary* coefficient is not something `extract_square_factor`
+            // can produce — it always returns a real `k`, with the sign of the
+            // radicand left in `rem`. The `i * sqrt(rem)` spelling is built one
+            // level up, for a negative radicand, and only exact mode wants to
+            // keep it: the default and approximate modes answer `sqrt(-12)` as
+            // `3.4641016i`. Protecting it unconditionally is what left a
+            // hand-written `i * sqrt(5)` — and every `sin`/`ln`/`asin` of one —
+            // permanently unevaluated.
+            let coefficient_is_real =
+                |m: &MathStructure| m.number().is_some_and(|n| !n.has_imaginary_part());
+            let keeps_imaginary_split =
+                eo.approximation < crate::options::ApproximationMode::Approximate;
+            let factored_pair = |num_side: &MathStructure, root_side: &MathStructure| {
+                num_side.is_number()
+                    && is_radical_factor(root_side)
+                    && (coefficient_is_real(num_side) || keeps_imaginary_split)
+            };
             let is_factored_radical = eo.split_squares
                 && v.len() == 2
-                && ((v[0].is_number() && is_radical_factor(&v[1]))
-                    || (v[1].is_number() && is_radical_factor(&v[0])));
+                && (factored_pair(&v[0], &v[1]) || factored_pair(&v[1], &v[0]));
             if !is_factored_radical {
                 for child in v.iter_mut() {
                     changed |= calculate_functions_inner(child, eo);
