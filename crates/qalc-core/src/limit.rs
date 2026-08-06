@@ -111,7 +111,9 @@ fn minus_inf() -> MathStructure {
 /// Evaluate with `APPROXIMATION_EXACT`, like `LimitFunction::calculate`
 /// (which forces `eo2.approximation = APPROXIMATION_EXACT`).
 fn eo() -> EvaluationOptions {
-    EvaluationOptions::exact()
+    let mut o = EvaluationOptions::exact();
+    o.reduce_divisions = false;
+    o
 }
 
 fn ev(m: &mut MathStructure) {
