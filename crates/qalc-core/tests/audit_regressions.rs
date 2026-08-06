@@ -88,4 +88,31 @@ mod audit_regressions {
              at x = -5: got {got_re} + {got_im}i, want {want_re} + {want_im}i"
         );
     }
+
+    /// `k * sqrt(n)` and `sqrt(n) * k` are the same product and must evaluate
+    /// the same way. The `split_squares` recursion guard only recognised the
+    /// factored shape when the number came *first*, so `sqrt(3) * i` had its
+    /// `sqrt` numerified into `1.732...i` while `i * sqrt(3)` stayed symbolic.
+    #[test]
+    fn test_factored_radical_is_order_independent() {
+        let mut session = Session::new();
+        let left = session
+            .evaluate_line("i*sqrt(3)")
+            .expect("i*sqrt(3) evaluates");
+        let mut session = Session::new();
+        let right = session
+            .evaluate_line("sqrt(3)*i")
+            .expect("sqrt(3)*i evaluates");
+        assert_eq!(
+            left, right,
+            "the same product must not depend on factor order"
+        );
+
+        // The factored spelling itself is still the one `split_squares` wants.
+        let mut session = Session::new();
+        assert_eq!(
+            session.evaluate_line("sqrt(32)").expect("sqrt(32) evaluates"),
+            "4 * sqrt(2)"
+        );
+    }
 }

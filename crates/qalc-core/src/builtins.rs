@@ -922,10 +922,29 @@ fn calculate_functions_inner(
             }
         }
         MathStructure::Multiplication(v) => {
+            // `split_squares` turns `sqrt(20)` into `2 * sqrt(5)`; evaluating the
+            // surviving `sqrt` back into a float would undo that, so the
+            // recursion is skipped for exactly that shape.
+            //
+            // The test used to require the number to be the *first* factor,
+            // which the parser only guarantees for a literal. `i * sqrt(5)` and
+            // `sqrt(5) * i` are the same product, but only the first matched, so
+            // the second had its `sqrt` numerified and folded to `2.236...i`
+            // while the first stayed symbolic — and `asin(i * sqrt(5))` was
+            // stuck unevaluated because its argument never became a number.
+            // Match the factored shape regardless of which side the number is on.
+            let is_radical_factor = |m: &MathStructure| {
+                matches!(m, MathStructure::Function { id, args }
+                    if id.0 == crate::builtins::id::SQRT
+                        && args.len() == 1
+                        && args[0].number().is_some_and(|n| n
+                            .extract_square_factor()
+                            .is_some_and(|(k, rem)| k.is_one() && !rem.is_one())))
+            };
             let is_factored_radical = eo.split_squares
                 && v.len() == 2
-                && v[0].is_number()
-                && matches!(&v[1], MathStructure::Function { id, args } if id.0 == crate::builtins::id::SQRT && args.len() == 1 && args[0].number().is_some_and(|n| n.extract_square_factor().is_some_and(|(k, rem)| k.is_one() && !rem.is_one())));
+                && ((v[0].is_number() && is_radical_factor(&v[1]))
+                    || (v[1].is_number() && is_radical_factor(&v[0])));
             if !is_factored_radical {
                 for child in v.iter_mut() {
                     changed |= calculate_functions_inner(child, eo);
