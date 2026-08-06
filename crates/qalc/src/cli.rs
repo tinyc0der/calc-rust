@@ -40,7 +40,7 @@ pub fn is_terse() -> bool {
 pub fn new_session() -> Session {
     let mut session = Session::new();
     session.eval_options.approximation = qalc_core::ApproximationMode::Approximate;
-    session.print_options.use_unicode_signs = true;
+    session.print_options.use_unicode_signs = false;
     // libqalculate's `DEFAULT_PRECISION` is 8, but `qalc` itself raises the
     // precision to 10 before evaluating anything (`src/qalc.cc` calls
     // `setPrecision(10)`), so 10 — not 8 — is the reference program's
@@ -114,7 +114,7 @@ fn evaluate_target_conversion(
     match target {
         TargetConversionOption::Factors => {
             value = factor_result(&value, &session.eval_options);
-            print_options.use_unicode_signs = true;
+            print_options.use_unicode_signs = false;
         }
         TargetConversionOption::Fraction => {
             value = mixed_fraction(value);
@@ -127,7 +127,7 @@ fn evaluate_target_conversion(
         // Factored polynomial groups conventionally juxtapose, as in
         // `(x + 2)(x - 3)^3`, rather than carrying the generic product
         // printer's explicit sign between parenthesized factors.
-        TargetConversionOption::Factors => rendered.replace(") * (", ")(").replace(" - ", " − "),
+        TargetConversionOption::Factors => rendered.replace(") * (", ")("),
         TargetConversionOption::Fraction => rendered,
     })
 }
