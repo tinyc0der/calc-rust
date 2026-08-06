@@ -57,7 +57,7 @@ fn example_basic_05_principal_root_complex() {
 
 #[test]
 fn example_basic_06_ln_implicit() {
-    assert_eq!(eval("ln 25"), "3.2188758");
+    assert_eq!(eval("ln 25"), "3.218875825");
 }
 
 #[test]

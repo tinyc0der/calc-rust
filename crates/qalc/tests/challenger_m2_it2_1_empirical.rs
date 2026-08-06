@@ -52,7 +52,7 @@ fn test_concurrent_session_initialization() {
 #[test]
 fn test_implicit_function_parsing_variations() {
     assert_eq!(eval("sqrt 4"), "2");
-    assert_eq!(eval("ln 25"), "3.2188758");
+    assert_eq!(eval("ln 25"), "3.218875825");
     assert_eq!(eval("sqrt 0"), "0");
     assert_eq!(eval("sqrt 1"), "1");
     assert_eq!(eval("sqrt 100"), "10");
@@ -83,7 +83,7 @@ fn test_vector_distribution_stress() {
 
     // Multi-argument non-unary functions should NOT distribute
     assert_eq!(eval("min(1; 2)"), "1");
-    assert_eq!(eval("atan2(1; 1)"), "0.78539816");
+    assert_eq!(eval("atan2(1; 1)"), "0.7853981634");
 }
 
 // ===========================================================================
@@ -103,8 +103,8 @@ fn test_unit_expressions_stress() {
     assert_eq!(res_m, "100 m");
 
     // Disambiguation between units and function calls
-    assert_eq!(eval("psi(4)"), "1.2561177");
-    assert_ne!(eval("psi 4"), "1.2561177");
+    assert_eq!(eval("psi(4)"), "1.256117668");
+    assert_ne!(eval("psi 4"), "1.256117668");
 
     assert_eq!(eval("min(1; 2)"), "1");
     assert!(eval("min 1").contains("min") || eval("min 1").contains("s"));

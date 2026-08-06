@@ -52,11 +52,11 @@ fn test_m3_issue1_exact_logarithms_large_exponents() {
 #[test]
 fn test_m3_issue1_exact_logarithms_bases() {
     assert_eq!(eval("log(8; 4)"), "1.5");
-    assert_eq!(eval("log(4; 8)"), "0.66666667");
+    assert_eq!(eval("log(4; 8)"), "0.6666666667");
     assert_eq!(eval("log(1/8; 1/2)"), "3");
-    assert_eq!(eval("log(1/2; 1/8)"), "0.33333333");
+    assert_eq!(eval("log(1/2; 1/8)"), "0.3333333333");
     assert_eq!(eval("log(8; 1/2)"), "−3");
-    assert_eq!(eval("log(1/2; 8)"), "−0.33333333");
+    assert_eq!(eval("log(1/2; 8)"), "−0.3333333333");
     assert_eq!(eval("log(10; 10)"), "1");
     assert_eq!(eval("log(1; 10)"), "0");
 }
@@ -64,7 +64,7 @@ fn test_m3_issue1_exact_logarithms_bases() {
 #[test]
 fn test_m3_issue1_exact_logarithms_rational_fractions() {
     assert_eq!(eval("log(27/8; 3/2)"), "3");
-    assert_eq!(eval("log(3/2; 27/8)"), "0.33333333");
+    assert_eq!(eval("log(3/2; 27/8)"), "0.3333333333");
     assert_eq!(eval("log(27/8; 9/4)"), "1.5");
 }
 
@@ -105,10 +105,10 @@ fn test_m3_issue2_trig_pi_large_multiples() {
 fn test_m3_issue2_trig_pi_special_angles() {
     assert_eq!(eval("sin(pi / 6)"), "0.5");
     assert_eq!(eval("cos(pi / 3)"), "0.5");
-    assert_eq!(eval("sin(pi / 3)"), "0.86602540");
-    assert_eq!(eval("cos(pi / 6)"), "0.86602540");
-    assert_eq!(eval("sin(pi / 4)"), "0.70710678");
-    assert_eq!(eval("cos(pi / 4)"), "0.70710678");
+    assert_eq!(eval("sin(pi / 3)"), "0.8660254038");
+    assert_eq!(eval("cos(pi / 6)"), "0.8660254038");
+    assert_eq!(eval("sin(pi / 4)"), "0.7071067812");
+    assert_eq!(eval("cos(pi / 4)"), "0.7071067812");
     assert_eq!(eval("cot(pi / 4)"), "1");
     assert_eq!(eval("tan(3 pi / 4)"), "−1");
     assert_eq!(eval("tan(7 pi / 4)"), "−1");
@@ -155,7 +155,7 @@ fn test_m3_combined_expressions() {
 
 #[test]
 fn test_m3_issue3_hp_conversion() {
-    assert_eq!(eval("100 lbf * 60 mph to hp"), "15.999998 hp");
+    assert_eq!(eval("100 lbf * 60 mph to hp"), "15.99999752 hp");
 }
 
 #[test]

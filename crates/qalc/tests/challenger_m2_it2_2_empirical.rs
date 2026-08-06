@@ -38,11 +38,11 @@ fn test_parallel_session_initialization_deadlock_free() {
 #[test]
 fn test_unit_vs_function_disambiguation_full() {
     // psi: unit pressure (psi) vs function digamma(x)
-    assert_eq!(eval("psi(4)"), "1.2561177");
+    assert_eq!(eval("psi(4)"), "1.256117668");
     let res_psi_unit = eval("50 psi");
     assert!(res_psi_unit.contains("Pa") || res_psi_unit.contains("psi"));
     let res_psi_impl = eval("psi 4");
-    assert_ne!(res_psi_impl, "1.2561177");
+    assert_ne!(res_psi_impl, "1.256117668");
 
     // min: unit minute vs function min(a; b)
     assert_eq!(eval("min(1; 2)"), "1");
@@ -64,7 +64,7 @@ fn test_unit_vs_function_disambiguation_full() {
 #[test]
 fn test_implicit_parsing_and_nesting() {
     assert_eq!(eval("sqrt 4"), "2");
-    assert_eq!(eval("ln 25"), "3.2188758");
+    assert_eq!(eval("ln 25"), "3.218875825");
     assert_eq!(eval("sin 0"), "0");
     assert_eq!(eval("abs -5"), "5");
 
@@ -100,5 +100,5 @@ fn test_vector_distribution_edge_cases() {
 
     // Multi-parameter functions (must NOT distribute elementwise)
     assert_eq!(eval("min(1; 2)"), "1");
-    assert_eq!(eval("atan2(1; 1)"), "0.78539816");
+    assert_eq!(eval("atan2(1; 1)"), "0.7853981634");
 }

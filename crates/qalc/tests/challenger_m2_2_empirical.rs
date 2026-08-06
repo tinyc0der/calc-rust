@@ -21,15 +21,15 @@ fn test_unit_vs_function_psi() {
     println!("'50 psi' => {}", res_unit);
     assert!(res_unit.contains("Pa") || res_unit.contains("psi"), "50 psi should be pressure unit: {}", res_unit);
 
-    // psi(4) should evaluate to digamma(4) = 1.2561177 (function call)
+    // psi(4) should evaluate to digamma(4) = 1.256117668 (function call)
     let res_fn_call = eval("psi(4)");
     println!("'psi(4)' => {}", res_fn_call);
-    assert_eq!(res_fn_call, "1.2561177");
+    assert_eq!(res_fn_call, "1.256117668");
 
     // psi 4 - psi is a unit, so psi 4 should evaluate as 4 psi (27579.029 Pa), NOT psi(4)
     let res_implicit = eval("psi 4");
     println!("'psi 4' => {}", res_implicit);
-    assert_ne!(res_implicit, "1.2561177", "psi 4 must not evaluate as digamma(4)");
+    assert_ne!(res_implicit, "1.256117668", "psi 4 must not evaluate as digamma(4)");
     assert!(res_implicit.contains("Pa") || res_implicit.contains("psi"), "psi 4 should evaluate as unit 4 psi: {}", res_implicit);
 }
 
@@ -73,7 +73,7 @@ fn test_unit_vs_function_m() {
 fn test_implicit_functions_non_units() {
     // sqrt, ln, sin, abs are functions and NOT units
     assert_eq!(eval("sqrt 4"), "2");
-    assert_eq!(eval("ln 25"), "3.2188758");
+    assert_eq!(eval("ln 25"), "3.218875825");
     assert_eq!(eval("sin 0"), "0");
     assert_eq!(eval("abs -5"), "5");
 
@@ -110,7 +110,7 @@ fn test_vector_distribution_delimiters_and_structures() {
 
     // Multi-argument functions MUST NOT distribute elementwise over arguments
     assert_eq!(eval("min(1; 2)"), "1");
-    assert_eq!(eval("atan2(1; 1)"), "0.78539816");
+    assert_eq!(eval("atan2(1; 1)"), "0.7853981634");
 }
 
 #[test]

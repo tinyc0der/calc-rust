@@ -41,10 +41,15 @@ pub fn new_session() -> Session {
     let mut session = Session::new();
     session.eval_options.approximation = qalc_core::ApproximationMode::Approximate;
     session.print_options.use_unicode_signs = true;
-    // libqalculate's DEFAULT_PRECISION is 8. qalc-num keeps a wider default
-    // for library callers and its numeric golden corpus, while the CLI must
-    // use the reference program's user-facing default.
-    qalc_num::context::set_precision(8);
+    // libqalculate's `DEFAULT_PRECISION` is 8, but `qalc` itself raises the
+    // precision to 10 before evaluating anything (`src/qalc.cc` calls
+    // `setPrecision(10)`), so 10 — not 8 — is the reference program's
+    // user-facing default. Verified against qalc 5.5.2: `sqrt(2)` prints
+    // `1.414213562` and `1/3` prints `0.3333333333`, both 10 significant
+    // digits. The transcript runner already overrode this back to
+    // `DEFAULT_PRECISION`, which is why batch parity passed while the
+    // interactive and one-shot paths printed 8 digits.
+    qalc_num::context::set_precision(qalc_num::context::DEFAULT_PRECISION);
     qalc_num::context::set_interval_calculation(
         qalc_num::context::IntervalCalculation::VarianceFormula,
     );
@@ -312,7 +317,6 @@ pub fn run_transcript_file(path: &std::path::Path) -> std::io::Result<crate::bat
     let transcript = crate::batch::parse_transcript(&source);
     let mut session = new_session();
     session.print_options = qalc_core::eval::batch_print_options();
-    qalc_num::context::set_precision(qalc_num::context::DEFAULT_PRECISION);
     qalc_core::assumptions::set_sign(qalc_core::assumptions::Sign::Unknown);
     Ok(crate::batch::run_transcript(
         &path.display().to_string(),
