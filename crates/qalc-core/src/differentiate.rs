@@ -181,6 +181,31 @@ fn diff_function(
         return None;
     }
     let u = &args[0];
+
+    // `d/dx ln|v| = v'/v`.
+    //
+    // Taking this as a composition instead — `d/du ln(u) = 1/u` chained with
+    // `d/dv |v| = v/|v|` — multiplies out to `v' * v / |v|^2`, which is
+    // `v' / conj(v)`. For a real `v` that is the same number, but for a
+    // complex one it conjugates the result: the `int dx/(ax+b) = ln|ax+b|/a`
+    // rule's answer then differentiated back to the conjugate of the
+    // integrand whenever `ax + b` went complex, flipping the sign of the real
+    // part while leaving the imaginary part right.
+    //
+    // Differentiating `ln|v|` as `ln(v)` is what the antiderivative means: the
+    // two differ by a constant (`i*pi`) on any region where `arg v` is fixed,
+    // so the derivative is the same, and unlike the composed form it is
+    // correct on both domains.
+    if id == bid::LN && args.len() == 1 {
+        if let MathStructure::Function { id: inner_id, args: inner_args } = u {
+            if inner_id.0 == bid::ABS && inner_args.len() == 1 {
+                let v = &inner_args[0];
+                let dv = diff_depth(v, x, depth + 1)?;
+                return Some(mul(vec![dv, inv(v.clone())]));
+            }
+        }
+    }
+
     let du = diff_depth(u, x, depth + 1)?;
     // The chain-rule factor `f'(u)`; the caller multiplies by `u'`.
     let outer = match id {
