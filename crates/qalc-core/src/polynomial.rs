@@ -1133,6 +1133,21 @@ fn divisors(z: i64) -> Vec<i64> {
 /// factors. Only univariate rational-root and square-free factorization is
 /// ported; anything else is returned unchanged.
 pub fn factor(m: &MathStructure, eo: &EvaluationOptions) -> MathStructure {
+    // Prime factorization for plain integers: `factor(60)` -> `[2 2 3 5]`.
+    // The polynomial factorizer below bails on numbers (`find_x_var` is
+    // `None`), so handle them here before that. This mirrors the reference
+    // where `factor(60)` is a number-theory builtin, not a polynomial one.
+    if let MathStructure::Number(n) = m {
+        let mut facs = Vec::new();
+        if n.factorize(&mut facs) {
+            return MathStructure::Vector(
+                facs.into_iter()
+                    .map(MathStructure::Number)
+                    .collect(),
+            );
+        }
+        return m.clone();
+    }
     // A perfect-square trinomial needs no variable of its own and may have
     // two, so it is tried before the univariate machinery:
     // `x + 2sqrt(x)sqrt(y) + y` is `(sqrt(x) + sqrt(y))^2`.

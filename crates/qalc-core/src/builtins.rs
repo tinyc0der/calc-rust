@@ -1149,7 +1149,7 @@ pub fn function_id_for_name(name: &str) -> Option<FunctionId> {
         "gcd" => id::GCD,
         "GCD" | "gcf" | "GCF" | "hcf" | "HCF" => id::GCD,
         "lcm" => id::LCM,
-        "isprime" => id::ISPRIME,
+        "isprime" | "isPrime" | "is_prime" => id::ISPRIME,
         "nextprime" => id::NEXTPRIME,
         "prevprime" => id::PREVPRIME,
         "nthprime" => id::NTHPRIME,
