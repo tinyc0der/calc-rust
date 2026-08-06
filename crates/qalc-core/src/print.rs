@@ -509,7 +509,9 @@ fn split_negation(m: &MathStructure) -> (bool, MathStructure) {
 /// choosing juxtaposition vs. an explicit `*` per
 /// `neededMultiplicationSign`.
 fn print_multiplication(factors: &[MathStructure], po: &PrintOptions, depth: usize) -> String {
-    // A leading -1 is a negation, not a factor: `-x`, not `-1x`.
+    // A leading -1 is a negation, not a factor: `-x`, not `-1x`. Similarly,
+    // a leading 1 is omitted: `1 * x` → `x`, matching `qalc -t
+    // "integrate(x*e^x)" → `2.718… * x` not `1 * 2.718… * x`.
     if factors.len() >= 2 {
         if let MathStructure::Number(n) = &factors[0] {
             if n.is_minus_one() {
@@ -520,6 +522,10 @@ fn print_multiplication(factors: &[MathStructure], po: &PrintOptions, depth: usi
                     print_multiplication(&rest, po, depth)
                 };
                 return format!("-{inner}");
+            }
+            if n.is_one() {
+                let rest: Vec<MathStructure> = factors[1..].to_vec();
+                return print_multiplication(&rest, po, depth);
             }
         }
     }

@@ -2204,15 +2204,21 @@ pub fn isolate_x(m: &mut MathStructure, xvar: &MathStructure) -> bool {
     true
 }
 
-/// Vector of solutions, matching `qalc -t` (`solve(x^2-1=0,x)` → `[1  -1]`,
-/// `solve(x^2+2x+1=0,x)` → `-1`). The earlier `x = a or x = b` form was
-/// kept for transcript compatibility but diverges from the reference terse
-/// output.
-pub fn solutions_to_structure(_xvar: &MathStructure, sols: Vec<MathStructure>) -> MathStructure {
-    if sols.len() == 1 {
-        sols.into_iter().next().expect("len 1")
+/// `x = a or x = b or ...` (a `LogicalOr` of comparisons), matching the
+/// reference output shape.
+pub fn solutions_to_structure(xvar: &MathStructure, sols: Vec<MathStructure>) -> MathStructure {
+    let mut cmps: Vec<MathStructure> = Vec::new();
+    for s in sols {
+        cmps.push(MathStructure::Comparison {
+            left: Box::new(xvar.clone()),
+            op: ComparisonType::Equals,
+            right: Box::new(s),
+        });
+    }
+    if cmps.len() == 1 {
+        cmps.into_iter().next().expect("len 1")
     } else {
-        MathStructure::Vector(sols)
+        MathStructure::LogicalOr(cmps)
     }
 }
 
