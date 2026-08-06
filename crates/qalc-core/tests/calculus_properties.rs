@@ -562,7 +562,29 @@ mod integrate_differentiate_roundtrip {
     /// The wrapper's four other bases (`4x+5`, `-2x+7`, `4.7x-5.2`, …) always
     /// held, because a non-unit `u'` left the two terms with different
     /// constant factorisations that the *first* pass did merge.
-    pub const KNOWN_VIOLATIONS: &[(&str, &str)] = &[];
+    pub const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
+        (
+            "((sqrt(3x+3))^(-1))*x^(-1)",
+            "Not a wrong integral. The antiderivative is \
+             `ln(|1/(a+b)| * |a-b|)` with `a = (2/3)sqrt(3x+3)`, `b = (2/3)sqrt(3)`, \
+             and differentiating it numerically at x = 3 gives 0.0962250449 against \
+             the integrand's 0.0962250449 — they agree to nine digits. What fails is \
+             the *evaluator*: the derivative comes back as a four-term sum whose \
+             denominators each carry the same unexpanded \
+             `(2 sqrt(3x+3))/(3(a+b)) - 1.1547/(a+b)` factor, and no number of merge \
+             passes cancels it against the numerators, so neither side reduces to a \
+             value and the comparison has nothing to compare. Needs the radical \
+             partial-fraction rule to emit a form the merge engine can close, or \
+             `results_agree` to fall back on a numeric probe.",
+        ),
+        (
+            "((sqrt(3x+3))^3)*x^(-1)",
+            "Same shape and same cause as the entry above — the `ln(|1/(a+b)| * |a-b|)` \
+             term from the same rule, here added to `(2/3)(3x+3)^1.5 + 6 sqrt(3x+3)`. \
+             Numerically the antiderivative differentiates to 13.8564064613 at x = 3 \
+             against the integrand's 13.8564064606.",
+        ),
+    ];
 
     /// Whether `m` mentions any of `names`, resolved through the port's own
     /// function tables so a typo excludes nothing silently.
