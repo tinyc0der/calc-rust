@@ -526,7 +526,14 @@ fn antiderivative_of(id: u32, u: &MathStructure) -> Option<MathStructure> {
         bid::TANH => func(bid::LN, vec![f(bid::COSH)]),
         // `int sqrt(u) du = (2/3) u^(3/2)`
         bid::SQRT => mul(vec![ratio(2, 3), pow(u.clone(), ratio(3, 2))]),
-        bid::CBRT => mul(vec![ratio(3, 4), pow(u.clone(), ratio(4, 3))]),
+        // `int cbrt(u) du = (3/4) u^(4/3)`, spelled `(3/4) u cbrt(u)` so the
+        // answer stays on the *real* cube root the integrand named. `u^(4/3)`
+        // is the principal branch, which for `u < 0` is complex: the two agree
+        // for positive `u` and differ by a rotation otherwise, so the
+        // fractional-power spelling made `int 3 cbrt(x) x dx` come back
+        // `27.48 + 47.60i` at `x = -5` where the real answer is `-54.96`.
+        // Same reason `mentions_real_radical` exists a few hundred lines up.
+        bid::CBRT => mul(vec![ratio(3, 4), u.clone(), f(bid::CBRT)]),
         // `int asin u du = u asin u + sqrt(1 - u^2)`
         bid::ASIN => add(vec![
             mul(vec![u.clone(), f(bid::ASIN)]),

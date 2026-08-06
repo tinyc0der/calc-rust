@@ -182,4 +182,63 @@ mod audit_regressions {
             "x / |x|"
         );
     }
+
+    /// `int cbrt(u) du` must stay on the real cube root.
+    ///
+    /// The rule was spelled `(3/4) u^(4/3)`, and `u^(4/3)` is the *principal*
+    /// branch — complex for `u < 0` — while `cbrt(u)` is the real one. The
+    /// antiderivative therefore denoted a different function than the integrand
+    /// on the negative reals, and mixing the two spellings in one answer left a
+    /// residue that never cancelled: `int 3 cbrt(x) x dx` came back
+    /// `27.48 + 47.60i` at `x = -5` where the real value is `-54.96`.
+    #[test]
+    fn test_integrate_cbrt_stays_on_real_branch() {
+        use qalc_core::options::ApproximationMode;
+        use qalc_core::{parser, EvaluationOptions, MathStructure};
+
+        let session = Session::new();
+        let x = MathStructure::symbolic("x");
+        let eo = EvaluationOptions::default();
+        let approx = EvaluationOptions {
+            approximation: ApproximationMode::Approximate,
+            ..EvaluationOptions::default()
+        };
+
+        for expr in ["cbrt(x)", "x/cbrt(x)^2", "cbrt(x)*x"] {
+            let mut f = parser::parse_with(expr, &session.parse_options, &session)
+                .expect("integrand parses");
+            qalc_core::eval::evaluate_calculated_with(&mut f, &eo);
+
+            let mut anti = qalc_core::integrate::integrate(&f, &x)
+                .unwrap_or_else(|| panic!("{expr}: a rule applies"));
+            qalc_core::eval::evaluate_calculated_with(&mut anti, &eo);
+            let mut back = qalc_core::differentiate::differentiate(&anti, &x)
+                .unwrap_or_else(|| panic!("{expr}: the antiderivative differentiates"));
+            qalc_core::eval::evaluate_calculated_with(&mut back, &eo);
+
+            let value_at = |m: &MathStructure, at: i64| -> (f64, f64) {
+                let mut v = m.clone();
+                qalc_core::solve::replace(&mut v, &x, &MathStructure::from_i64(at));
+                qalc_core::eval::evaluate_calculated_with(&mut v, &approx);
+                match &v {
+                    MathStructure::Number(n) => (
+                        n.real_part().float_value(),
+                        n.imaginary_part().float_value(),
+                    ),
+                    other => panic!("{expr}: expected a number, got {other:?}"),
+                }
+            };
+
+            // `x = -5` is the point the principal branch got wrong.
+            for at in [3i64, -5] {
+                let (got_re, got_im) = value_at(&back, at);
+                let (want_re, want_im) = value_at(&f, at);
+                assert!(
+                    (got_re - want_re).abs() < 1e-6 && (got_im - want_im).abs() < 1e-6,
+                    "{expr}: d/dx of the antiderivative must match the integrand at \
+                     x = {at}: got {got_re} + {got_im}i, want {want_re} + {want_im}i"
+                );
+            }
+        }
+    }
 }
