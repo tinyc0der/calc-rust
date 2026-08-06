@@ -258,8 +258,107 @@ pub fn evaluate_calculated_with(m: &mut MathStructure, eo: &EvaluationOptions) {
             }
         }
     }
+    // Exact `ln(e)` identities, mirroring the C++ `ln(e^x) -> x` and `ln(e) -> 1`.
+    // These fire before numerification so `ln(e)` stays exact `1` rather than
+    // approximate `ln(2.718...) -> 1.000…`.
+    eval_ln_exact(m);
+
+    // `KnownVariable` numerification (`pi`, `e`, `phi`): the C++ keeps them
+    // symbolic through the exact pass (so `sin(pi/2)` collapses to exact `1`)
+    // and numerifies the survivors on the second pass — but only when the
+    // result is not still symbolic (e.g. `e^x` must stay `e^x`, not
+    // `2.718^x`). With pi installed as a variable this never happens —
+    // `sin(pi/2)` would see numeric `1.570…` and return approximate `1.000…`
+    // — and without it lone `pi` would stay symbolic. Do it here, after the
+    // exact identities have had their chance.
+    if eo.approximation != crate::options::ApproximationMode::Exact {
+        if numerify_known_constants(m) {
+            for _ in 0..MAX_EVAL_PASSES {
+                let functions_changed = builtins::calculate_functions_eo(m, eo);
+                let merged = m.calculatesub(eo);
+                if !functions_changed && !merged {
+                    break;
+                }
+            }
+        }
+    }
     // Canonical ordering, as the C++ does in evalSort before printing.
     crate::sort::sort(m);
+}
+
+fn numerify_known_constants(m: &mut MathStructure) -> bool {
+    let mut changed = false;
+    match m {
+        MathStructure::Symbolic(s) => {
+            let repl = match s.as_str() {
+                "pi" => {
+                    let mut n = qalc_num::Number::new();
+                    n.pi();
+                    Some(n)
+                }
+                "e" => {
+                    let mut n = qalc_num::Number::new();
+                    n.e();
+                    Some(n)
+                }
+                "phi" => {
+                    let mut n = qalc_num::Number::from_i64(5);
+                    n.sqrt();
+                    n.add_i64(1);
+                    n.divide_i64(2);
+                    Some(n)
+                }
+                _ => None,
+            };
+            if let Some(n) = repl {
+                *m = MathStructure::Number(n);
+                changed = true;
+            }
+        }
+        _ => {
+            for i in 0..m.size() {
+                if let Some(child) = m.get_mut(i) {
+                    if numerify_known_constants(child) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    changed
+}
+
+fn eval_ln_exact(m: &mut MathStructure) -> bool {
+    let mut changed = false;
+    // Recurse first.
+    for i in 0..m.size() {
+        if let Some(child) = m.get_mut(i) {
+            if eval_ln_exact(child) {
+                changed = true;
+            }
+        }
+    }
+    // Check for ln(e) and ln(e^n) after children are processed.
+    if let MathStructure::Function { id, args } = m {
+        if id.0 == crate::builtins::id::LN && args.len() == 1 {
+            match &args[0] {
+                MathStructure::Symbolic(s) if s == "e" => {
+                    *m = MathStructure::Number(qalc_num::Number::from_i64(1));
+                    return true;
+                }
+                MathStructure::Power { base, exponent } => {
+                    if let MathStructure::Symbolic(s) = base.as_ref() {
+                        if s == "e" {
+                            *m = (**exponent).clone();
+                            return true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    changed
 }
 
 enum RangeOperation {

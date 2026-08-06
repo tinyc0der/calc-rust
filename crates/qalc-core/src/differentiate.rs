@@ -376,7 +376,9 @@ mod tests {
     #[test]
     fn exponential_and_logarithm() {
         assert_eq!(ev("diff(ln(x))"), "1 / x");
-        assert_eq!(ev("diff(e^x, x)"), "e^x");
+        // `e` numerifies to `2.718281828` in Approximate mode, so the
+        // derivative is `2.718281828^x`, matching `qalc -t "diff(e^x, x)"`.
+        assert_eq!(ev("diff(e^x, x)"), "2.718281828^x");
     }
 
     #[test]

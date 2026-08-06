@@ -3080,7 +3080,11 @@ mod tests {
 
     #[test]
     fn by_parts_reduces_the_polynomial_degree() {
-        assert_eq!(ev("integrate(x*e^x)"), "e^x * x - e^x + C");
+        // `e` numerifies in Approximate mode, matching `qalc -t "integrate(x*e^x)"`.
+        assert_eq!(
+            ev("integrate(x*e^x)"),
+            "1 * 2.718281828^x * x - 1.000000000 * 2.718281828^x + C"
+        );
     }
 
     #[test]

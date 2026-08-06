@@ -52,29 +52,17 @@ impl Session {
 
     /// Constants that `Calculator::addBuiltinVariables` defines.
     ///
-    /// Only the imaginary unit and the transcendental constants that are
-    /// immediate numeric values under `ApproximationMode::Approximate`.
-    /// The C++ keeps `pi`/`e` as `KnownVariable`s that stay symbolic under
-    /// exact evaluation and collapse only on the second (approximate) pass;
-    /// this port has a single pass, so the CLI's default `Approximate` mode
-    /// must see them as numbers — otherwise `qalc -t pi` stays symbolic
-    /// while the reference prints `3.141592654`.
+    /// Only the imaginary unit is installed eagerly. `pi`, `e` and `phi` are
+    /// `KnownVariable`s in the C++ that stay symbolic during the exact pass
+    /// and collapse to numbers only on the second (approximate) pass. This
+    /// port has a single pass, so they are kept symbolic through the main
+    /// evaluation (which lets `sin(pi/2)` stay exact `1`) and are numerified
+    /// afterwards when `ApproximationMode != Exact` — otherwise `qalc -t pi`
+    /// would stay symbolic while the reference prints `3.141592654`.
     fn install_builtin_constants(&mut self) {
         let mut i = qalc_num::Number::new();
         i.set_imaginary_part(&qalc_num::Number::from_i64(1));
         self.set_variable("i", MathStructure::Number(i));
-        let mut pi = qalc_num::Number::new();
-        pi.pi();
-        self.set_variable("pi", MathStructure::Number(pi));
-        let mut e = qalc_num::Number::new();
-        e.e();
-        self.set_variable("e", MathStructure::Number(e));
-        // phi = (1 + sqrt(5)) / 2
-        let mut phi = qalc_num::Number::from_i64(5);
-        phi.sqrt();
-        phi.add_i64(1);
-        phi.divide_i64(2);
-        self.set_variable("phi", MathStructure::Number(phi));
     }
 
     /// Define or replace a variable.
